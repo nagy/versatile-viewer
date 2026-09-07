@@ -34,10 +34,13 @@ const CHUNK: usize = 256 * 1024;
 /// Minimum time between progressive preview uploads, so the main thread is
 /// not flooded with full-size RGBA buffers.
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(100);
-/// VV_SLOW_STREAM=1: dribble this many bytes, pause, then continue normally —
-/// makes progressive decoding visible to the eye in debug runs.
-const SLOW_FIRST_CHUNK: usize = 4 * 1024;
+/// VV_SLOW_STREAM=1: dribble chunks of this size with a pause between them
+/// until the first preview renders (or `SLOW_DRIBBLE_MAX` bytes have been
+/// dribbled), then continue normally — makes progressive decoding visible
+/// to the eye in debug runs.
+const SLOW_CHUNK: usize = 4 * 1024;
 const SLOW_PAUSE: Duration = Duration::from_secs(1);
+const SLOW_DRIBBLE_MAX: usize = 256 * 1024;
 
 /// Messages from the loader worker to the main thread.
 pub enum LoaderMsg {
@@ -113,18 +116,23 @@ fn stream(path: &Path, cancel: &AtomicBool, tx: &Sender<LoaderMsg>) -> Result<()
 
     let mut file = std::fs::File::open(path).with_context(|| format!("failed to open {path:?}"))?;
     let slow = std::env::var_os("VV_SLOW_STREAM").is_some();
-    let mut chunk_size = if slow { SLOW_FIRST_CHUNK } else { CHUNK };
     let mut buf = vec![0u8; CHUNK];
     // `try_init` consumes the uninit image; keep it in an Option so the
     // NeedMoreData branch can put it back.
     let mut uninit = Some(JxlImage::builder().build_uninit());
     let mut image: Option<JxlImage> = None;
     let mut last_preview: Option<Instant> = None;
+    let mut dribbled = 0usize;
 
     loop {
         if cancel.load(Ordering::Relaxed) {
             return Ok(());
         }
+        // Slow mode: keep dribbling small chunks (with pauses) until the
+        // first preview actually rendered; a single dribble would usually
+        // only carry the header and show nothing.
+        let dribbling = slow && last_preview.is_none() && dribbled < SLOW_DRIBBLE_MAX;
+        let chunk_size = if dribbling { SLOW_CHUNK } else { CHUNK };
         let n = read_chunk(&mut file, &mut buf[..chunk_size])?;
         if n == 0 {
             break; // EOF
@@ -173,15 +181,15 @@ fn stream(path: &Path, cancel: &AtomicBool, tx: &Sender<LoaderMsg>) -> Result<()
             }
         }
 
-        if slow {
-            // Cancel-aware pause so ESC never sticks for a full second.
+        if dribbling {
+            dribbled += n;
+            // Cancel-aware pause so ESC never sticks for a full pause.
             for _ in 0..(SLOW_PAUSE.as_millis() / 50) {
                 if cancel.load(Ordering::Relaxed) {
                     return Ok(());
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
-            chunk_size = CHUNK; // dribbled once; continue normally
         }
     }
 

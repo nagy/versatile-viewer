@@ -32,7 +32,10 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
    ~150 ms) toward the target scale.
 6. [x] Zoom anchored at the window center (free zoom eases while keeping
    the image point under the window center fixed). Wheel zoom still open.
-7. jxl-oxide progressive decoding (stream bytes, render preview early).
+7. [x] jxl-oxide progressive decoding (stream bytes, render preview
+   early; image view only — grid thumbs stay full-decode).
+   `VV_SLOW_STREAM=1` dribbles 4 KB chunks with 1 s pauses until the
+   first preview renders, for eyeballing the refinement.
 8. [x] Directory browsing: thumbnail grid fills the window (square
    center-crop thumbs, dynamic layout, white selection border, background
    decode thread); Enter opens, ESC returns. Still open: nsxiv-style
