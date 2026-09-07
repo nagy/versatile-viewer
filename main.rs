@@ -142,6 +142,7 @@ fn main() -> Result<()> {
     let img_w = decoded.width as f32;
     let img_h = decoded.height as f32;
     let mut zoom = ZoomMode::FitDown;
+    let mut pan = Vector2::ZERO;
     while !rl.window_should_close() {
         // Keyboard shortcuts. Capital W / capital E arrive as W/E + shift.
         let shift = rl.is_key_down(KeyboardKey::KEY_LEFT_SHIFT)
@@ -160,12 +161,33 @@ fn main() -> Result<()> {
             };
         }
 
+        // Vim-style panning (h/j/k/l + arrow keys); held keys scroll
+        // continuously. Input read before begin_drawing borrows rl mutably.
+        let win_w = rl.get_screen_width() as f32;
+        let win_h = rl.get_screen_height() as f32;
+        let step = win_w.max(win_h) * 0.03;
+        let pan_left = rl.is_key_down(KeyboardKey::KEY_H) || rl.is_key_down(KeyboardKey::KEY_LEFT);
+        let pan_right =
+            rl.is_key_down(KeyboardKey::KEY_L) || rl.is_key_down(KeyboardKey::KEY_RIGHT);
+        let pan_up = rl.is_key_down(KeyboardKey::KEY_K) || rl.is_key_down(KeyboardKey::KEY_UP);
+        let pan_down = rl.is_key_down(KeyboardKey::KEY_J) || rl.is_key_down(KeyboardKey::KEY_DOWN);
+        if pan_left {
+            pan.x += step;
+        }
+        if pan_right {
+            pan.x -= step;
+        }
+        if pan_up {
+            pan.y += step;
+        }
+        if pan_down {
+            pan.y -= step;
+        }
+
         let mut d = rl.begin_drawing(&thread);
         d.clear_background(Color::BLACK);
 
-        // Fit to the window, aspect preserved, centered.
-        let win_w = d.get_screen_width() as f32;
-        let win_h = d.get_screen_height() as f32;
+        // Fit to the window, aspect preserved.
         let scale = match zoom {
             ZoomMode::FitDown => (win_w / img_w).min(win_h / img_h).min(1.0),
             ZoomMode::FitAll => (win_w / img_w).min(win_h / img_h),
@@ -174,6 +196,19 @@ fn main() -> Result<()> {
         };
         let dw = img_w * scale;
         let dh = img_h * scale;
+        // Clamp: never leave a gap between image edge and window edge; a
+        // fully visible image stays centered.
+        pan.x = if dw > win_w {
+            pan.x.clamp(win_w - dw, 0.0)
+        } else {
+            0.0
+        };
+        pan.y = if dh > win_h {
+            pan.y.clamp(win_h - dh, 0.0)
+        } else {
+            0.0
+        };
+
         let src = Rectangle {
             x: 0.0,
             y: 0.0,
@@ -181,8 +216,8 @@ fn main() -> Result<()> {
             height: img_h,
         };
         let dest = Rectangle {
-            x: (win_w - dw) / 2.0,
-            y: (win_h - dh) / 2.0,
+            x: (win_w - dw) / 2.0 + pan.x,
+            y: (win_h - dh) / 2.0 + pan.y,
             width: dw,
             height: dh,
         };
