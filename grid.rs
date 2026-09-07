@@ -209,47 +209,59 @@ impl Grid {
         if self.entries.is_empty() {
             return GridAction::None;
         }
-        // Drain the character queue. Some input setups (IMEs, unusual X11
-        // input methods) deliver Enter as a character event ('\n'/'\r')
-        // instead of (or in addition to) a key-press event; accept both.
-        // Grid mode otherwise never drains the queue, so unmatched chars
-        // would just pile up.
-        let mut enter_char = false;
+        // Drain the raw key queue instead of is_key_pressed(). A press whose
+        // release lands within the same frame is invisible to is_key_pressed
+        // (raylib snapshots current->previous key state once per frame, so a
+        // press+release pair between two polls nets out to 0->0), which is
+        // easy to hit here: frames stall on full-res texture uploads, and a
+        // crisp Enter tap fits inside one. GetKeyPressed()/GetCharPressed()
+        // queue every press event during the poll, so nothing is lost.
+        let mut enter = false;
+        let mut quit = false;
+        let mut left = false;
+        let mut right = false;
+        let mut up = false;
+        let mut down = false;
+        while let Some(k) = rl.get_key_pressed() {
+            match k {
+                KeyboardKey::KEY_ENTER | KeyboardKey::KEY_KP_ENTER => enter = true,
+                KeyboardKey::KEY_Q | KeyboardKey::KEY_ESCAPE => quit = true,
+                KeyboardKey::KEY_H | KeyboardKey::KEY_LEFT => left = true,
+                KeyboardKey::KEY_L | KeyboardKey::KEY_RIGHT => right = true,
+                KeyboardKey::KEY_K | KeyboardKey::KEY_UP => up = true,
+                KeyboardKey::KEY_J | KeyboardKey::KEY_DOWN => down = true,
+                _ => {}
+            }
+        }
+        // Some input setups (IMEs, unusual X11 input methods) deliver Enter
+        // as a character event ('\n'/'\r') instead of (or in addition to) a
+        // key-press event; accept both. The queue is drained every frame, so
+        // unmatched chars never pile up.
         while let Some(c) = rl.get_char_pressed() {
             if c == '\n' || c == '\r' {
-                enter_char = true;
+                enter = true;
             }
         }
         let (cols, ..) = grid_layout(self.entries.len(), win_w, win_h);
         let n = self.entries.len();
-        let sel = self.selected;
-        if rl.is_key_pressed(KeyboardKey::KEY_H) || rl.is_key_pressed(KeyboardKey::KEY_LEFT) {
-            if sel % cols != 0 {
-                self.selected -= 1;
-            }
+        let mut sel = self.selected;
+        if left && sel % cols != 0 {
+            sel -= 1;
         }
-        if rl.is_key_pressed(KeyboardKey::KEY_L) || rl.is_key_pressed(KeyboardKey::KEY_RIGHT) {
-            if sel % cols != cols - 1 && sel + 1 < n {
-                self.selected += 1;
-            }
+        if right && sel % cols != cols - 1 && sel + 1 < n {
+            sel += 1;
         }
-        if rl.is_key_pressed(KeyboardKey::KEY_K) || rl.is_key_pressed(KeyboardKey::KEY_UP) {
-            if sel >= cols {
-                self.selected -= cols;
-            }
+        if up && sel >= cols {
+            sel -= cols;
         }
-        if rl.is_key_pressed(KeyboardKey::KEY_J) || rl.is_key_pressed(KeyboardKey::KEY_DOWN) {
-            if sel + cols < n {
-                self.selected += cols;
-            }
+        if down && sel + cols < n {
+            sel += cols;
         }
-        if enter_char
-            || rl.is_key_pressed(KeyboardKey::KEY_ENTER)
-            || rl.is_key_pressed(KeyboardKey::KEY_KP_ENTER)
-        {
+        self.selected = sel;
+        if enter {
             return GridAction::Open(self.selected);
         }
-        if rl.is_key_pressed(KeyboardKey::KEY_Q) || rl.is_key_pressed(KeyboardKey::KEY_ESCAPE) {
+        if quit {
             return GridAction::Quit;
         }
         GridAction::None

@@ -276,6 +276,12 @@ fn main() -> Result<()> {
                     prev_down[k as usize] = down;
                 }
             }
+            // Frames longer than a key tap can swallow IsKeyPressed edge
+            // detection entirely (press+release between two polls); log them.
+            let ft = rl.get_frame_time();
+            if ft > 0.1 {
+                eprintln!("vv: slow frame {ft:.0} ms");
+            }
         }
         let win_w = rl.get_screen_width() as f32;
         let win_h = rl.get_screen_height() as f32;
