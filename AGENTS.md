@@ -21,8 +21,9 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
 
 ## Milestones (step by step)
 
-1. [x] Single image window: JXL + PNG + JPEG, fit-to-image, ESC/q.
-2. Zoom/pan, window resize, background checkerboard/letterbox.
-3. jxl-oxide progressive decoding (stream bytes, render preview early).
-4. Directory browsing (nsxiv-style left/right).
-5. Video playback (mpv inspiration; backend TBD).
+1. [x] Single image window: JXL + PNG + JPEG, ESC/q.
+2. [x] Fit to window (aspect preserved, centered, no upscale, refits on resize).
+3. Zoom/pan, background color.
+4. jxl-oxide progressive decoding (stream bytes, render preview early).
+5. Directory browsing (nsxiv-style left/right).
+6. Video playback (mpv inspiration; backend TBD).

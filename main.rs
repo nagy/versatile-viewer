@@ -100,6 +100,7 @@ fn main() -> Result<()> {
     let (mut rl, thread) = raylib::init()
         .size(decoded.width as i32, decoded.height as i32)
         .title(&format!("versatile-viewer — {}", path.display()))
+        .resizable()
         .build();
 
     // Wrap the raw RGBA8 buffer in a raylib Image without re-encoding it.
@@ -119,10 +120,32 @@ fn main() -> Result<()> {
     drop(decoded.rgba);
 
     rl.set_target_fps(60);
+    let img_w = decoded.width as f32;
+    let img_h = decoded.height as f32;
     while !rl.window_should_close() {
         let mut d = rl.begin_drawing(&thread);
         d.clear_background(Color::BLACK);
-        d.draw_texture(&texture, 0, 0, Color::WHITE);
+
+        // Fit to window, aspect preserved, centered; never larger than the
+        // window in either dimension, and never upscaled.
+        let win_w = d.get_screen_width() as f32;
+        let win_h = d.get_screen_height() as f32;
+        let scale = (win_w / img_w).min(win_h / img_h).min(1.0);
+        let dw = img_w * scale;
+        let dh = img_h * scale;
+        let src = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: img_w,
+            height: img_h,
+        };
+        let dest = Rectangle {
+            x: (win_w - dw) / 2.0,
+            y: (win_h - dh) / 2.0,
+            width: dw,
+            height: dh,
+        };
+        d.draw_texture_pro(&texture, src, dest, Vector2::ZERO, 0.0, Color::WHITE);
     }
     Ok(())
 }
