@@ -245,6 +245,8 @@ fn main() -> Result<()> {
     let mut quit = false;
     // VV_DEBUG=1: trace grid open/return events to stderr.
     let debug = std::env::var_os("VV_DEBUG").is_some();
+    // Previous per-key down state for the VV_DEBUG event trace.
+    let mut prev_down = [false; 349];
 
     rl.set_target_fps(60);
     let mut zoom = ZoomMode::FitDown;
@@ -255,6 +257,26 @@ fn main() -> Result<()> {
     let mut view_scale: Option<f32> = None;
 
     while !rl.window_should_close() && !quit {
+        // VV_DEBUG: trace every key raylib sees (keycode per raylib/GLFW:
+        // 257=Enter, 335=KpEnter, 256=Esc, 262/263=Right/Left,
+        // 264/265=Up/Down, 72/74/75/76=h/j/k/l).
+        if debug {
+            for k in 32u32..=348 {
+                let (down, pressed) = unsafe {
+                    (
+                        raylib::ffi::IsKeyDown(k as i32),
+                        raylib::ffi::IsKeyPressed(k as i32),
+                    )
+                };
+                if pressed {
+                    eprintln!("vv: PRESSED key {k}");
+                }
+                if down != prev_down[k as usize] {
+                    eprintln!("vv: key {k} {}", if down { "DOWN" } else { "UP" });
+                    prev_down[k as usize] = down;
+                }
+            }
+        }
         let win_w = rl.get_screen_width() as f32;
         let win_h = rl.get_screen_height() as f32;
 
