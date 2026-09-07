@@ -158,6 +158,29 @@ fn upload_rgba(
     Ok(texture)
 }
 
+/// Show a new RGBA8 frame in image view. When a texture with the same
+/// dimensions already exists (progressive previews of the same image), its
+/// pixels are updated in place instead of reallocating a GPU texture.
+fn show_frame(
+    rl: &mut RaylibHandle,
+    thread: &RaylibThread,
+    view_tex: &mut Option<Texture2D>,
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<()> {
+    match view_tex {
+        Some(tex) if tex.width() == width as i32 && tex.height() == height as i32 => {
+            use raylib::texture::RaylibTexture2D;
+            tex.update_texture(rgba)?;
+        }
+        _ => {
+            *view_tex = Some(upload_rgba(rl, thread, rgba, width, height)?);
+        }
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let arg = env::args()
         .nth(1)
@@ -311,9 +334,8 @@ fn main() -> Result<()> {
                             width,
                             height,
                         } => {
-                            // Progressively better render of the same image;
-                            // replaces the previous texture.
-                            view_tex = Some(upload_rgba(&mut rl, &thread, &rgba, width, height)?);
+                            // Progressively better render of the same image.
+                            show_frame(&mut rl, &thread, &mut view_tex, &rgba, width, height)?;
                         }
                         LoaderMsg::Done {
                             rgba,
@@ -329,7 +351,7 @@ fn main() -> Result<()> {
                                 target_pan = Vector2::ZERO;
                                 view_scale = Some((win_w / img_w).min(win_h / img_h).min(1.0));
                             }
-                            view_tex = Some(upload_rgba(&mut rl, &thread, &rgba, width, height)?);
+                            show_frame(&mut rl, &thread, &mut view_tex, &rgba, width, height)?;
                             view_loading = false;
                         }
                         LoaderMsg::Failed(err) => {

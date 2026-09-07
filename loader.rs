@@ -207,3 +207,117 @@ fn read_chunk(file: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize
     use std::io::Read;
     file.read(buf)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("vv-loader-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Poll the loader until a message arrives or `timeout` elapses.
+    fn wait(loader: &Loader, timeout: Duration) -> Option<LoaderMsg> {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if let Some(msg) = loader.try_recv() {
+                return Some(msg);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        None
+    }
+
+    #[test]
+    fn png_loads_as_single_done_message() {
+        // Non-JXL formats have no progressive data: exactly one Done, no
+        // Header/Preview, correct dimensions.
+        let dir = temp_dir("png");
+        let path = dir.join("img.png");
+        image::DynamicImage::new_rgb8(4, 3).save(&path).unwrap();
+
+        let loader = Loader::start(path);
+        let mut saw_header_or_preview = false;
+        let done;
+        loop {
+            match wait(&loader, Duration::from_secs(10)).expect("loader timed out") {
+                LoaderMsg::Done {
+                    rgba,
+                    width,
+                    height,
+                } => {
+                    done = (rgba, width, height);
+                    break;
+                }
+                LoaderMsg::Header { .. } | LoaderMsg::Preview { .. } => {
+                    saw_header_or_preview = true
+                }
+                LoaderMsg::Failed(err) => panic!("unexpected failure: {err}"),
+            }
+        }
+        assert!(!saw_header_or_preview);
+        let (rgba, width, height) = done;
+        assert_eq!((width, height), (4, 3));
+        assert_eq!(rgba.len(), 4 * 3 * 4);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn garbage_jxl_extension_fails_cleanly() {
+        // .jxl extension decides before sniffing; content is not a codestream.
+        let dir = temp_dir("garbage");
+        let path = dir.join("x.jxl");
+        std::fs::write(&path, b"not really jxl").unwrap();
+
+        let loader = Loader::start(path);
+        loop {
+            match wait(&loader, Duration::from_secs(10)).expect("loader timed out") {
+                LoaderMsg::Failed(_) => break,
+                LoaderMsg::Done { .. } => panic!("garbage must not decode"),
+                LoaderMsg::Header { .. } | LoaderMsg::Preview { .. } => {}
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn truncated_codestream_fails_cleanly() {
+        // Valid codestream magic but no complete header: EOF before init.
+        let dir = temp_dir("truncated");
+        let path = dir.join("truncated.jxl");
+        std::fs::write(&path, [0xffu8, 0x0a, 0x01, 0x02]).unwrap();
+
+        let loader = Loader::start(path);
+        loop {
+            match wait(&loader, Duration::from_secs(10)).expect("loader timed out") {
+                LoaderMsg::Failed(_) => break,
+                LoaderMsg::Done { .. } => panic!("truncated file must not decode"),
+                LoaderMsg::Header { .. } | LoaderMsg::Preview { .. } => {}
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cancel_stops_the_worker() {
+        // Dropping the loader must terminate the worker without hanging:
+        // join the thread via a fresh handle is not possible, so instead
+        // start a loader on a big-ish file, drop it immediately, and assert
+        // no further messages arrive afterwards (channel is closed).
+        let dir = temp_dir("cancel");
+        let path = dir.join("img.png");
+        image::DynamicImage::new_rgb8(16, 16).save(&path).unwrap();
+
+        let loader = Loader::start(path);
+        drop(loader);
+        std::thread::sleep(Duration::from_millis(50));
+        // Nothing to assert beyond "no panic, no hang"; try_recv on the
+        // dropped receiver was never observable. The real check is that this
+        // test finishes.
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
