@@ -32,6 +32,8 @@ enum ZoomMode {
     FitWidth,
     /// Fit to the window height (Shift+E).
     FitHeight,
+    /// Free zoom factor, set with +/- (multiples of the last fit scale).
+    Free(f32),
 }
 
 /// Decode a JPEG XL file with jxl-oxide (pure Rust).
@@ -143,7 +145,12 @@ fn main() -> Result<()> {
     let img_h = decoded.height as f32;
     let mut zoom = ZoomMode::FitDown;
     let mut pan = Vector2::ZERO;
+    // On-screen scale, eased toward the target scale each frame.
+    let mut view_scale: Option<f32> = None;
     while !rl.window_should_close() {
+        let win_w = rl.get_screen_width() as f32;
+        let win_h = rl.get_screen_height() as f32;
+
         // Keyboard shortcuts. Capital W / capital E arrive as W/E + shift.
         let shift = rl.is_key_down(KeyboardKey::KEY_LEFT_SHIFT)
             || rl.is_key_down(KeyboardKey::KEY_RIGHT_SHIFT);
@@ -153,13 +160,63 @@ fn main() -> Result<()> {
             } else {
                 ZoomMode::FitDown
             };
+            pan = Vector2::ZERO;
         } else if rl.is_key_pressed(KeyboardKey::KEY_E) {
             zoom = if shift {
                 ZoomMode::FitHeight
             } else {
                 ZoomMode::FitWidth
             };
+            pan = Vector2::ZERO;
         }
+
+        // Scale for the current mode (fit modes recompute every frame, so
+        // resizing stays correct).
+        let target_scale = match zoom {
+            ZoomMode::FitDown => (win_w / img_w).min(win_h / img_h).min(1.0),
+            ZoomMode::FitAll => (win_w / img_w).min(win_h / img_h),
+            ZoomMode::FitWidth => win_w / img_w,
+            ZoomMode::FitHeight => win_h / img_h,
+            ZoomMode::Free(scale) => scale,
+        };
+
+        // Ease the on-screen scale toward the target so zoom steps animate
+        // smoothly (~95% of the way after 150 ms; snap when close enough).
+        let alpha = 1.0 - (-rl.get_frame_time() / 0.05).exp();
+        view_scale = Some(match view_scale {
+            None => target_scale,
+            Some(s) => {
+                let s = s + (target_scale - s) * alpha;
+                if (target_scale - s).abs() < target_scale * 0.001 {
+                    target_scale
+                } else {
+                    s
+                }
+            }
+        });
+
+        // Free zoom: +/- steps the scale up/down by 25%, starting from the
+        // scale currently on screen. Detected two ways: the keycode of the
+        // US-layout =/- keys (incl. numpad) and the typed character, which
+        // covers non-US layouts where '+' lives on another physical key.
+        let mut zoom_in =
+            rl.is_key_pressed(KeyboardKey::KEY_EQUAL) || rl.is_key_pressed(KeyboardKey::KEY_KP_ADD);
+        let mut zoom_out = rl.is_key_pressed(KeyboardKey::KEY_MINUS)
+            || rl.is_key_pressed(KeyboardKey::KEY_KP_SUBTRACT);
+        // Drain the character queue so repeats don't pile up.
+        loop {
+            match rl.get_char_pressed() {
+                None => break,
+                Some('+') => zoom_in = true,
+                Some('-') => zoom_out = true,
+                _ => {}
+            }
+        }
+        if zoom_in || zoom_out {
+            let factor = if zoom_in { 1.25 } else { 1.0 / 1.25 };
+            zoom = ZoomMode::Free((target_scale * factor).clamp(0.01, 100.0));
+        }
+        let scale = view_scale.unwrap();
 
         // Vim-style panning (h/j/k/l + arrow keys); held keys scroll
         // continuously. Input read before begin_drawing borrows rl mutably.
@@ -187,27 +244,8 @@ fn main() -> Result<()> {
         let mut d = rl.begin_drawing(&thread);
         d.clear_background(Color::BLACK);
 
-        // Fit to the window, aspect preserved.
-        let scale = match zoom {
-            ZoomMode::FitDown => (win_w / img_w).min(win_h / img_h).min(1.0),
-            ZoomMode::FitAll => (win_w / img_w).min(win_h / img_h),
-            ZoomMode::FitWidth => win_w / img_w,
-            ZoomMode::FitHeight => win_h / img_h,
-        };
         let dw = img_w * scale;
         let dh = img_h * scale;
-        // Clamp: never leave a gap between image edge and window edge; a
-        // fully visible image stays centered.
-        pan.x = if dw > win_w {
-            pan.x.clamp(win_w - dw, 0.0)
-        } else {
-            0.0
-        };
-        pan.y = if dh > win_h {
-            pan.y.clamp(win_h - dh, 0.0)
-        } else {
-            0.0
-        };
 
         let src = Rectangle {
             x: 0.0,
