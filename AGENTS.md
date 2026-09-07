@@ -23,7 +23,9 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
 
 1. [x] Single image window: JXL + PNG + JPEG, ESC/q.
 2. [x] Fit to window (aspect preserved, centered, no upscale, refits on resize).
-3. Zoom/pan, background color.
+3. [x] Zoom modes: `W` fit-down (default, no upscale), `Shift+W` fit all
+   sides (upscales until first border touch), `e` fit width, `Shift+E`
+   fit height. Zoom/pan beyond that still open.
 4. jxl-oxide progressive decoding (stream bytes, render preview early).
 5. Directory browsing (nsxiv-style left/right).
 6. Video playback (mpv inspiration; backend TBD).

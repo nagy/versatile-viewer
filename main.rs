@@ -6,13 +6,32 @@
 use std::{env, path::Path};
 
 use anyhow::{Context, Result, bail};
-use raylib::{color::Color, consts::PixelFormat, prelude::*};
+use raylib::{
+    color::Color,
+    consts::{KeyboardKey, PixelFormat},
+    prelude::*,
+};
 
 struct DecodedImage {
     width: u32,
     height: u32,
     /// RGBA8, row-major, 4 bytes per pixel.
     rgba: Vec<u8>,
+}
+
+/// How the image is scaled to the window. Scale is recomputed every frame,
+/// so resizing always stays correct.
+#[derive(Clone, Copy, PartialEq)]
+enum ZoomMode {
+    /// Fit down to the window, centered; never upscaled (default).
+    FitDown,
+    /// Fit all sides: scale up or down until the image first touches a
+    /// border (Shift+W).
+    FitAll,
+    /// Fit to the window width (e).
+    FitWidth,
+    /// Fit to the window height (Shift+E).
+    FitHeight,
 }
 
 /// Decode a JPEG XL file with jxl-oxide (pure Rust).
@@ -122,15 +141,37 @@ fn main() -> Result<()> {
     rl.set_target_fps(60);
     let img_w = decoded.width as f32;
     let img_h = decoded.height as f32;
+    let mut zoom = ZoomMode::FitDown;
     while !rl.window_should_close() {
+        // Keyboard shortcuts. Capital W / capital E arrive as W/E + shift.
+        let shift = rl.is_key_down(KeyboardKey::KEY_LEFT_SHIFT)
+            || rl.is_key_down(KeyboardKey::KEY_RIGHT_SHIFT);
+        if rl.is_key_pressed(KeyboardKey::KEY_W) {
+            zoom = if shift {
+                ZoomMode::FitAll
+            } else {
+                ZoomMode::FitDown
+            };
+        } else if rl.is_key_pressed(KeyboardKey::KEY_E) {
+            zoom = if shift {
+                ZoomMode::FitHeight
+            } else {
+                ZoomMode::FitWidth
+            };
+        }
+
         let mut d = rl.begin_drawing(&thread);
         d.clear_background(Color::BLACK);
 
-        // Fit to window, aspect preserved, centered; never larger than the
-        // window in either dimension, and never upscaled.
+        // Fit to the window, aspect preserved, centered.
         let win_w = d.get_screen_width() as f32;
         let win_h = d.get_screen_height() as f32;
-        let scale = (win_w / img_w).min(win_h / img_h).min(1.0);
+        let scale = match zoom {
+            ZoomMode::FitDown => (win_w / img_w).min(win_h / img_h).min(1.0),
+            ZoomMode::FitAll => (win_w / img_w).min(win_h / img_h),
+            ZoomMode::FitWidth => win_w / img_w,
+            ZoomMode::FitHeight => win_h / img_h,
+        };
         let dw = img_w * scale;
         let dh = img_h * scale;
         let src = Rectangle {
