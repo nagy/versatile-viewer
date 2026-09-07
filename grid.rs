@@ -171,35 +171,12 @@ impl Grid {
         }
     }
 
-    /// Make sure the entry at `i` has a texture (decoding synchronously if
-    /// the worker hasn't delivered it yet — the user explicitly asked to
-    /// open it, so a short block is fine). On failure the entry is removed
-    /// and false returned.
-    pub fn ensure_loaded(
-        &mut self,
-        rl: &mut RaylibHandle,
-        thread: &RaylibThread,
-        i: usize,
-    ) -> bool {
-        if i >= self.entries.len() {
-            return false;
-        }
-        if self.entries[i].texture.is_some() {
-            return true;
-        }
-        match crate::load_image_texture(rl, thread, &self.entries[i].path) {
-            Ok((t, w, h)) => {
-                self.entries[i].width = w;
-                self.entries[i].height = h;
-                self.entries[i].texture = Some(t);
-                true
-            }
-            Err(err) => {
-                eprintln!("vv: {}: {err:#}", self.entries[i].path.display());
-                self.entries.remove(i);
-                self.selected = self.selected.min(self.entries.len().saturating_sub(1));
-                false
-            }
+    /// Remove a failed entry so it disappears from the grid. Indices after
+    /// `i` shift; the selection is clamped.
+    pub fn remove_entry(&mut self, i: usize) {
+        if i < self.entries.len() {
+            self.entries.remove(i);
+            self.selected = self.selected.min(self.entries.len().saturating_sub(1));
         }
     }
 

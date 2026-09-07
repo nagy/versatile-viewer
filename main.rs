@@ -13,7 +13,9 @@ use raylib::{
 };
 
 mod grid;
+mod loader;
 use grid::{Grid, GridAction};
+use loader::{Loader, LoaderMsg};
 
 struct DecodedImage {
     width: u32,
@@ -57,7 +59,17 @@ fn decode_jxl(path: &Path) -> Result<DecodedImage> {
         .map_err(|e| anyhow::anyhow!("jxl-oxide: {e}"))
         .context("failed to render frame")?;
 
-    let fb = render.image_all_channels();
+    let (rgba, width, height) = fb_to_rgba(&render.image_all_channels())?;
+    Ok(DecodedImage {
+        width,
+        height,
+        rgba,
+    })
+}
+
+/// Convert a jxl-oxide framebuffer (f32 samples, 3 or 4 interleaved channels)
+/// to RGBA8, forcing alpha = 1.0 for opaque 3-channel data.
+pub(crate) fn fb_to_rgba(fb: &jxl_oxide::FrameBuffer) -> Result<(Vec<u8>, u32, u32)> {
     let width = fb.width() as u32;
     let height = fb.height() as u32;
     let channels = fb.channels();
@@ -66,7 +78,6 @@ fn decode_jxl(path: &Path) -> Result<DecodedImage> {
         bail!("unexpected channel count from jxl-oxide: {channels}");
     }
 
-    // f32 (0..1) -> RGBA8, forcing alpha = 1.0 for opaque 3-channel data.
     let mut rgba = vec![0u8; width as usize * height as usize * 4];
     for (dst, src) in rgba.chunks_exact_mut(4).zip(samples.chunks_exact(channels)) {
         dst[0] = to_u8(src[0]);
@@ -74,11 +85,7 @@ fn decode_jxl(path: &Path) -> Result<DecodedImage> {
         dst[2] = to_u8(src[2]);
         dst[3] = to_u8(src.get(3).copied().unwrap_or(1.0));
     }
-    Ok(DecodedImage {
-        width,
-        height,
-        rgba,
-    })
+    Ok((rgba, width, height))
 }
 
 fn to_u8(v: f32) -> u8 {
@@ -151,17 +158,6 @@ fn upload_rgba(
     Ok(texture)
 }
 
-/// Decode an image on this thread and upload it as a GPU texture.
-fn load_image_texture(
-    rl: &mut RaylibHandle,
-    thread: &RaylibThread,
-    path: &Path,
-) -> Result<(Texture2D, u32, u32)> {
-    let decoded = decode_image(path)?;
-    let texture = upload_rgba(rl, thread, &decoded.rgba, decoded.width, decoded.height)?;
-    Ok((texture, decoded.width, decoded.height))
-}
-
 fn main() -> Result<()> {
     let arg = env::args()
         .nth(1)
@@ -214,8 +210,15 @@ fn main() -> Result<()> {
     // being declared after `rl` it is dropped (and unloaded) BEFORE the
     // window closes — both on normal exit and on panic unwinding.
     let mut grid = dir_grid;
+    // Background streamer for the open image (no GL objects inside, but like
+    // `grid` declared after `rl` so it drops before the window closes). Drop
+    // cancels the worker.
+    let mut loader: Option<Loader> = None;
 
-    let mut single_tex: Option<Texture2D> = None;
+    // Texture currently shown in image mode (single-file launch sets it up
+    // front; grid-opened images stream in via the loader).
+    let mut view_tex: Option<Texture2D> = None;
+    let mut view_loading = false;
     let mut img_w = 0.0f32;
     let mut img_h = 0.0f32;
     if let Some(decoded) = single_decoded {
@@ -227,7 +230,7 @@ fn main() -> Result<()> {
             format: PixelFormat::PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 as i32,
         };
         let image = unsafe { Image::from_raw(ffi_image) };
-        single_tex = Some(rl.load_texture_from_image(&thread, &image)?);
+        view_tex = Some(rl.load_texture_from_image(&thread, &image)?);
         image.to_raw(); // forget: drop would MemFree our borrowed Vec
         drop(decoded.rgba);
         img_w = win0_w as f32;
@@ -286,6 +289,67 @@ fn main() -> Result<()> {
         let win_w = rl.get_screen_width() as f32;
         let win_h = rl.get_screen_height() as f32;
 
+        // Image mode: drain the streaming loader first; texture uploads need
+        // the main thread.
+        if mode == Mode::Image {
+            let mut open_failed = false;
+            if let Some(loader) = &loader {
+                while let Some(msg) = loader.try_recv() {
+                    match msg {
+                        LoaderMsg::Header { width, height } => {
+                            // Dimensions known: fit-down immediately (the
+                            // ease block only runs from the next frame on).
+                            img_w = width as f32;
+                            img_h = height as f32;
+                            zoom = ZoomMode::FitDown;
+                            pan = Vector2::ZERO;
+                            target_pan = Vector2::ZERO;
+                            view_scale = Some((win_w / img_w).min(win_h / img_h).min(1.0));
+                        }
+                        LoaderMsg::Preview {
+                            rgba,
+                            width,
+                            height,
+                        } => {
+                            // Progressively better render of the same image;
+                            // replaces the previous texture.
+                            view_tex = Some(upload_rgba(&mut rl, &thread, &rgba, width, height)?);
+                        }
+                        LoaderMsg::Done {
+                            rgba,
+                            width,
+                            height,
+                        } => {
+                            // Non-JXL formats only learn dimensions here.
+                            if img_w == 0.0 {
+                                img_w = width as f32;
+                                img_h = height as f32;
+                                zoom = ZoomMode::FitDown;
+                                pan = Vector2::ZERO;
+                                target_pan = Vector2::ZERO;
+                                view_scale = Some((win_w / img_w).min(win_h / img_h).min(1.0));
+                            }
+                            view_tex = Some(upload_rgba(&mut rl, &thread, &rgba, width, height)?);
+                            view_loading = false;
+                        }
+                        LoaderMsg::Failed(err) => {
+                            eprintln!("vv: {err}");
+                            open_failed = true;
+                        }
+                    }
+                }
+            }
+            if open_failed {
+                loader = None; // cancel the worker
+                if let Some(i) = open_idx.take() {
+                    grid.as_mut().unwrap().remove_entry(i);
+                }
+                mode = Mode::Grid;
+                view_tex = None;
+                view_loading = false;
+            }
+        }
+
         if mode == Mode::Grid {
             let g = grid.as_mut().unwrap();
             // Fill the thumbnail queue, a few decodes per frame so the grid
@@ -301,19 +365,20 @@ fn main() -> Result<()> {
                     if debug {
                         eprintln!("vv: enter pressed -> open idx {i}");
                     }
-                    if g.ensure_loaded(&mut rl, &thread, i) {
-                        let e = &g.entries[i];
-                        img_w = e.width as f32;
-                        img_h = e.height as f32;
-                        open_idx = Some(i);
-                        mode = Mode::Image;
-                        // Fresh image: fit-down immediately (the ease block
-                        // only runs from the next frame on).
-                        zoom = ZoomMode::FitDown;
-                        pan = Vector2::ZERO;
-                        target_pan = Vector2::ZERO;
-                        view_scale = Some((win_w / img_w).min(win_h / img_h).min(1.0));
-                    }
+                    // Open immediately; the image streams in on a worker
+                    // thread (header -> blurry previews -> final render).
+                    let path = g.entries[i].path.clone();
+                    loader = Some(Loader::start(path));
+                    open_idx = Some(i);
+                    mode = Mode::Image;
+                    view_loading = true;
+                    img_w = 0.0; // dimensions arrive with the header message
+                    img_h = 0.0;
+                    view_tex = None;
+                    zoom = ZoomMode::FitDown;
+                    pan = Vector2::ZERO;
+                    target_pan = Vector2::ZERO;
+                    view_scale = None;
                 }
                 GridAction::Quit => quit = true,
                 GridAction::None => {}
@@ -326,6 +391,9 @@ fn main() -> Result<()> {
                 } else {
                     mode = Mode::Grid;
                     open_idx = None;
+                    loader = None; // cancels a still-running stream
+                    view_tex = None;
+                    view_loading = false;
                 }
             }
 
@@ -348,115 +416,120 @@ fn main() -> Result<()> {
                 target_pan = Vector2::ZERO;
             }
 
-            // Scale for the current mode (fit modes recompute every frame, so
-            // resizing stays correct).
-            let target_scale = match zoom {
-                ZoomMode::FitDown => (win_w / img_w).min(win_h / img_h).min(1.0),
-                ZoomMode::FitAll => (win_w / img_w).min(win_h / img_h),
-                ZoomMode::FitWidth => win_w / img_w,
-                ZoomMode::FitHeight => win_h / img_h,
-                ZoomMode::Free(scale) => scale,
-            };
+            // Before the header arrives the image dimensions are unknown;
+            // skip all scale/pan math (it divides by img_w/img_h).
+            if img_w > 0.0 {
+                // Scale for the current mode (fit modes recompute every frame, so
+                // resizing stays correct).
+                let target_scale = match zoom {
+                    ZoomMode::FitDown => (win_w / img_w).min(win_h / img_h).min(1.0),
+                    ZoomMode::FitAll => (win_w / img_w).min(win_h / img_h),
+                    ZoomMode::FitWidth => win_w / img_w,
+                    ZoomMode::FitHeight => win_h / img_h,
+                    ZoomMode::Free(scale) => scale,
+                };
 
-            // Ease the on-screen scale toward the target so zoom steps animate
-            // smoothly (~95% of the way after 150 ms; snap when close enough).
-            let prev_scale = view_scale;
-            let alpha = 1.0 - (-rl.get_frame_time() / 0.05).exp();
-            view_scale = Some(match view_scale {
-                None => target_scale,
-                Some(s) => {
-                    let s = s + (target_scale - s) * alpha;
-                    if (target_scale - s).abs() < target_scale * 0.001 {
-                        target_scale
-                    } else {
-                        s
+                // Ease the on-screen scale toward the target so zoom steps animate
+                // smoothly (~95% of the way after 150 ms; snap when close enough).
+                let prev_scale = view_scale;
+                let alpha = 1.0 - (-rl.get_frame_time() / 0.05).exp();
+                view_scale = Some(match view_scale {
+                    None => target_scale,
+                    Some(s) => {
+                        let s = s + (target_scale - s) * alpha;
+                        if (target_scale - s).abs() < target_scale * 0.001 {
+                            target_scale
+                        } else {
+                            s
+                        }
+                    }
+                });
+
+                // Free zoom: +/- steps the scale up/down by 25%, starting from the
+                // scale currently on screen. Detected two ways: the keycode of the
+                // US-layout =/- keys (incl. numpad) and the typed character, which
+                // covers non-US layouts where '+' lives on another physical key.
+                let mut zoom_in = rl.is_key_pressed(KeyboardKey::KEY_EQUAL)
+                    || rl.is_key_pressed(KeyboardKey::KEY_KP_ADD);
+                let mut zoom_out = rl.is_key_pressed(KeyboardKey::KEY_MINUS)
+                    || rl.is_key_pressed(KeyboardKey::KEY_KP_SUBTRACT);
+                // Drain the character queue so repeats don't pile up.
+                loop {
+                    match rl.get_char_pressed() {
+                        None => break,
+                        Some('+') => zoom_in = true,
+                        Some('-') => zoom_out = true,
+                        _ => {}
                     }
                 }
-            });
-
-            // Free zoom: +/- steps the scale up/down by 25%, starting from the
-            // scale currently on screen. Detected two ways: the keycode of the
-            // US-layout =/- keys (incl. numpad) and the typed character, which
-            // covers non-US layouts where '+' lives on another physical key.
-            let mut zoom_in = rl.is_key_pressed(KeyboardKey::KEY_EQUAL)
-                || rl.is_key_pressed(KeyboardKey::KEY_KP_ADD);
-            let mut zoom_out = rl.is_key_pressed(KeyboardKey::KEY_MINUS)
-                || rl.is_key_pressed(KeyboardKey::KEY_KP_SUBTRACT);
-            // Drain the character queue so repeats don't pile up.
-            loop {
-                match rl.get_char_pressed() {
-                    None => break,
-                    Some('+') => zoom_in = true,
-                    Some('-') => zoom_out = true,
-                    _ => {}
+                if zoom_in || zoom_out {
+                    let factor = if zoom_in { 1.25 } else { 1.0 / 1.25 };
+                    zoom = ZoomMode::Free((target_scale * factor).clamp(0.01, 100.0));
                 }
-            }
-            if zoom_in || zoom_out {
-                let factor = if zoom_in { 1.25 } else { 1.0 / 1.25 };
-                zoom = ZoomMode::Free((target_scale * factor).clamp(0.01, 100.0));
-            }
 
-            // Window-center-anchored zoom (free zoom only): while the on-screen
-            // scale eases, shift the pan each frame so the image point under
-            // the window center stays fixed. offset = center + pan, so keeping
-            // the anchor's image point put gives
-            //   offset' = anchor - (anchor - offset) * (scale'/scale).
-            let scale = view_scale.unwrap();
-            if matches!(zoom, ZoomMode::Free(_)) {
-                if let Some(s_old) = prev_scale {
-                    if (scale - s_old).abs() > f32::EPSILON && s_old > 0.0 {
-                        let r = scale / s_old;
-                        let ax = win_w / 2.0;
-                        let ay = win_h / 2.0;
-                        let ox = ax - (ax - (win_w - img_w * s_old) / 2.0 - pan.x) * r;
-                        let oy = ay - (ay - (win_h - img_h * s_old) / 2.0 - pan.y) * r;
-                        pan.x = ox - (win_w - img_w * scale) / 2.0;
-                        pan.y = oy - (win_h - img_h * scale) / 2.0;
-                        // Pin the target too, so pan easing doesn't fight the anchor.
-                        target_pan.x = pan.x;
-                        target_pan.y = pan.y;
+                // Window-center-anchored zoom (free zoom only): while the on-screen
+                // scale eases, shift the pan each frame so the image point under
+                // the window center stays fixed. offset = center + pan, so keeping
+                // the anchor's image point put gives
+                //   offset' = anchor - (anchor - offset) * (scale'/scale).
+                let scale = view_scale.unwrap();
+                if matches!(zoom, ZoomMode::Free(_)) {
+                    if let Some(s_old) = prev_scale {
+                        if (scale - s_old).abs() > f32::EPSILON && s_old > 0.0 {
+                            let r = scale / s_old;
+                            let ax = win_w / 2.0;
+                            let ay = win_h / 2.0;
+                            let ox = ax - (ax - (win_w - img_w * s_old) / 2.0 - pan.x) * r;
+                            let oy = ay - (ay - (win_h - img_h * s_old) / 2.0 - pan.y) * r;
+                            pan.x = ox - (win_w - img_w * scale) / 2.0;
+                            pan.y = oy - (win_h - img_h * scale) / 2.0;
+                            // Pin the target too, so pan easing doesn't fight the anchor.
+                            target_pan.x = pan.x;
+                            target_pan.y = pan.y;
+                        }
                     }
                 }
-            }
 
-            // Vim-style panning (h/j/k/l + arrow keys); held keys move the
-            // target offset, the on-screen pan eases after it (same exponential
-            // easing as zoom), so taps glide and holds scroll smoothly.
-            // Input read before begin_drawing borrows rl mutably.
-            // Per-second speed: matches the old 3%-of-window-per-frame pace
-            // (3% × 60 fps = 180% per second), now frame-time aware.
-            let speed = win_w.max(win_h) * 1.8 * rl.get_frame_time();
-            let pan_left =
-                rl.is_key_down(KeyboardKey::KEY_H) || rl.is_key_down(KeyboardKey::KEY_LEFT);
-            let pan_right =
-                rl.is_key_down(KeyboardKey::KEY_L) || rl.is_key_down(KeyboardKey::KEY_RIGHT);
-            let pan_up = rl.is_key_down(KeyboardKey::KEY_K) || rl.is_key_down(KeyboardKey::KEY_UP);
-            let pan_down =
-                rl.is_key_down(KeyboardKey::KEY_J) || rl.is_key_down(KeyboardKey::KEY_DOWN);
-            if pan_left {
-                target_pan.x += speed;
-            }
-            if pan_right {
-                target_pan.x -= speed;
-            }
-            if pan_up {
-                target_pan.y += speed;
-            }
-            if pan_down {
-                target_pan.y -= speed;
-            }
-            let pan_alpha = 1.0 - (-rl.get_frame_time() / 0.05).exp();
-            pan = Vector2 {
-                x: pan.x + (target_pan.x - pan.x) * pan_alpha,
-                y: pan.y + (target_pan.y - pan.y) * pan_alpha,
-            };
-            // Snap when the residual glide is sub-pixel.
-            if (target_pan.x - pan.x).abs() < 0.25 {
-                pan.x = target_pan.x;
-            }
-            if (target_pan.y - pan.y).abs() < 0.25 {
-                pan.y = target_pan.y;
-            }
+                // Vim-style panning (h/j/k/l + arrow keys); held keys move the
+                // target offset, the on-screen pan eases after it (same exponential
+                // easing as zoom), so taps glide and holds scroll smoothly.
+                // Input read before begin_drawing borrows rl mutably.
+                // Per-second speed: matches the old 3%-of-window-per-frame pace
+                // (3% × 60 fps = 180% per second), now frame-time aware.
+                let speed = win_w.max(win_h) * 1.8 * rl.get_frame_time();
+                let pan_left =
+                    rl.is_key_down(KeyboardKey::KEY_H) || rl.is_key_down(KeyboardKey::KEY_LEFT);
+                let pan_right =
+                    rl.is_key_down(KeyboardKey::KEY_L) || rl.is_key_down(KeyboardKey::KEY_RIGHT);
+                let pan_up =
+                    rl.is_key_down(KeyboardKey::KEY_K) || rl.is_key_down(KeyboardKey::KEY_UP);
+                let pan_down =
+                    rl.is_key_down(KeyboardKey::KEY_J) || rl.is_key_down(KeyboardKey::KEY_DOWN);
+                if pan_left {
+                    target_pan.x += speed;
+                }
+                if pan_right {
+                    target_pan.x -= speed;
+                }
+                if pan_up {
+                    target_pan.y += speed;
+                }
+                if pan_down {
+                    target_pan.y -= speed;
+                }
+                let pan_alpha = 1.0 - (-rl.get_frame_time() / 0.05).exp();
+                pan = Vector2 {
+                    x: pan.x + (target_pan.x - pan.x) * pan_alpha,
+                    y: pan.y + (target_pan.y - pan.y) * pan_alpha,
+                };
+                // Snap when the residual glide is sub-pixel.
+                if (target_pan.x - pan.x).abs() < 0.25 {
+                    pan.x = target_pan.x;
+                }
+                if (target_pan.y - pan.y).abs() < 0.25 {
+                    pan.y = target_pan.y;
+                }
+            } // img_w > 0.0: fit/pan math needs known dimensions
         }
 
         let mut d = rl.begin_drawing(&thread);
@@ -465,27 +538,35 @@ fn main() -> Result<()> {
         if mode == Mode::Grid {
             grid.as_ref().unwrap().draw(&mut d, win_w, win_h);
         } else {
-            let texture = if let Some(i) = open_idx {
-                grid.as_ref().unwrap().entries[i].texture.as_ref().unwrap()
-            } else {
-                single_tex.as_ref().unwrap()
-            };
-            let dw = img_w * view_scale.unwrap();
-            let dh = img_h * view_scale.unwrap();
+            if let Some(texture) = &view_tex {
+                let dw = img_w * view_scale.unwrap();
+                let dh = img_h * view_scale.unwrap();
 
-            let src = Rectangle {
-                x: 0.0,
-                y: 0.0,
-                width: img_w,
-                height: img_h,
-            };
-            let dest = Rectangle {
-                x: (win_w - dw) / 2.0 + pan.x,
-                y: (win_h - dh) / 2.0 + pan.y,
-                width: dw,
-                height: dh,
-            };
-            d.draw_texture_pro(texture, src, dest, Vector2::ZERO, 0.0, Color::WHITE);
+                let src = Rectangle {
+                    x: 0.0,
+                    y: 0.0,
+                    width: img_w,
+                    height: img_h,
+                };
+                let dest = Rectangle {
+                    x: (win_w - dw) / 2.0 + pan.x,
+                    y: (win_h - dh) / 2.0 + pan.y,
+                    width: dw,
+                    height: dh,
+                };
+                d.draw_texture_pro(texture, src, dest, Vector2::ZERO, 0.0, Color::WHITE);
+            }
+            if view_loading {
+                let msg = "decoding...";
+                let tw = d.measure_text(msg, 20);
+                d.draw_text(
+                    msg,
+                    (win_w as i32 - tw) / 2,
+                    win_h as i32 / 2 - 10,
+                    20,
+                    Color::GRAY,
+                );
+            }
         }
     }
     Ok(())
