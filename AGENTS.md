@@ -1,0 +1,28 @@
+# versatile-viewer
+
+Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
+
+- License: AGPL-3.0-or-later
+- Renderer: raylib (Rust bindings). wgpu probably not needed.
+- JXL decode: `jxl-oxide`, pure Rust, no libjxl C dependency.
+  jxl-oxide supports progressive decoding (partial bytes -> blurry preview,
+  full bytes -> full image); planned for a later milestone.
+- Common formats: `image` crate (PNG, JPEG).
+- Build: nix flake (crane).
+  - `nix build` — package
+  - `nix build .#checks.default` — tests
+  - `nix fmt` — format the tree (treefmt: rustfmt, taplo, nixfmt); rustfmt
+    runs with extended options (import grouping, 100-col width) via
+    `settings.formatter.rustfmt.options` with `lib.mkAfter`
+  - `nix flake check` — run checks
+  - `nix develop` — dev shell (LD_LIBRARY_PATH + rpath RUSTFLAGS set;
+    treefmt wrapper included)
+- Run: `nix run . -- <image-path>`; ESC/q quits. Binary name: `vv`.
+
+## Milestones (step by step)
+
+1. [x] Single image window: JXL + PNG + JPEG, fit-to-image, ESC/q.
+2. Zoom/pan, window resize, background checkerboard/letterbox.
+3. jxl-oxide progressive decoding (stream bytes, render preview early).
+4. Directory browsing (nsxiv-style left/right).
+5. Video playback (mpv inspiration; backend TBD).

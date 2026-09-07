@@ -1,0 +1,21 @@
+[package]
+name = "versatile-viewer"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+description = "A fast image (and later, video) viewer: nsxiv meets mpv. JPEG XL first-class."
+
+[dependencies]
+anyhow = "1"
+# JPEG XL decode, pure Rust (no libjxl C dependency).
+jxl-oxide = "0.11"
+# PNG / JPEG / etc. decode for common formats.
+image = { version = "0.25", default-features = false, features = [
+  "jpeg",
+  "png",
+] }
+raylib = "6"
+
+[[bin]]
+name = "vv"
+path = "main.rs"
