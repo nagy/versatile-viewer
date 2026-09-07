@@ -30,7 +30,8 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
 5. [x] Free zoom: `+`/`-` (also numpad, layout-independent via typed
    character), 25% steps; zoom animates smoothly (exponential ease,
    ~150 ms) toward the target scale.
-6. Zoom/pan polish (wheel zoom, cursor-anchored zoom) still open.
+6. [x] Zoom anchored at the window center (free zoom eases while keeping
+   the image point under the window center fixed). Wheel zoom still open.
 7. jxl-oxide progressive decoding (stream bytes, render preview early).
 8. Directory browsing (nsxiv-style left/right).
 9. Video playback (mpv inspiration; backend TBD).

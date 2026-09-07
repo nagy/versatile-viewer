@@ -144,6 +144,8 @@ fn main() -> Result<()> {
     let img_w = decoded.width as f32;
     let img_h = decoded.height as f32;
     let mut zoom = ZoomMode::FitDown;
+    // Target pan offset; on-screen pan eases toward it (same easing as zoom).
+    let mut target_pan = Vector2::ZERO;
     let mut pan = Vector2::ZERO;
     // On-screen scale, eased toward the target scale each frame.
     let mut view_scale: Option<f32> = None;
@@ -160,14 +162,14 @@ fn main() -> Result<()> {
             } else {
                 ZoomMode::FitDown
             };
-            pan = Vector2::ZERO;
+            target_pan = Vector2::ZERO;
         } else if rl.is_key_pressed(KeyboardKey::KEY_E) {
             zoom = if shift {
                 ZoomMode::FitHeight
             } else {
                 ZoomMode::FitWidth
             };
-            pan = Vector2::ZERO;
+            target_pan = Vector2::ZERO;
         }
 
         // Scale for the current mode (fit modes recompute every frame, so
@@ -182,6 +184,7 @@ fn main() -> Result<()> {
 
         // Ease the on-screen scale toward the target so zoom steps animate
         // smoothly (~95% of the way after 150 ms; snap when close enough).
+        let prev_scale = view_scale;
         let alpha = 1.0 - (-rl.get_frame_time() / 0.05).exp();
         view_scale = Some(match view_scale {
             None => target_scale,
@@ -216,29 +219,67 @@ fn main() -> Result<()> {
             let factor = if zoom_in { 1.25 } else { 1.0 / 1.25 };
             zoom = ZoomMode::Free((target_scale * factor).clamp(0.01, 100.0));
         }
-        let scale = view_scale.unwrap();
 
-        // Vim-style panning (h/j/k/l + arrow keys); held keys scroll
-        // continuously. Input read before begin_drawing borrows rl mutably.
+        // Window-center-anchored zoom (free zoom only): while the on-screen
+        // scale eases, shift the pan each frame so the image point under
+        // the window center stays fixed. offset = center + pan, so keeping
+        // the anchor's image point put gives
+        //   offset' = anchor - (anchor - offset) * (scale'/scale).
+        let scale = view_scale.unwrap();
+        if matches!(zoom, ZoomMode::Free(_)) {
+            if let Some(s_old) = prev_scale {
+                if (scale - s_old).abs() > f32::EPSILON && s_old > 0.0 {
+                    let r = scale / s_old;
+                    let ax = win_w / 2.0;
+                    let ay = win_h / 2.0;
+                    let ox = ax - (ax - (win_w - img_w * s_old) / 2.0 - pan.x) * r;
+                    let oy = ay - (ay - (win_h - img_h * s_old) / 2.0 - pan.y) * r;
+                    pan.x = ox - (win_w - img_w * scale) / 2.0;
+                    pan.y = oy - (win_h - img_h * scale) / 2.0;
+                    // Pin the target too, so pan easing doesn't fight the anchor.
+                    target_pan.x = pan.x;
+                    target_pan.y = pan.y;
+                }
+            }
+        }
+
+        // Vim-style panning (h/j/k/l + arrow keys); held keys move the
+        // target offset, the on-screen pan eases after it (same exponential
+        // easing as zoom), so taps glide and holds scroll smoothly.
+        // Input read before begin_drawing borrows rl mutably.
         let win_w = rl.get_screen_width() as f32;
         let win_h = rl.get_screen_height() as f32;
-        let step = win_w.max(win_h) * 0.03;
+        // Per-second speed: matches the old 3%-of-window-per-frame pace
+        // (3% × 60 fps = 180% per second), now frame-time aware.
+        let speed = win_w.max(win_h) * 1.8 * rl.get_frame_time();
         let pan_left = rl.is_key_down(KeyboardKey::KEY_H) || rl.is_key_down(KeyboardKey::KEY_LEFT);
         let pan_right =
             rl.is_key_down(KeyboardKey::KEY_L) || rl.is_key_down(KeyboardKey::KEY_RIGHT);
         let pan_up = rl.is_key_down(KeyboardKey::KEY_K) || rl.is_key_down(KeyboardKey::KEY_UP);
         let pan_down = rl.is_key_down(KeyboardKey::KEY_J) || rl.is_key_down(KeyboardKey::KEY_DOWN);
         if pan_left {
-            pan.x += step;
+            target_pan.x += speed;
         }
         if pan_right {
-            pan.x -= step;
+            target_pan.x -= speed;
         }
         if pan_up {
-            pan.y += step;
+            target_pan.y += speed;
         }
         if pan_down {
-            pan.y -= step;
+            target_pan.y -= speed;
+        }
+        let pan_alpha = 1.0 - (-rl.get_frame_time() / 0.05).exp();
+        pan = Vector2 {
+            x: pan.x + (target_pan.x - pan.x) * pan_alpha,
+            y: pan.y + (target_pan.y - pan.y) * pan_alpha,
+        };
+        // Snap when the residual glide is sub-pixel.
+        if (target_pan.x - pan.x).abs() < 0.25 {
+            pan.x = target_pan.x;
+        }
+        if (target_pan.y - pan.y).abs() < 0.25 {
+            pan.y = target_pan.y;
         }
 
         let mut d = rl.begin_drawing(&thread);
