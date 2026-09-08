@@ -9,10 +9,12 @@ description = "A fast image (and later, video) viewer: nsxiv meets mpv. JPEG XL 
 anyhow = "1"
 # JPEG XL decode, pure Rust (no libjxl C dependency).
 jxl-oxide = "0.11"
-# PNG / JPEG / etc. decode for common formats.
+# PNG / JPEG / WebP / etc. decode for common formats.
+# webp = image-webp, pure Rust (lossy VP8 + lossless VP8L decode).
 image = { version = "0.25", default-features = false, features = [
   "jpeg",
   "png",
+  "webp",
 ] }
 raylib = "6"
 # Work pool for parallel background decodes (grid prefetch); jxl-oxide also

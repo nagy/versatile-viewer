@@ -882,6 +882,23 @@ mod tests {
     }
 
     #[test]
+    fn decode_image_reads_webp() {
+        // Lossless encode via image-webp, then decode back through
+        // decode_image (format sniffed from bytes, not extension).
+        let dir = std::env::temp_dir().join(format!("vv-test-webp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("img.webp");
+        image::DynamicImage::new_rgb8(5, 4)
+            .save_with_format(&path, image::ImageFormat::WebP)
+            .unwrap();
+        let decoded = decode_image(&path).unwrap();
+        assert_eq!(decoded.width, 5);
+        assert_eq!(decoded.height, 4);
+        assert_eq!(decoded.rgba.len(), 5 * 4 * 4);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn decode_image_fails_cleanly_on_garbage() {
         let dir = std::env::temp_dir().join(format!("vv-test-bad-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
