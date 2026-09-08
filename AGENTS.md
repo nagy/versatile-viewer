@@ -57,10 +57,13 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
 8. [x] Directory browsing: thumbnail grid fills the window (square
    center-crop thumbs, dynamic layout, white selection border, background
    decodes on the rayon pool — several in parallel); Enter/ESC open,
-   Enter/ESC return. Enter reuses the already-decoded full-res grid texture
-   (instant, no re-decode); while a decode is in flight the viewer waits
-   for it instead of decoding twice; otherwise the streaming loader takes
-   over. Decodes are prefetched: grid selection's left/right/up/down
+   Enter/ESC return. Entries store a 1024px square thumb texture; the
+   full-res texture is kept only for the selection/open entry plus its
+   prefetched neighbors (the "keep set"), so Enter opens instantly there
+   (no re-decode) and falls back to the streaming loader otherwise; while
+   a decode is in flight the viewer waits for it instead of decoding
+   twice; failed decodes stay visible as dimmed error cells. Decodes are
+   prefetched: grid selection's left/right/up/down
    neighbors, and prev/next while viewing. Opening an image fit-all
    (Shift+W behavior). Space/Backspace or n/p switch prev/next in image
    view (nsxiv-style; arrows and h/j/k/l stay panning); nav keys and grid
@@ -68,5 +71,8 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
    g/G jump to the first/last image (grid selection and image view).
    +/- zoom the grid thumbs (25% steps; default zoom fills the window
    exactly, zoom-out refits with smaller thumbs, zoom-in overflows and
-   scrolls — mouse wheel + selection-follow).
+   scrolls — mouse wheel + selection-follow). Mouse: click selects a grid
+   cell, clicking the selected cell opens it; left-drag pans and wheel
+   zooms (25% steps, center-anchored) in image view. Dotfiles are hidden;
+   formats the grid lists must have matching image-crate features.
 9. Video playback (mpv inspiration; backend TBD).
