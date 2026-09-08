@@ -24,7 +24,7 @@ use jxl_oxide::{InitializeResult, JxlImage};
 
 use crate::{
     blurbg::{self, BlurData},
-    decode_common, fb_to_rgba, is_jxl,
+    decode_common, downscale_rgba, fb_to_rgba, is_jxl,
 };
 
 /// Wrap a jxl-oxide error (a bare boxed trait object) into anyhow.
@@ -203,7 +203,7 @@ fn stream(
                     // Previews never need full resolution (the screen is
                     // smaller); cap the long side so a 50 MP image does not
                     // allocate ~200 MB of RGBA per preview.
-                    let (rgba, width, height) = downscale(rgba, width, height, preview_px);
+                    let (rgba, width, height) = downscale_rgba(rgba, width, height, preview_px);
                     let blur =
                         blur_enabled.then(|| blurbg::small_blur(&rgba, width, height, blur_px));
                     let _ = tx.send(LoaderMsg::Preview {
@@ -246,23 +246,6 @@ fn stream(
     Ok(())
 }
 
-/// Downscale an RGBA8 buffer so its long side is at most `long_side`
-/// (below the cap it is returned unchanged — previews are never upscaled).
-fn downscale(rgba: Vec<u8>, width: u32, height: u32, long_side: u32) -> (Vec<u8>, u32, u32) {
-    let (width, height) = (width.max(1), height.max(1));
-    let m = width.max(height);
-    if m <= long_side.max(1) {
-        return (rgba, width, height);
-    }
-    let scale = long_side.max(1) as f32 / m as f32;
-    let nw = ((width as f32 * scale).round() as u32).max(1);
-    let nh = ((height as f32 * scale).round() as u32).max(1);
-    let img: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
-        image::ImageBuffer::from_raw(width, height, rgba).expect("rgba matches dimensions");
-    let small = image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle);
-    (small.into_raw(), nw, nh)
-}
-
 /// Read up to `buf.len()` bytes; 0 at EOF. A single read call: regular files
 /// normally fill the whole buffer, and short reads are fine anyway (the next
 /// loop iteration just reads more).
@@ -296,14 +279,14 @@ mod tests {
     }
 
     #[test]
-    fn downscale_caps_long_side_and_never_upscales() {
+    fn downscale_rgba_caps_long_side_and_never_upscales() {
         // Above the cap: 800x200 with cap 64 -> 64x16, RGBA8 length matches.
-        let (out, w, h) = downscale(vec![7u8; 800 * 200 * 4], 800, 200, 64);
+        let (out, w, h) = downscale_rgba(vec![7u8; 800 * 200 * 4], 800, 200, 64);
         assert_eq!((w, h), (64, 16));
         assert_eq!(out.len(), (w * h * 4) as usize);
         // Below the cap: returned untouched.
         let rgba = vec![7u8; 32 * 16 * 4];
-        let (out, w, h) = downscale(rgba.clone(), 32, 16, 64);
+        let (out, w, h) = downscale_rgba(rgba.clone(), 32, 16, 64);
         assert_eq!((w, h), (32, 16));
         assert_eq!(out, rgba);
     }

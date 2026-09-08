@@ -209,6 +209,33 @@ fn decode_image(path: &Path) -> Result<DecodedImage> {
     .with_context(|| format!("failed to decode {path:?}"))
 }
 
+/// Longest texture side we upload. Desktop GL hardware ranges from 4096
+/// to 16384; this is the safe middle (raylib does not expose the real
+/// limit). Anything larger is downscaled here instead of failing the load.
+const MAX_TEXTURE_SIDE: u32 = 8192;
+
+/// Downscale an RGBA8 buffer so its long side is at most `long_side`
+/// (below the cap it is returned unchanged — never upscaled).
+pub(crate) fn downscale_rgba(
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+    long_side: u32,
+) -> (Vec<u8>, u32, u32) {
+    let (width, height) = (width.max(1), height.max(1));
+    let m = width.max(height);
+    if m <= long_side.max(1) {
+        return (rgba, width, height);
+    }
+    let scale = long_side.max(1) as f32 / m as f32;
+    let nw = ((width as f32 * scale).round() as u32).max(1);
+    let nh = ((height as f32 * scale).round() as u32).max(1);
+    let img: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
+        image::ImageBuffer::from_raw(width, height, rgba).expect("rgba matches dimensions");
+    let small = image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle);
+    (small.into_raw(), nw, nh)
+}
+
 /// Upload a raw RGBA8 buffer as a GPU texture.
 ///
 /// Must be called on the main thread (GL context lives there). The buffer
@@ -221,6 +248,16 @@ fn upload_rgba(
     width: u32,
     height: u32,
 ) -> Result<Texture2D> {
+    // Oversized images (huge panoramas) would fail the GL upload; clamp
+    // them to the safe side limit here, in the single choke point.
+    let owned;
+    let (rgba, width, height) = if width.max(height) > MAX_TEXTURE_SIDE {
+        let (buf, w, h) = downscale_rgba(rgba.to_vec(), width, height, MAX_TEXTURE_SIDE);
+        owned = buf;
+        (owned.as_slice(), w, h)
+    } else {
+        (rgba, width, height)
+    };
     let ffi_image = raylib::ffi::Image {
         data: rgba.as_ptr() as *mut std::os::raw::c_void,
         width: width as i32,
