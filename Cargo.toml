@@ -30,6 +30,9 @@ rayon = "1"
 name = "vv"
 path = "main.rs"
 
+[dev-dependencies]
+tempfile = "3"
+
 [lints.clippy]
 # Keep the warning count at zero (enforced by CI once R6 lands).
 # Turn on `pedantic = "warn"` later and burn down the findings; the full

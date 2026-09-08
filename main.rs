@@ -1072,6 +1072,8 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::TempDir;
+
     use super::*;
 
     // Compile-time check that this stays const-evaluable.
@@ -1089,15 +1091,14 @@ mod tests {
 
     #[test]
     fn is_jxl_detects_codestream_magic() {
-        let dir = std::env::temp_dir();
-        let bare = dir.join(format!("vv-test-jxl-{}", std::process::id()));
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bare = tmp.path().join("bare");
         // Raw codestream starts with 0xFF 0x0A — JXL even without extension.
         std::fs::write(&bare, [0xffu8, 0x0a, 0x01, 0x02]).unwrap();
         assert!(is_jxl(&bare));
         // PNG magic — not a codestream, even without an extension.
         std::fs::write(&bare, [0x89u8, b'P', 0x4e, 0x47]).unwrap();
         assert!(!is_jxl(&bare));
-        std::fs::remove_file(&bare).ok();
     }
 
     #[test]
@@ -1105,8 +1106,8 @@ mod tests {
         // Content-first dispatch: a PNG renamed to .jxl decodes as PNG, a
         // JXL codestream renamed to .png is still JXL. Unknown magic with a
         // .jxl suffix (e.g. a container-format file) falls back to JXL.
-        let dir = std::env::temp_dir().join(format!("vv-test-magic-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempDir::new().unwrap();
+        let dir = dir.path();
 
         let png = dir.join("real.png");
         image::DynamicImage::new_rgb8(2, 3).save(&png).unwrap();
@@ -1123,29 +1124,26 @@ mod tests {
         let container = dir.join("container.jxl");
         std::fs::write(&container, [0x00, 0x00, 0x00, 0x0c, b'J', b'X', b'L', b' ']).unwrap();
         assert!(is_jxl(&container));
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn decode_common_reads_png() {
-        let dir = std::env::temp_dir().join(format!("vv-test-decode-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempDir::new().unwrap();
+        let dir = dir.path();
         let path = dir.join("img.png");
         image::DynamicImage::new_rgb8(3, 2).save(&path).unwrap();
         let decoded = decode_image(&path).unwrap();
         assert_eq!(decoded.width, 3);
         assert_eq!(decoded.height, 2);
         assert_eq!(decoded.rgba.len(), 3 * 2 * 4);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn decode_image_reads_webp() {
         // Lossless encode via image-webp, then decode back through
         // decode_image (format sniffed from bytes, not extension).
-        let dir = std::env::temp_dir().join(format!("vv-test-webp-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempDir::new().unwrap();
+        let dir = dir.path();
         let path = dir.join("img.webp");
         image::DynamicImage::new_rgb8(5, 4)
             .save_with_format(&path, image::ImageFormat::WebP)
@@ -1154,7 +1152,6 @@ mod tests {
         assert_eq!(decoded.width, 5);
         assert_eq!(decoded.height, 4);
         assert_eq!(decoded.rgba.len(), 5 * 4 * 4);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1162,8 +1159,8 @@ mod tests {
         // Every format the grid filter accepts (grid.rs is_image_path) must
         // actually decode — the filter and the image-crate features must stay
         // in sync (see the Cargo.toml comment).
-        let dir = std::env::temp_dir().join(format!("vv-test-formats-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempDir::new().unwrap();
+        let dir = dir.path();
         for (ext, format) in [
             ("bmp", image::ImageFormat::Bmp),
             ("gif", image::ImageFormat::Gif),
@@ -1178,16 +1175,14 @@ mod tests {
             assert_eq!((decoded.width, decoded.height), (4, 2), "{ext}");
             assert_eq!(decoded.rgba.len(), 4 * 2 * 4, "{ext}");
         }
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn decode_image_fails_cleanly_on_garbage() {
-        let dir = std::env::temp_dir().join(format!("vv-test-bad-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempDir::new().unwrap();
+        let dir = dir.path();
         let path = dir.join("x.png");
         std::fs::write(&path, b"garbage").unwrap();
         assert!(decode_image(&path).is_err());
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -53,7 +53,7 @@ const THUMB_LONG_SIDE: u32 = 1024;
 /// never touches full-res pixels for it.
 struct DecodeResult {
     id: u64,
-    res: Result<DecodeOk, String>,
+    res: anyhow::Result<DecodeOk>,
 }
 
 /// Successful decode payload: the square thumbnail RGBA (long side
@@ -305,14 +305,12 @@ impl Grid {
             let blur_enabled = self.blur_enabled;
             let blur_px = self.blur_px;
             rayon::spawn(move || {
-                let res = crate::decode_image(&path)
-                    .map(|d| {
-                        let thumb = make_thumb(&d.rgba, d.width, d.height);
-                        let blur = blur_enabled
-                            .then(|| blurbg::small_blur(&d.rgba, d.width, d.height, blur_px));
-                        (thumb.0, thumb.1, thumb.2, blur, (d.rgba, d.width, d.height))
-                    })
-                    .map_err(|e| format!("{e:#}"));
+                let res = crate::decode_image(&path).map(|d| {
+                    let thumb = make_thumb(&d.rgba, d.width, d.height);
+                    let blur = blur_enabled
+                        .then(|| blurbg::small_blur(&d.rgba, d.width, d.height, blur_px));
+                    (thumb.0, thumb.1, thumb.2, blur, (d.rgba, d.width, d.height))
+                });
                 // Receiver gone (grid dropped): result is discarded and the
                 // job simply ends.
                 let _ = tx.send(DecodeResult { id, res });
@@ -746,22 +744,23 @@ fn grid_layout_at(n: usize, win_w: f32, win_h: f32, zoom: f32) -> (usize, f32, f
 
 #[cfg(test)]
 mod tests {
+    use tempfile::TempDir;
+
     use super::*;
 
     #[test]
     fn mark_failed_keeps_the_entry() {
-        let dir = std::env::temp_dir().join(format!("vv-test-failed-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempDir::new().unwrap();
+        let dir = dir.path();
         let png = image::DynamicImage::new_rgb8(1, 1);
         png.save(dir.join("a.png")).unwrap();
-        let mut grid = Grid::from_dir(&dir).unwrap();
+        let mut grid = Grid::from_dir(dir).unwrap();
         assert_eq!(grid.entries.len(), 1);
         let id = grid.entries[0].id;
         grid.mark_failed(id, "boom".to_string());
         assert_eq!(grid.entries.len(), 1, "failed entry stays in the grid");
         assert_eq!(grid.entries[0].failed.as_deref(), Some("boom"));
         assert!(!grid.entries[0].queued);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -868,18 +867,17 @@ mod tests {
 
     #[test]
     fn prefetch_neighbors_left_right_up_down() {
-        let dir = std::env::temp_dir().join(format!("vv-test-pf-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempDir::new().unwrap();
+        let dir = dir.path();
         for i in 0..9 {
             std::fs::write(dir.join(format!("{i:02}.png")), b"").unwrap();
         }
-        let grid = Grid::from_dir(&dir).unwrap();
+        let grid = Grid::from_dir(dir).unwrap();
         // Square window: 9 images lay out as a 3x3 grid, so index 4's
         // neighbors are 3 (left), 5 (right), 1 (up), 7 (down).
         assert_eq!(grid.prefetch_neighbors(4, 640.0, 640.0), vec![3, 5, 1, 7]);
         // Top-left corner: only right (1) and down (3) exist.
         assert_eq!(grid.prefetch_neighbors(0, 640.0, 640.0), vec![1, 3]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -895,8 +893,8 @@ mod tests {
 
     #[test]
     fn from_dir_lists_images_sorted_ignores_others() {
-        let dir = std::env::temp_dir().join(format!("vv-test-grid-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempDir::new().unwrap();
+        let dir = dir.path();
         // Tiny valid PNG (1x1 red) via the image crate.
         let png = image::DynamicImage::new_rgb8(1, 1);
         png.save(dir.join("b.png")).unwrap();
@@ -904,14 +902,12 @@ mod tests {
         std::fs::write(dir.join("c.png"), "invalid png content").unwrap(); // listed, decode fails later
         std::fs::write(dir.join(".hidden.png"), "dotfile").unwrap(); // skipped
 
-        let grid = Grid::from_dir(&dir).unwrap();
+        let grid = Grid::from_dir(dir).unwrap();
         let names: Vec<String> = grid
             .entries
             .iter()
             .map(|e| e.path.file_name().unwrap().to_string_lossy().to_string())
             .collect();
         assert_eq!(names, vec!["b.png", "c.png"]);
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

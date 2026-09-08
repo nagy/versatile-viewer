@@ -260,10 +260,8 @@ mod tests {
 
     use super::*;
 
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("vv-loader-{name}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn temp_dir() -> tempfile::TempDir {
+        tempfile::TempDir::new().unwrap()
     }
 
     /// Poll the loader until a message arrives or `timeout` elapses.
@@ -295,7 +293,8 @@ mod tests {
     fn png_loads_as_single_done_message() {
         // Non-JXL formats have no progressive data: exactly one Done, no
         // Header/Preview, correct dimensions.
-        let dir = temp_dir("png");
+        let tmp = temp_dir();
+        let dir = tmp.path();
         let path = dir.join("img.png");
         image::DynamicImage::new_rgb8(4, 3).save(&path).unwrap();
 
@@ -323,13 +322,13 @@ mod tests {
         let (rgba, width, height) = done;
         assert_eq!((width, height), (4, 3));
         assert_eq!(rgba.len(), 4 * 3 * 4);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn garbage_jxl_extension_fails_cleanly() {
         // .jxl extension decides before sniffing; content is not a codestream.
-        let dir = temp_dir("garbage");
+        let tmp = temp_dir();
+        let dir = tmp.path();
         let path = dir.join("x.jxl");
         std::fs::write(&path, b"not really jxl").unwrap();
 
@@ -341,13 +340,13 @@ mod tests {
                 LoaderMsg::Header { .. } | LoaderMsg::Preview { .. } => {}
             }
         }
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn truncated_codestream_fails_cleanly() {
         // Valid codestream magic but no complete header: EOF before init.
-        let dir = temp_dir("truncated");
+        let tmp = temp_dir();
+        let dir = tmp.path();
         let path = dir.join("truncated.jxl");
         std::fs::write(&path, [0xffu8, 0x0a, 0x01, 0x02]).unwrap();
 
@@ -359,7 +358,6 @@ mod tests {
                 LoaderMsg::Header { .. } | LoaderMsg::Preview { .. } => {}
             }
         }
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -368,7 +366,8 @@ mod tests {
         // join the thread via a fresh handle is not possible, so instead
         // start a loader on a big-ish file, drop it immediately, and assert
         // no further messages arrive afterwards (channel is closed).
-        let dir = temp_dir("cancel");
+        let tmp = temp_dir();
+        let dir = tmp.path();
         let path = dir.join("img.png");
         image::DynamicImage::new_rgb8(16, 16).save(&path).unwrap();
 
@@ -378,6 +377,5 @@ mod tests {
         // Nothing to assert beyond "no panic, no hang"; try_recv on the
         // dropped receiver was never observable. The real check is that this
         // test finishes.
-        std::fs::remove_dir_all(&dir).ok();
     }
 }
