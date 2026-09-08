@@ -39,6 +39,11 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
    first preview renders, for eyeballing the refinement.
 8. [x] Directory browsing: thumbnail grid fills the window (square
    center-crop thumbs, dynamic layout, white selection border, background
-   decode thread); Enter/ESC open, Enter/ESC return. Still open: nsxiv-style
-   left/right navigation while viewing an image.
+   decodes on the rayon pool — several in parallel); Enter/ESC open,
+   Enter/ESC return. Enter reuses the already-decoded full-res grid texture
+   (instant, no re-decode); while a decode is in flight the viewer waits
+   for it instead of decoding twice; otherwise the streaming loader takes
+   over. Decodes are prefetched: grid selection's left/right/up/down
+   neighbors, and prev/next while viewing. Space/Backspace switch
+   prev/next in image view (nsxiv-style; arrows and h/j/k/l stay panning).
 9. Video playback (mpv inspiration; backend TBD).

@@ -181,6 +181,39 @@ fn show_frame(
     Ok(())
 }
 
+/// Put the viewed texture back into its grid entry (if it came from one)
+/// and clear the view texture. Called when leaving image mode or switching
+/// to another grid entry.
+fn put_back_view(
+    grid: &mut Option<Grid>,
+    view_from_grid: &mut Option<u64>,
+    view_tex: &mut Option<Texture2D>,
+) {
+    if let Some(id) = view_from_grid.take() {
+        if let Some(e) = grid
+            .as_mut()
+            .and_then(|g| g.entries.iter_mut().find(|e| e.id == id))
+        {
+            e.texture = view_tex.take();
+            e.viewing = false;
+        }
+    }
+    *view_tex = None;
+}
+
+/// Reset fit/pan state for a freshly shown image.
+fn reset_view(
+    zoom: &mut ZoomMode,
+    pan: &mut Vector2,
+    target_pan: &mut Vector2,
+    view_scale: &mut Option<f32>,
+) {
+    *zoom = ZoomMode::FitDown;
+    *pan = Vector2::ZERO;
+    *target_pan = Vector2::ZERO;
+    *view_scale = None;
+}
+
 fn main() -> Result<()> {
     let arg = env::args()
         .nth(1)
@@ -270,8 +303,12 @@ fn main() -> Result<()> {
     } else {
         Mode::Grid
     };
-    // Which grid entry is open in image mode (None when launched with a file).
-    let mut open_idx: Option<usize> = None;
+    // Which grid entry is open in image mode, by stable id (None when
+    // launched with a file).
+    let mut open_id: Option<u64> = None;
+    // Set when the texture currently shown was taken out of a grid entry
+    // (its id); it goes back when leaving image mode or switching entries.
+    let mut view_from_grid: Option<u64> = None;
     // Set when the viewer should exit entirely.
     let mut quit = false;
     // VV_DEBUG=1: trace grid open/return events to stderr.
@@ -317,10 +354,61 @@ fn main() -> Result<()> {
         let win_w = rl.get_screen_width() as f32;
         let win_h = rl.get_screen_height() as f32;
 
+        // Prefetch priority: in grid mode the selected entry's neighbors
+        // (left/right/up/down); in image mode the previous/next entries.
+        // load_pending drains finished decodes (texture uploads happen here,
+        // on the main thread) and dispatches new ones to the rayon pool.
+        let (priority, scan_start) = if mode == Mode::Image {
+            match open_id.and_then(|id| grid.as_ref().and_then(|g| g.index_of(id))) {
+                Some(i) => {
+                    let n = grid.as_ref().unwrap().entries.len();
+                    let mut v = Vec::new();
+                    if i > 0 {
+                        v.push(i - 1);
+                    }
+                    if i + 1 < n {
+                        v.push(i + 1);
+                    }
+                    (v, i)
+                }
+                None => (Vec::new(), 0),
+            }
+        } else if let Some(g) = grid.as_ref() {
+            (g.prefetch_neighbors(g.selected, win_w, win_h), g.selected)
+        } else {
+            (Vec::new(), 0)
+        };
+        if let Some(g) = grid.as_mut() {
+            g.load_pending(&mut rl, &thread, &priority, scan_start);
+        }
+
         // Image mode: drain the streaming loader first; texture uploads need
         // the main thread.
         if mode == Mode::Image {
             let mut open_failed = false;
+            // Waiting on a grid decode (no streaming loader for this open):
+            // when its texture lands, take it over as the view.
+            if view_tex.is_none() && loader.is_none() {
+                if let (Some(g), Some(id)) = (grid.as_mut(), open_id) {
+                    match g.entries.iter_mut().find(|e| e.id == id) {
+                        Some(e) => {
+                            if let Some(tex) = e.texture.take() {
+                                e.viewing = true;
+                                view_from_grid = Some(id);
+                                view_tex = Some(tex);
+                                img_w = e.width as f32;
+                                img_h = e.height as f32;
+                                zoom = ZoomMode::FitDown;
+                                pan = Vector2::ZERO;
+                                target_pan = Vector2::ZERO;
+                                view_scale = None;
+                                view_loading = false;
+                            }
+                        }
+                        None => open_failed = true, // entry vanished (decode failed)
+                    }
+                }
+            }
             if let Some(loader) = &loader {
                 while let Some(msg) = loader.try_recv() {
                     match msg {
@@ -368,9 +456,10 @@ fn main() -> Result<()> {
             }
             if open_failed {
                 loader = None; // cancel the worker
-                if let Some(i) = open_idx.take() {
-                    grid.as_mut().unwrap().remove_entry(i);
+                if let Some(id) = open_id.take() {
+                    grid.as_mut().unwrap().remove_entry_by_id(id);
                 }
+                view_from_grid = None;
                 mode = Mode::Grid;
                 view_tex = None;
                 view_loading = false;
@@ -378,36 +467,62 @@ fn main() -> Result<()> {
         }
 
         if mode == Mode::Grid {
-            let g = grid.as_mut().unwrap();
-            // Fill the thumbnail queue, a few decodes per frame so the grid
-            // appears progressively instead of blocking on the whole
-            // directory. Start near the selection so what you look at
-            // appears first.
-            g.load_pending(&mut rl, &thread);
-
             // Grid navigation: h/j/k/l + arrows move the selection,
             // Enter opens the selected image, q quits (ESC is inert here;
             // the grid is the home view).
-            match g.handle_input(&mut rl, win_w, win_h) {
+            match grid.as_mut().unwrap().handle_input(&mut rl, win_w, win_h) {
                 GridAction::Open(i) => {
                     if debug {
                         eprintln!("vv: enter pressed -> open idx {i}");
                     }
-                    // Open immediately; the image streams in on a worker
-                    // thread (header -> blurry previews -> final render).
-                    let path = g.entries[i].path.clone();
-                    loader = Some(Loader::start(path));
-                    open_idx = Some(i);
+                    // If the entry's decode already finished, its full-res
+                    // texture is ready: take it and show it this frame — no
+                    // decode, no black gap. If a decode is already in flight,
+                    // just wait for it (no duplicate work). Otherwise fall
+                    // back to the streaming loader (JXL: blurry preview fast).
+                    let (id, tex, w, h, path, queued) = {
+                        let g = grid.as_mut().unwrap();
+                        let e = &mut g.entries[i];
+                        (
+                            e.id,
+                            e.texture.take(),
+                            e.width,
+                            e.height,
+                            e.path.clone(),
+                            e.queued,
+                        )
+                    };
+                    open_id = Some(id);
                     mode = Mode::Image;
-                    view_loading = true;
-                    view_loading_since = rl.get_time();
-                    img_w = 0.0; // dimensions arrive with the header message
-                    img_h = 0.0;
-                    view_tex = None;
-                    zoom = ZoomMode::FitDown;
-                    pan = Vector2::ZERO;
-                    target_pan = Vector2::ZERO;
-                    view_scale = None;
+                    reset_view(&mut zoom, &mut pan, &mut target_pan, &mut view_scale);
+                    if let Some(tex) = tex {
+                        grid.as_mut().unwrap().entries[i].viewing = true;
+                        view_from_grid = Some(id);
+                        view_tex = Some(tex);
+                        img_w = w as f32;
+                        img_h = h as f32;
+                        // The image-mode scale math runs only from the next
+                        // frame on (this frame took the grid branch); set the
+                        // initial fit scale here so the draw this frame has it.
+                        view_scale = Some((win_w / img_w).min(win_h / img_h).min(1.0));
+                        view_loading = false;
+                    } else if queued {
+                        view_from_grid = None;
+                        loader = None;
+                        view_tex = None;
+                        view_loading = true;
+                        view_loading_since = rl.get_time();
+                        img_w = 0.0; // dimensions arrive with the texture
+                        img_h = 0.0;
+                    } else {
+                        view_from_grid = None;
+                        loader = Some(Loader::start(path));
+                        view_tex = None;
+                        view_loading = true;
+                        view_loading_since = rl.get_time();
+                        img_w = 0.0; // dimensions arrive with the header message
+                        img_h = 0.0;
+                    }
                 }
                 GridAction::Quit => quit = true,
                 GridAction::None => {}
@@ -425,14 +540,19 @@ fn main() -> Result<()> {
             // Enter/ESC return to the grid when one exists (nsxiv-like:
             // Enter toggles between grid and the open image); q quits,
             // ESC never quits the program (inert in single-file launches,
-            // where there is no grid to return to).
+            // where there is no grid to return to). Space/Backspace switch
+            // to the next/previous image (nsxiv-style nav; arrows and
+            // h/j/k/l stay panning).
             let mut enter = false;
             let mut quit_pressed = false;
+            let mut nav: Option<i64> = None;
             while let Some(k) = rl.get_key_pressed() {
                 match k {
                     KeyboardKey::KEY_ENTER | KeyboardKey::KEY_KP_ENTER => enter = true,
                     KeyboardKey::KEY_ESCAPE => enter = true,
                     KeyboardKey::KEY_Q => quit_pressed = true,
+                    KeyboardKey::KEY_SPACE => nav = Some(1),
+                    KeyboardKey::KEY_BACKSPACE => nav = Some(-1),
                     _ => {}
                 }
             }
@@ -460,11 +580,81 @@ fn main() -> Result<()> {
             }
             if return_to_grid {
                 mode = Mode::Grid;
-                open_idx = None;
+                // Hand the shown texture back to its grid entry and make
+                // that entry the grid selection (nsxiv-like).
+                put_back_view(&mut grid, &mut view_from_grid, &mut view_tex);
+                if let Some(id) = open_id.take() {
+                    if let Some(g) = grid.as_mut() {
+                        if let Some(i) = g.index_of(id) {
+                            g.selected = i;
+                        }
+                    }
+                }
                 loader = None; // cancels a still-running stream
-                view_tex = None;
                 view_loading = false;
                 view_loading_since = 0.0;
+            }
+
+            // Prev/next while viewing (only with a grid to navigate). A
+            // ready texture swaps in the same frame; a decode in flight is
+            // waited on (auto-swap when it lands); otherwise the streaming
+            // loader takes over. The new entry's own neighbors are prefetched
+            // via the priority list at the top of the loop.
+            if !return_to_grid {
+                if let Some(delta) = nav {
+                    let cur = open_id.and_then(|id| grid.as_ref().and_then(|g| g.index_of(id)));
+                    if let Some(cur) = cur {
+                        let n = grid.as_ref().unwrap().entries.len();
+                        let t = cur as i64 + delta;
+                        if t >= 0 && (t as usize) < n {
+                            let j = t as usize;
+                            put_back_view(&mut grid, &mut view_from_grid, &mut view_tex);
+                            loader = None;
+                            let (id, tex, w, h, path, queued) = {
+                                let g = grid.as_mut().unwrap();
+                                let e = &mut g.entries[j];
+                                (
+                                    e.id,
+                                    e.texture.take(),
+                                    e.width,
+                                    e.height,
+                                    e.path.clone(),
+                                    e.queued,
+                                )
+                            };
+                            open_id = Some(id);
+                            reset_view(&mut zoom, &mut pan, &mut target_pan, &mut view_scale);
+                            if let Some(tex) = tex {
+                                grid.as_mut().unwrap().entries[j].viewing = true;
+                                view_from_grid = Some(id);
+                                view_tex = Some(tex);
+                                img_w = w as f32;
+                                img_h = h as f32;
+                                // Set the initial fit scale here: the scale
+                                // math below already ran past the nav code
+                                // only afterwards, and this frame's draw
+                                // needs a scale now.
+                                view_scale = Some((win_w / img_w).min(win_h / img_h).min(1.0));
+                                view_loading = false;
+                            } else if queued {
+                                view_from_grid = None;
+                                view_tex = None;
+                                view_loading = true;
+                                view_loading_since = rl.get_time();
+                                img_w = 0.0;
+                                img_h = 0.0;
+                            } else {
+                                view_from_grid = None;
+                                loader = Some(Loader::start(path));
+                                view_tex = None;
+                                view_loading = true;
+                                view_loading_since = rl.get_time();
+                                img_w = 0.0;
+                                img_h = 0.0;
+                            }
+                        }
+                    }
+                }
             }
 
             // Keyboard shortcuts. Capital W / capital E arrive as W/E + shift.

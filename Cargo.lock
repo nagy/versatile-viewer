@@ -758,6 +758,7 @@ dependencies = [
  "image",
  "jxl-oxide",
  "raylib",
+ "rayon",
 ]
 
 [[package]]

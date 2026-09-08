@@ -2,10 +2,13 @@
 //! whole window (unlike nsxiv's fixed thumbnail sizes), with a white border
 //! on the selection.
 //!
-//! Decoding happens on a background worker thread; the main thread only
-//! drains finished decodes and uploads textures (which needs the GL
-//! context). This keeps frame times short, so key taps are never swallowed
-//! by multi-second decode stalls.
+//! Decoding runs on the shared rayon pool (several files decode in
+//! parallel); the main thread only drains finished decodes and uploads
+//! textures (which needs the GL context). Jobs are dispatched
+//! priority-first: the neighbors of whatever is on screen (grid selection,
+//! or the open image in image view) decode before the rest. This keeps
+//! frame times short, so key taps are never swallowed by decode stalls, and
+//! makes the neighbors ready to open instantly.
 
 use std::{
     path::{Path, PathBuf},
@@ -17,8 +20,9 @@ use raylib::{color::Color, prelude::*};
 
 const MARGIN: f32 = 8.0;
 const GAP: f32 = 8.0;
-/// Maximum number of decodes in flight at once.
-const MAX_INFLIGHT: usize = 3;
+/// Maximum number of decodes in flight at once (jobs run in parallel on the
+/// shared rayon pool; jxl-oxide parallelizes each decode further inside).
+const MAX_INFLIGHT: usize = 6;
 
 /// A finished background decode, matched to an entry by its unique id
 /// (indices shift when failed entries are spliced out; ids never do).
@@ -36,9 +40,12 @@ pub struct GridEntry {
     pub height: u32,
     pub texture: Option<Texture2D>,
     /// Unique, stable id used to match async decode results.
-    id: u64,
+    pub id: u64,
     /// A decode job for this entry is queued or in flight.
-    queued: bool,
+    pub queued: bool,
+    /// Texture currently held by the image view (taken out of the grid); it
+    /// is put back when the view is done, and never re-dispatched meanwhile.
+    pub viewing: bool,
 }
 
 /// What the user asked the grid to do this frame.
@@ -53,7 +60,7 @@ pub enum GridAction {
 pub struct Grid {
     pub entries: Vec<GridEntry>,
     pub selected: usize,
-    job_tx: Option<Sender<(u64, PathBuf)>>,
+    result_tx: Sender<DecodeResult>,
     result_rx: Receiver<DecodeResult>,
     inflight: usize,
 }
@@ -69,20 +76,7 @@ impl Grid {
             .collect();
         paths.sort_by_key(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()));
 
-        let (job_tx, job_rx) = channel::<(u64, PathBuf)>();
         let (res_tx, res_rx) = channel::<DecodeResult>();
-        // Worker: decode one job at a time until the grid (and its sender)
-        // is dropped, which closes the channel and ends the loop.
-        std::thread::spawn(move || {
-            while let Ok((id, path)) = job_rx.recv() {
-                let res = crate::decode_image(&path)
-                    .map(|d| (d.rgba, d.width, d.height))
-                    .map_err(|e| format!("{e:#}"));
-                if res_tx.send(DecodeResult { id, res }).is_err() {
-                    break; // grid gone
-                }
-            }
-        });
 
         Ok(Grid {
             entries: paths
@@ -95,19 +89,28 @@ impl Grid {
                     texture: None,
                     id: i as u64,
                     queued: false,
+                    viewing: false,
                 })
                 .collect(),
             selected: 0,
-            job_tx: Some(job_tx),
+            result_tx: res_tx,
             result_rx: res_rx,
             inflight: 0,
         })
     }
 
     /// Drain finished background decodes (uploading textures, which needs
-    /// the main thread) and hand out new jobs, selection-first. Runs every
-    /// frame; never blocks.
-    pub fn load_pending(&mut self, rl: &mut RaylibHandle, thread: &RaylibThread) {
+    /// the main thread) and hand out new jobs: `priority` indices first
+    /// (neighbors of what is on screen), then a wraparound scan from
+    /// `scan_start`. Runs every frame; never blocks. Entries whose texture
+    /// is currently held by the image view are skipped.
+    pub fn load_pending(
+        &mut self,
+        rl: &mut RaylibHandle,
+        thread: &RaylibThread,
+        priority: &[usize],
+        scan_start: usize,
+    ) {
         // 1. Apply finished decodes. Collect failures for removal so entry
         // indices stay valid until we splice.
         let mut to_remove: Vec<usize> = Vec::new();
@@ -150,25 +153,84 @@ impl Grid {
         }
         self.selected = self.selected.min(self.entries.len().saturating_sub(1));
 
-        // 2. Dispatch new jobs, starting near the selection so what you look
-        // at appears first.
+        // 2. Dispatch new jobs: `priority` indices first (the selection's
+        // or the open image's neighbors), then a wraparound scan from
+        // `scan_start`. Jobs run on the shared rayon pool, so several
+        // decodes proceed in parallel; each sends its result back over the
+        // channel, and the main thread uploads the texture above.
         let n = self.entries.len();
-        while self.inflight < MAX_INFLIGHT {
-            let mut scan = (self.selected..n).chain(0..self.selected);
-            let Some(i) =
-                scan.find(|&i| self.entries[i].texture.is_none() && !self.entries[i].queued)
-            else {
+        let mut order: Vec<usize> = Vec::new();
+        for &i in priority {
+            if i < n && !order.contains(&i) {
+                order.push(i);
+            }
+        }
+        let start = scan_start.min(n);
+        for i in (start..n).chain(0..start) {
+            if !order.contains(&i) {
+                order.push(i);
+            }
+        }
+        for i in order {
+            if self.inflight >= MAX_INFLIGHT {
                 break;
-            };
+            }
             let e = &mut self.entries[i];
+            if e.texture.is_some() || e.queued || e.viewing {
+                continue;
+            }
             e.queued = true;
-            if let Some(tx) = &self.job_tx {
-                if tx.send((e.id, e.path.clone())).is_err() {
-                    break; // worker gone
+            self.inflight += 1;
+            let id = e.id;
+            let path = e.path.clone();
+            let tx = self.result_tx.clone();
+            rayon::spawn(move || {
+                let res = crate::decode_image(&path)
+                    .map(|d| (d.rgba, d.width, d.height))
+                    .map_err(|e| format!("{e:#}"));
+                // Receiver gone (grid dropped): result is discarded and the
+                // job simply ends.
+                let _ = tx.send(DecodeResult { id, res });
+            });
+        }
+    }
+
+    /// Grid index of the entry with this stable id (ids never shift when
+    /// failed entries are spliced out; indices do).
+    pub fn index_of(&self, id: u64) -> Option<usize> {
+        self.entries.iter().position(|e| e.id == id)
+    }
+
+    /// Remove the entry with this stable id, if present.
+    pub fn remove_entry_by_id(&mut self, id: u64) {
+        if let Some(i) = self.index_of(id) {
+            self.remove_entry(i);
+        }
+    }
+
+    /// Indices of the grid neighbors of `sel` — left, right, up, down, in
+    /// that order — as prefetch priority. Needs the window size for the
+    /// column count. Duplicates and out-of-range indices are skipped.
+    pub fn prefetch_neighbors(&self, sel: usize, win_w: f32, win_h: f32) -> Vec<usize> {
+        let n = self.entries.len();
+        if n == 0 {
+            return Vec::new();
+        }
+        let (cols, ..) = grid_layout(n, win_w, win_h);
+        let mut v = Vec::with_capacity(4);
+        for i in [
+            sel.checked_sub(1),
+            Some(sel + 1),
+            sel.checked_sub(cols),
+            Some(sel + cols),
+        ] {
+            if let Some(i) = i {
+                if i < n && !v.contains(&i) {
+                    v.push(i);
                 }
             }
-            self.inflight += 1;
         }
+        v
     }
 
     /// Remove a failed entry so it disappears from the grid. Indices after
@@ -370,6 +432,22 @@ mod tests {
     fn grid_layout_side_is_square_of_cell_minimum() {
         let (_, cw, ch, side) = grid_layout(7, 1200.0, 700.0);
         assert_eq!(side, cw.min(ch));
+    }
+
+    #[test]
+    fn prefetch_neighbors_left_right_up_down() {
+        let dir = std::env::temp_dir().join(format!("vv-test-pf-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..9 {
+            std::fs::write(dir.join(format!("{i:02}.png")), b"").unwrap();
+        }
+        let grid = Grid::from_dir(&dir).unwrap();
+        // Square window: 9 images lay out as a 3x3 grid, so index 4's
+        // neighbors are 3 (left), 5 (right), 1 (up), 7 (down).
+        assert_eq!(grid.prefetch_neighbors(4, 640.0, 640.0), vec![3, 5, 1, 7]);
+        // Top-left corner: only right (1) and down (3) exist.
+        assert_eq!(grid.prefetch_neighbors(0, 640.0, 640.0), vec![1, 3]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
