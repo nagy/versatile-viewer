@@ -48,7 +48,7 @@ const THUMB_LONG_SIDE: u32 = 1024;
 
 /// A finished background decode, matched to an entry by its unique id
 /// (indices shift when entries come and go; ids never do).
-/// `blur` is the tiny blurred copy for the VV_BLUR_BG gimmick (None when
+/// `blur` is the tiny blurred copy for the `VV_BLUR_BG` gimmick (None when
 /// the gimmick is off), computed here on the worker so the main thread
 /// never touches full-res pixels for it.
 struct DecodeResult {
@@ -57,14 +57,14 @@ struct DecodeResult {
 }
 
 /// Successful decode payload: the square thumbnail RGBA (long side
-/// THUMB_LONG_SIDE) plus the untouched full-resolution RGBA. The main
+/// `THUMB_LONG_SIDE`) plus the untouched full-resolution RGBA. The main
 /// thread uploads the thumb for every entry but uploads the full texture
 /// only for keep-set entries (selection/open + prefetched neighbors),
 /// dropping the rest. The buffers live only until the next frame drains
-/// them, bounded by MAX_INFLIGHT.
+/// them, bounded by `MAX_INFLIGHT`.
 type DecodeOk = (Vec<u8>, u32, u32, Option<BlurData>, (Vec<u8>, u32, u32));
 
-/// Grid layout: (cols, cell_w, cell_h, side, content_h).
+/// Grid layout: (`cols`, `cell_w`, `cell_h`, `side`, `content_h`).
 type Layout = (usize, f32, f32, f32, f32);
 /// Cache key: entry count + bit patterns of window size and zoom.
 type LayoutKey = (usize, u32, u32, u32);
@@ -77,7 +77,7 @@ pub struct GridEntry {
     /// Full-resolution image dimensions (as decoded; not the thumb's).
     pub width: u32,
     pub height: u32,
-    /// Square thumbnail texture (long side THUMB_LONG_SIDE) — what the grid
+    /// Square thumbnail texture (long side `THUMB_LONG_SIDE`) — what the grid
     /// cell draws. Full-resolution textures live in `full` only for a small
     /// keep-set, so VRAM stays bounded on large directories.
     pub texture: Option<Texture2D>,
@@ -95,7 +95,7 @@ pub struct GridEntry {
     /// Texture currently held by the image view (taken out of the grid); it
     /// is put back when the view is done, and never re-dispatched meanwhile.
     pub viewing: bool,
-    /// Tiny blurred copy for the VV_BLUR_BG background (kept when the
+    /// Tiny blurred copy for the `VV_BLUR_BG` background (kept when the
     /// texture is out in the image view; the view clones it).
     pub blur: Option<BlurData>,
 }
@@ -126,8 +126,8 @@ pub struct Grid {
     /// only when any of those change, since the layout math is O(n). Borrowed
     /// interiorly because `draw` takes &self.
     layout_cache: RefCell<Option<(LayoutKey, Layout)>>,
-    /// VV_BLUR_BG gimmick on? Read once; decode workers compute the tiny
-    /// VV_BLUR_BG gimmick settings, read once: decode workers compute the
+    /// `VV_BLUR_BG` gimmick on? Read once; decode workers compute the tiny
+    /// `VV_BLUR_BG` gimmick settings, read once: decode workers compute the
     /// tiny blurred copy only when enabled, at this texture long side.
     blur_enabled: bool,
     blur_px: u32,
@@ -138,7 +138,7 @@ impl Grid {
     /// background decode worker.
     pub fn from_dir(dir: &Path) -> Result<Grid> {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
-            .with_context(|| format!("failed to read directory {dir:?}"))?
+            .with_context(|| format!("failed to read directory {}", dir.display()))?
             .filter_map(|e| e.ok().map(|e| e.path()))
             .filter(|p| {
                 p.is_file()
@@ -344,13 +344,6 @@ impl Grid {
         }
     }
 
-    /// Remove the entry with this stable id, if present.
-    pub fn remove_entry_by_id(&mut self, id: u64) {
-        if let Some(i) = self.index_of(id) {
-            self.remove_entry(i);
-        }
-    }
-
     /// Indices of the grid neighbors of `sel` — left, right, up, down, in
     /// that order — as prefetch priority. Needs the window size for the
     /// column count. Duplicates and out-of-range indices are skipped.
@@ -398,19 +391,13 @@ impl Grid {
         self.scroll = self.scroll.clamp(0.0, scroll_max);
     }
 
-    /// Remove a failed entry so it disappears from the grid. Indices after
-    /// `i` shift; the selection is clamped.
-    pub fn remove_entry(&mut self, i: usize) {
-        if i < self.entries.len() {
-            self.entries.remove(i);
-            self.selected = self.selected.min(self.entries.len().saturating_sub(1));
-        }
-    }
-
     /// Grid navigation: h/j/k/l + arrows move the selection (auto-repeat
     /// while held, at the X server's rate — xset r rate), g/G jump to the
     /// first/last image, Enter opens the selected image, q quits. ESC is
     /// inert here (grid is the home view).
+    // One frame's input pipeline (queue drain, repeat, zoom, scroll,
+    // navigation, mouse) is intentionally linear; see main() too.
+    #[allow(clippy::too_many_lines)]
     pub fn handle_input(&mut self, rl: &mut RaylibHandle, win_w: f32, win_h: f32) -> GridAction {
         if self.entries.is_empty() {
             return GridAction::None;
@@ -743,6 +730,7 @@ fn grid_layout_at(n: usize, win_w: f32, win_h: f32, zoom: f32) -> (usize, f32, f
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)] // the asserted values are exact grid arithmetic
 mod tests {
     use tempfile::TempDir;
 

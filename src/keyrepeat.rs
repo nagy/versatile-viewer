@@ -1,9 +1,9 @@
 //! Auto-repeat for keys the viewer handles manually (nav keys, grid moves).
 //!
-//! Raylib reports key presses as edges only: IsKeyPressed fires once per
+//! Raylib reports key presses as edges only: `IsKeyPressed` fires once per
 //! physical press (GLFW repeat events are discarded), so holding a key
 //! does nothing. This module reimplements the X server's auto-repeat on
-//! top of IsKeyDown, using the very same delay/rate values `xset r rate`
+//! top of `IsKeyDown`, using the very same delay/rate values `xset r rate`
 //! configures (read once from `xset q`); falls back to the Xorg defaults
 //! (660 ms delay, 20 repeats/s) when they cannot be read (Wayland, no X).
 
@@ -32,15 +32,15 @@ impl RepeatState {
     }
 
     /// Feed this key's state once per frame. `edge`: the key was pressed
-    /// this frame (from the raw event queue — IsKeyPressed can miss taps
+    /// this frame (from the raw event queue — `IsKeyPressed` can miss taps
     /// that fit inside one frame); `down`: the key is currently held;
-    /// `now`: rl.get_time(). Returns true exactly when the action should
+    /// `now`: `rl.get_time`(). Returns true exactly when the action should
     /// fire: on the initial press, then every 1/rate seconds once the hold
     /// outlasts the delay.
     pub fn tick(&mut self, edge: bool, down: bool, now: f64, delay: f32, rate: f32) -> bool {
         if edge {
             self.held = true;
-            self.next = now + (delay as f64).max(0.0);
+            self.next = now + f64::from(delay).max(0.0);
             return true;
         }
         if !down || !self.held {
@@ -50,7 +50,7 @@ impl RepeatState {
         if now >= self.next {
             // Schedule relative to the last fire (not to `now`) so repeats
             // stay at the configured rate; never fire twice in one frame.
-            self.next = (self.next + 1.0 / (rate as f64).max(0.001)).max(now);
+            self.next = (self.next + 1.0 / f64::from(rate).max(0.001)).max(now);
             return true;
         }
         false
@@ -88,7 +88,7 @@ fn num_after(line: &str, key: &str) -> Option<f32> {
     let num: String = rest
         .trim_start()
         .chars()
-        .take_while(|c| c.is_ascii_digit())
+        .take_while(char::is_ascii_digit)
         .collect();
     num.parse().ok()
 }

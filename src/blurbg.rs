@@ -18,11 +18,11 @@ use raylib::{color::Color, consts::TextureFilter, prelude::*, texture::RaylibTex
 pub type BlurData = (Vec<u8>, u32, u32);
 
 /// Long side of the blurred background texture (GPU-upscaled from this).
-/// Configurable via VV_BLUR_PX; fewer pixels = blurrier.
+/// Configurable via `VV_BLUR_PX`; fewer pixels = blurrier.
 const DEFAULT_LONG_SIDE: u32 = 128;
 /// Gaussian sigma applied to the tiny image (in its own pixels).
 const BLUR_SIGMA: f32 = 8.0;
-/// Background brightness when VV_BG_DIM is unset.
+/// Background brightness when `VV_BG_DIM` is unset.
 const DEFAULT_DIM: f32 = 0.6;
 
 /// Crossfade duration for grid-view background changes (seconds).
@@ -33,7 +33,7 @@ pub fn enabled() -> bool {
     std::env::var("VV_BLUR_BG").as_deref() == Ok("1")
 }
 
-/// Long side of the background texture, from VV_BLUR_PX (clamped to a sane
+/// Long side of the background texture, from `VV_BLUR_PX` (clamped to a sane
 /// 8..=1024; the default 128 is already far below any window size).
 pub fn blur_px() -> u32 {
     std::env::var("VV_BLUR_PX")
@@ -43,7 +43,7 @@ pub fn blur_px() -> u32 {
         .clamp(8, 1024)
 }
 
-/// Background brightness from VV_BG_DIM (0..=1 multiplier, clamped).
+/// Background brightness from `VV_BG_DIM` (0..=1 multiplier, clamped).
 fn parse_dim(s: Option<&str>) -> f32 {
     s.and_then(|s| s.trim().parse::<f32>().ok())
         .unwrap_or(DEFAULT_DIM)
@@ -51,7 +51,7 @@ fn parse_dim(s: Option<&str>) -> f32 {
 }
 
 /// Compute the tiny blurred copy of an RGBA8 image. `long_side` is the
-/// texture's long side (VV_BLUR_PX, default 128). Cheap enough to run on a
+/// texture's long side (`VV_BLUR_PX`, default 128). Cheap enough to run on a
 /// decode worker; the result is a few KB.
 pub fn small_blur(rgba: &[u8], width: u32, height: u32, long_side: u32) -> BlurData {
     let (tw, th) = if width >= height {
@@ -192,8 +192,7 @@ impl BlurBg {
     pub fn draw(&mut self, d: &mut RaylibDrawHandle, win_w: f32, win_h: f32) {
         let progress = self
             .fade_start
-            .map(|s| (s.elapsed().as_secs_f64() / FADE_SECS).min(1.0))
-            .unwrap_or(1.0);
+            .map_or(1.0, |s| (s.elapsed().as_secs_f64() / FADE_SECS).min(1.0));
         if progress >= 1.0 {
             self.old = None;
             self.fade_start = None;

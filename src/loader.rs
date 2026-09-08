@@ -14,7 +14,7 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::{Receiver, Sender, TryRecvError, channel},
+        mpsc::{Receiver, Sender, channel},
     },
     time::{Duration, Instant},
 };
@@ -27,9 +27,10 @@ use crate::{
     decode_common, downscale_rgba, fb_to_rgba, is_jxl,
 };
 
-/// Wrap a jxl-oxide error (a bare boxed trait object) into anyhow.
+/// Wrap a jxl-oxide error (a bare boxed trait object) into anyhow,
+/// consuming the box (anyhow adopts `Box<dyn Error + Send + Sync>`).
 fn jxl_err(e: Box<dyn std::error::Error + Send + Sync + 'static>) -> anyhow::Error {
-    anyhow::anyhow!("jxl-oxide: {e}")
+    anyhow::Error::from_boxed(e).context("jxl-oxide")
 }
 
 /// Normal read chunk size: big enough that file IO never bottlenecks.
@@ -37,7 +38,7 @@ const CHUNK: usize = 256 * 1024;
 /// Minimum time between progressive preview uploads, so the main thread is
 /// not flooded with full-size RGBA buffers.
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(100);
-/// VV_SLOW_STREAM=1: dribble chunks of this size with a pause between them
+/// `VV_SLOW_STREAM`=1: dribble chunks of this size with a pause between them
 /// until the first preview renders (or `SLOW_DRIBBLE_MAX` bytes have been
 /// dribbled), then continue normally — makes progressive decoding visible
 /// to the eye in debug runs.
@@ -52,7 +53,7 @@ pub enum LoaderMsg {
     Header { width: u32, height: u32 },
     /// Progressive preview of the still-loading frame (full-size RGBA8,
     /// blurry until done). Sent at most every `PREVIEW_INTERVAL`. `blur` is
-    /// the tiny blurred copy for the VV_BLUR_BG gimmick (None when off).
+    /// the tiny blurred copy for the `VV_BLUR_BG` gimmick (None when off).
     Preview {
         rgba: Vec<u8>,
         width: u32,
@@ -80,7 +81,7 @@ impl Loader {
     /// Spawn the worker for `path`.
     /// `preview_px` caps the long side of progressive-preview buffers: the
     /// screen never shows more pixels than that, so shipping full-size RGBA
-    /// every PREVIEW_INTERVAL is pure allocation churn.
+    /// every `PREVIEW_INTERVAL` is pure allocation churn.
     pub fn start(path: PathBuf, preview_px: u32) -> Loader {
         let (tx, rx) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -106,10 +107,7 @@ impl Loader {
 
     /// Poll the next queued message without blocking.
     pub fn try_recv(&self) -> Option<LoaderMsg> {
-        match self.rx.try_recv() {
-            Ok(msg) => Some(msg),
-            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => None,
-        }
+        self.rx.try_recv().ok()
     }
 }
 
@@ -142,7 +140,8 @@ fn stream(
         return Ok(());
     }
 
-    let mut file = std::fs::File::open(path).with_context(|| format!("failed to open {path:?}"))?;
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let slow = std::env::var_os("VV_SLOW_STREAM").is_some();
     let mut buf = vec![0u8; CHUNK];
     // `try_init` consumes the uninit image; keep it in an Option so the
@@ -234,7 +233,7 @@ fn stream(
     let render = img
         .render_frame(0)
         .map_err(jxl_err)
-        .with_context(|| format!("failed to render {path:?}"))?;
+        .with_context(|| format!("failed to render {}", path.display()))?;
     let (rgba, width, height) = fb_to_rgba(&render.image_all_channels())?;
     let blur = blur_enabled.then(|| blurbg::small_blur(&rgba, width, height, blur_px));
     let _ = tx.send(LoaderMsg::Done {
@@ -313,7 +312,7 @@ mod tests {
                     break;
                 }
                 LoaderMsg::Header { .. } | LoaderMsg::Preview { .. } => {
-                    saw_header_or_preview = true
+                    saw_header_or_preview = true;
                 }
                 LoaderMsg::Failed(err) => panic!("unexpected failure: {err}"),
             }

@@ -34,7 +34,7 @@ path = "src/main.rs"
 tempfile = "3"
 
 [lints.clippy]
-# Keep the warning count at zero (enforced by CI once R6 lands).
-# Turn on `pedantic = "warn"` later and burn down the findings; the full
-# suite currently reports ~150 hits, too noisy to be useful.
+# Warning count stays at zero; pedantic is warn and burned down
+# incrementally (plain cargo clippy shows the remaining findings).
 all = "deny"
+pedantic = "warn"

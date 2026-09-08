@@ -1,12 +1,25 @@
+// Pixel/coordinate math lives in f32 (raylib's units) and indices in
+// usize/u32. The casts between them are inherent to that boundary, and
+// every value here (window pixels, texture dimensions) is far below
+// f32's exact-integer range, so the pedantic cast lints are noise.
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    // win_w/win_h and friends are natural paired names in window math.
+    clippy::similar_names
+)]
+
 //! versatile-viewer — image viewer (JXL first-class, plus PNG/JPEG) with a
 //! directory thumbnail grid. q quits; ESC/Enter toggle grid ↔ image view.
 //!
 //! Usage: versatile-viewer <image-path-or-directory>
 //!
-//! Env gimmicks: VV_DEBUG=1 traces input events; VV_SLOW_STREAM=1 slows the
-//! JXL stream; VV_BLUR_BG=1 draws a blurred copy of the viewed image as the
+//! Env gimmicks: `VV_DEBUG`=1 traces input events; `VV_SLOW_STREAM`=1 slows the
+//! JXL stream; `VV_BLUR_BG`=1 draws a blurred copy of the viewed image as the
 //! image-view background (scaled to cover the window, GPU-upscaled).
-//! VV_BG_DIM=0..1 sets its brightness (default 0.6); VV_BLUR_PX sets the
+//! `VV_BG_DIM`=0..1 sets its brightness (default 0.6); `VV_BLUR_PX` sets the
 //! blur resolution — the tiny texture's long side, default 128, fewer =
 //! blurrier.
 
@@ -73,7 +86,7 @@ struct ViewState {
     /// Texture currently shown in image mode.
     view_tex: Option<Texture2D>,
     view_loading: bool,
-    /// When the current load started (rl.get_time()); the "decoding..."
+    /// When the current load started (`rl.get_time`()); the "decoding..."
     /// indicator only appears once the load exceeds 1 s.
     view_loading_since: f64,
     /// Full-resolution image dimensions (0 until known).
@@ -87,8 +100,8 @@ struct ViewState {
     view_scale: Option<f32>,
     /// Streaming loader for the open image; drop cancels the worker.
     loader: Option<Loader>,
-    /// VV_BLUR_BG background (None when the gimmick is off). Declared after
-    /// `rl` (via ViewState) so it drops and unloads before the window.
+    /// `VV_BLUR_BG` background (None when the gimmick is off). Declared after
+    /// `rl` (via `ViewState`) so it drops and unloads before the window.
     blur_bg: Option<BlurBg>,
 }
 
@@ -186,17 +199,24 @@ fn file_magic(path: &Path) -> Option<[u8; 2]> {
         .map(|()| magic)
 }
 
-/// Magics the image crate can decode (with_guessed_format sniffs the full
+/// Magics the image crate can decode (`with_guessed_format` sniffs the full
 /// header; this only needs to steer files away from the JXL decoder).
+// The magic table is kept flat and grouped by format on purpose; clippy's
+// nested suggestion reorders it into a byte soup.
+#[allow(clippy::unnested_or_patterns)]
 fn is_common_magic(m: [u8; 2]) -> bool {
+    let [a, b] = m;
     matches!(
-        m,
-        [0x89, b'P'] // PNG
-            | [0xff, 0xd8] // JPEG
-            | [b'R', b'I'] // RIFF (WebP)
-            | [b'G', b'I'] // GIF
-            | [b'B', b'M'] // BMP
-            | [b'I', b'I'] | [b'M', b'M'] // TIFF
+        (a, b),
+        (0x89, b'P') // PNG
+            | (0xff, 0xd8) // JPEG
+            | (b'R', b'I') // RIFF (WebP)
+            | (b'G', b'I') // GIF
+            | (b'B', b'M') // BMP
+            | (b'I', b'I')
+            | (b'I', b'M') // TIFF, both byte orders
+            | (b'M', b'I')
+            | (b'M', b'M')
     )
 }
 
@@ -206,7 +226,7 @@ fn decode_image(path: &Path) -> Result<DecodedImage> {
     } else {
         decode_common(path)
     }
-    .with_context(|| format!("failed to decode {path:?}"))
+    .with_context(|| format!("failed to decode {}", path.display()))
 }
 
 /// Longest texture side we upload. Desktop GL hardware ranges from 4096
@@ -239,7 +259,7 @@ pub(crate) fn downscale_rgba(
 /// Upload a raw RGBA8 buffer as a GPU texture.
 ///
 /// Must be called on the main thread (GL context lives there). The buffer
-/// is only borrowed for the upload; the ffi::Image wrapper is forgotten so
+/// is only borrowed for the upload; the `ffi::Image` wrapper is forgotten so
 /// raylib never frees the caller's Vec.
 fn upload_rgba(
     rl: &mut RaylibHandle,
@@ -294,7 +314,7 @@ fn show_frame(
     Ok(())
 }
 
-/// Upload a tiny blurred copy as the image-view background (VV_BLUR_BG
+/// Upload a tiny blurred copy as the image-view background (`VV_BLUR_BG`
 /// gimmick). `tag` identifies the source image (grid entry id; None for a
 /// single-file launch) so grid crossfades can skip redundant transitions.
 /// No-op when the gimmick is off or the copy is missing.
@@ -391,6 +411,9 @@ fn show_entry(
     }
 }
 
+// The event loop is one long state machine by design; splitting it
+// would scatter the frame-order invariants across call sites.
+#[allow(clippy::too_many_lines)]
 fn main() -> Result<()> {
     let arg = env::args()
         .nth(1)
@@ -405,7 +428,7 @@ fn main() -> Result<()> {
     } else if path.is_file() {
         None
     } else {
-        bail!("no such file or directory: {path:?}");
+        bail!("no such file or directory: {}", path.display());
     };
 
     // Single-image launch: decode before opening the window so it can be
@@ -431,8 +454,7 @@ fn main() -> Result<()> {
     };
     let (win0_w, win0_h) = single_decoded
         .as_ref()
-        .map(|d| (d.width as i32, d.height as i32))
-        .unwrap_or((1024, 768));
+        .map_or((1024, 768), |d| (d.width as i32, d.height as i32));
 
     let (mut rl, thread) = raylib::init()
         .size(win0_w, win0_h)
@@ -729,8 +751,11 @@ fn main() -> Result<()> {
                 || rl.is_key_down(KeyboardKey::KEY_RIGHT_SHIFT);
             while let Some(k) = rl.get_key_pressed() {
                 match k {
-                    KeyboardKey::KEY_ENTER | KeyboardKey::KEY_KP_ENTER => enter = true,
-                    KeyboardKey::KEY_ESCAPE => enter = true,
+                    KeyboardKey::KEY_ESCAPE
+                    | KeyboardKey::KEY_ENTER
+                    | KeyboardKey::KEY_KP_ENTER => {
+                        enter = true;
+                    }
                     KeyboardKey::KEY_Q => quit_pressed = true,
                     KeyboardKey::KEY_SPACE | KeyboardKey::KEY_N => nav_next_edge = true,
                     KeyboardKey::KEY_BACKSPACE | KeyboardKey::KEY_P => nav_prev_edge = true,
