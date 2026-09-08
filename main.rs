@@ -119,20 +119,42 @@ fn decode_common(path: &Path) -> Result<DecodedImage> {
     })
 }
 
+/// Decide the decoder by file content, not the file name: the 2-byte magic
+/// is sniffed first (JXL codestream vs the common formats), and the .jxl
+/// extension only acts as a tiebreaker for unknown magic (JXL container
+/// files start with a box header, not the codestream magic).
 fn is_jxl(path: &Path) -> bool {
-    path.extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("jxl"))
-        || {
-            // JXL codestream sniff when extension is missing.
-            std::fs::File::open(path)
-                .and_then(|mut f| {
-                    use std::io::Read;
-                    let mut magic = [0u8; 2];
-                    f.read_exact(&mut magic)?;
-                    Ok(magic == [0xff, 0x0a])
-                })
-                .unwrap_or(false)
-        }
+    match file_magic(path) {
+        Some(m) if m == [0xff, 0x0a] => true, // raw JXL codestream
+        Some(m) if is_common_magic(m) => false,
+        _ => path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("jxl")),
+    }
+}
+
+/// First two bytes of the file; None on a missing/short file.
+fn file_magic(path: &Path) -> Option<[u8; 2]> {
+    use std::io::Read;
+    let mut magic = [0u8; 2];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .ok()
+        .map(|()| magic)
+}
+
+/// Magics the image crate can decode (with_guessed_format sniffs the full
+/// header; this only needs to steer files away from the JXL decoder).
+fn is_common_magic(m: [u8; 2]) -> bool {
+    matches!(
+        m,
+        [0x89, b'P'] // PNG
+            | [0xff, 0xd8] // JPEG
+            | [b'R', b'I'] // RIFF (WebP)
+            | [b'G', b'I'] // GIF
+            | [b'B', b'M'] // BMP
+            | [b'I', b'I'] | [b'M', b'M'] // TIFF
+    )
 }
 
 fn decode_image(path: &Path) -> Result<DecodedImage> {
@@ -1008,19 +1030,37 @@ mod tests {
         // Raw codestream starts with 0xFF 0x0A — JXL even without extension.
         std::fs::write(&bare, [0xffu8, 0x0a, 0x01, 0x02]).unwrap();
         assert!(is_jxl(&bare));
-        // Not a codestream.
-        std::fs::write(&bare, b"PNG").unwrap();
+        // PNG magic — not a codestream, even without an extension.
+        std::fs::write(&bare, [0x89u8, b'P', 0x4e, 0x47]).unwrap();
         assert!(!is_jxl(&bare));
         std::fs::remove_file(&bare).ok();
     }
 
     #[test]
-    fn jxl_extension_is_honored_even_for_bad_content() {
-        // Extension decides first; sniffing only runs without a .jxl suffix.
-        let path = std::env::temp_dir().join(format!("vv-test-ext-{}.jxl", std::process::id()));
-        std::fs::write(&path, b"not really jxl").unwrap();
-        assert!(is_jxl(&path));
-        std::fs::remove_file(&path).ok();
+    fn content_decides_over_extension() {
+        // Content-first dispatch: a PNG renamed to .jxl decodes as PNG, a
+        // JXL codestream renamed to .png is still JXL. Unknown magic with a
+        // .jxl suffix (e.g. a container-format file) falls back to JXL.
+        let dir = std::env::temp_dir().join(format!("vv-test-magic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let png = dir.join("real.png");
+        image::DynamicImage::new_rgb8(2, 3).save(&png).unwrap();
+        let renamed_jxl = dir.join("renamed.jxl");
+        std::fs::copy(&png, &renamed_jxl).unwrap();
+        assert!(!is_jxl(&renamed_jxl));
+        let decoded = decode_image(&renamed_jxl).unwrap();
+        assert_eq!((decoded.width, decoded.height), (2, 3));
+
+        let renamed_png = dir.join("renamed.png");
+        std::fs::write(&renamed_png, [0xffu8, 0x0a, 0x01, 0x02]).unwrap();
+        assert!(is_jxl(&renamed_png));
+
+        let container = dir.join("container.jxl");
+        std::fs::write(&container, [0x00, 0x00, 0x00, 0x0c, b'J', b'X', b'L', b' ']).unwrap();
+        assert!(is_jxl(&container));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
