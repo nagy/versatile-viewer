@@ -243,7 +243,7 @@ fn put_back_view(
             .as_mut()
             .and_then(|g| g.entries.iter_mut().find(|e| e.id == id))
     {
-        e.texture = view_tex.take();
+        e.full = view_tex.take();
         e.viewing = false;
     }
     *view_tex = None;
@@ -461,7 +461,11 @@ fn main() -> Result<()> {
             {
                 match g.entries.iter_mut().find(|e| e.id == id) {
                     Some(e) => {
-                        if let Some(tex) = e.texture.take() {
+                        // Decode landed: its full-res texture was kept for
+                        // the open entry (keep-set) — take it over. If it
+                        // landed without one (opened while the entry was
+                        // outside the keep set), fall back to streaming.
+                        if let Some(tex) = e.full.take() {
                             e.viewing = true;
                             view_from_grid = Some(id);
                             view_tex = Some(tex);
@@ -479,6 +483,13 @@ fn main() -> Result<()> {
                                 e.blur.as_ref(),
                                 Some(id),
                             );
+                        } else if !e.queued && e.texture.is_some() {
+                            // Decode finished but its full-res texture was
+                            // evicted meanwhile (we left the keep set):
+                            // restart via the streaming loader.
+                            view_loading = true;
+                            view_loading_since = rl.get_time();
+                            loader = Some(Loader::start(e.path.clone()));
                         }
                     }
                     None => open_failed = true, // entry vanished (decode failed)
@@ -555,16 +566,17 @@ fn main() -> Result<()> {
                         eprintln!("vv: enter pressed -> open idx {i}");
                     }
                     // If the entry's decode already finished, its full-res
-                    // texture is ready: take it and show it this frame — no
-                    // decode, no black gap. If a decode is already in flight,
-                    // just wait for it (no duplicate work). Otherwise fall
-                    // back to the streaming loader (JXL: blurry preview fast).
+                    // texture was kept for it (keep-set): take it and show
+                    // it this frame — no decode, no black gap. If a decode
+                    // is already in flight, just wait for it (no duplicate
+                    // work). Otherwise fall back to the streaming loader
+                    // (JXL: blurry preview fast).
                     let (id, tex, w, h, path, queued, blur) = {
                         let g = grid.as_mut().unwrap();
                         let e = &mut g.entries[i];
                         (
                             e.id,
-                            e.texture.take(),
+                            e.full.take(),
                             e.width,
                             e.height,
                             e.path.clone(),
@@ -744,7 +756,7 @@ fn main() -> Result<()> {
                             let e = &mut g.entries[j];
                             (
                                 e.id,
-                                e.texture.take(),
+                                e.full.take(),
                                 e.width,
                                 e.height,
                                 e.path.clone(),
