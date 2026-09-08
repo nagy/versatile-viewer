@@ -238,7 +238,7 @@ impl BlurBg {
 
 /// Dest rect for a texture of w x h scaled to cover the window (fit on the
 /// narrower side, centered; the other axis overflows and is cropped).
-fn cover_rect(w: u32, h: u32, win_w: f32, win_h: f32) -> Rectangle {
+const fn cover_rect(w: u32, h: u32, win_w: f32, win_h: f32) -> Rectangle {
     let (fw, fh) = (w as f32, h as f32);
     let s = (win_w / fw).max(win_h / fh);
     Rectangle {
@@ -252,6 +252,9 @@ fn cover_rect(w: u32, h: u32, win_w: f32, win_h: f32) -> Rectangle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Compile-time check that these stay const-evaluable.
+    const _: f32 = cover_rect(64, 32, 800.0, 600.0).width;
 
     #[test]
     fn small_blur_dims_and_size() {

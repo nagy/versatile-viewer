@@ -101,7 +101,7 @@ pub(crate) fn fb_to_rgba(fb: &jxl_oxide::FrameBuffer) -> Result<(Vec<u8>, u32, u
     Ok((rgba, width, height))
 }
 
-fn to_u8(v: f32) -> u8 {
+const fn to_u8(v: f32) -> u8 {
     (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
 }
 
@@ -987,6 +987,9 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Compile-time check that this stays const-evaluable.
+    const _: u8 = to_u8(0.5);
 
     #[test]
     fn to_u8_clamps_and_rounds() {
