@@ -36,7 +36,9 @@ via rpath, so the result is self-contained. Outside Nix:
 | `e` / `Shift+E`     | —                                  | fit width / fit height              |
 | `t`                 | —                                  | toggle fit-all / fill               |
 | `+` / `-`           | zoom thumbnails                    | free zoom (25% steps, eased)        |
-| mouse wheel         | scroll (when zoomed in)            | —                                   |
+| mouse wheel       | scroll (when zoomed in)            | free zoom (25% steps, anchored)     |
+| left-drag         | —                                  | pan                                 |
+| click / click     | select / open                      | —                                   |
 
 `Esc` never quits the program.
 

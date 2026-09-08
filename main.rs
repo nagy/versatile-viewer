@@ -882,6 +882,21 @@ fn main() -> Result<()> {
                     let factor = if zoom_in { 1.25 } else { 1.0 / 1.25 };
                     st.zoom = ZoomMode::Free((target_scale * factor).clamp(0.01, 100.0));
                 }
+                // Mouse wheel zooms free-mode with the same 25% steps; the
+                // center-anchored easing below keeps the zoom anchored.
+                let wheel = rl.get_mouse_wheel_move();
+                if wheel != 0.0 {
+                    let factor = 1.25f32.powf(wheel);
+                    st.zoom = ZoomMode::Free((target_scale * factor).clamp(0.01, 100.0));
+                }
+                // Left-drag pans: the image follows the cursor (grab-style).
+                // Same easing path as h/j/k/l panning, so it glides and
+                // settles; only meaningful once dimensions are known.
+                if rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT) {
+                    let delta = rl.get_mouse_delta();
+                    st.target_pan.x += delta.x;
+                    st.target_pan.y += delta.y;
+                }
 
                 // Window-center-anchored zoom (free zoom only): while the on-screen
                 // scale eases, shift the pan each frame so the image point under

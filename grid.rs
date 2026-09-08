@@ -547,6 +547,32 @@ impl Grid {
         if quit {
             return GridAction::Quit;
         }
+        // Mouse: click selects a cell; clicking the already-selected cell
+        // opens it (first click selects, second opens — nsxiv-style).
+        if rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT) {
+            let m = rl.get_mouse_position();
+            let (cols, cw, ch, _side, _content_h) = self.layout(win_w, win_h);
+            // Grid coordinates: content is drawn at MARGIN + col*(cw+GAP)
+            // minus scroll, so add scroll back to the cursor position.
+            let (mx, my) = (m.x - MARGIN, m.y + self.scroll - MARGIN);
+            let col = (mx / (cw + GAP)).floor();
+            let row = (my / (ch + GAP)).floor();
+            if col >= 0.0
+                && row >= 0.0
+                && col < cols as f32
+                && mx - col * (cw + GAP) <= cw
+                && my - row * (ch + GAP) <= ch
+            {
+                let idx = row as usize * cols + col as usize;
+                if idx < self.entries.len() {
+                    if idx == self.selected {
+                        return GridAction::Open(idx);
+                    }
+                    self.selected = idx;
+                    self.ensure_visible(win_w, win_h);
+                }
+            }
+        }
         GridAction::None
     }
 
