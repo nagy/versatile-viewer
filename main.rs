@@ -624,8 +624,12 @@ fn main() -> Result<()> {
             }
             if open_failed {
                 st.loader = None; // cancel the worker
+                // Keep the entry: mark it failed so its cell stays visible
+                // (dimmed, error glyph) instead of silently vanishing.
                 if let Some(id) = st.open_id.take() {
-                    grid.as_mut().unwrap().remove_entry_by_id(id);
+                    grid.as_mut()
+                        .unwrap()
+                        .mark_failed(id, "decoding failed".to_string());
                 }
                 st.view_from_grid = None;
                 st.mode = Mode::Grid;

@@ -47,7 +47,7 @@ const MAX_INFLIGHT: usize = 6;
 const THUMB_LONG_SIDE: u32 = 1024;
 
 /// A finished background decode, matched to an entry by its unique id
-/// (indices shift when failed entries are spliced out; ids never do).
+/// (indices shift when entries come and go; ids never do).
 /// `blur` is the tiny blurred copy for the VV_BLUR_BG gimmick (None when
 /// the gimmick is off), computed here on the worker so the main thread
 /// never touches full-res pixels for it.
@@ -89,6 +89,9 @@ pub struct GridEntry {
     pub id: u64,
     /// A decode job for this entry is queued or in flight.
     pub queued: bool,
+    /// Set when the decode (or texture upload) failed; the cell stays
+    /// visible as a dimmed error square instead of silently vanishing.
+    pub failed: Option<String>,
     /// Texture currently held by the image view (taken out of the grid); it
     /// is put back when the view is done, and never re-dispatched meanwhile.
     pub viewing: bool,
@@ -160,6 +163,7 @@ impl Grid {
                     full: None,
                     id: i as u64,
                     queued: false,
+                    failed: None,
                     viewing: false,
                     blur: None,
                 })
@@ -203,9 +207,9 @@ impl Grid {
             )
             .collect();
 
-        // 1. Apply finished decodes. Collect failures for removal so entry
-        // indices stay valid until we splice.
-        let mut to_remove: Vec<usize> = Vec::new();
+        // 1. Apply finished decodes. Failed decodes mark their entry as
+        // failed (the cell stays visible, dimmed, with an error glyph)
+        // instead of splicing it out, so the grid count never lies.
         while let Ok(res) = self.result_rx.try_recv() {
             self.inflight -= 1;
             let Some(i) = self.entries.iter().position(|e| e.id == res.id) else {
@@ -238,7 +242,9 @@ impl Grid {
                         }
                         Err(err) => {
                             eprintln!("vv: {}: {err:#}", self.entries[i].path.display());
-                            to_remove.push(i);
+                            let e = &mut self.entries[i];
+                            e.queued = false;
+                            e.failed = Some(format!("{err:#}"));
                         }
                     }
                 }
@@ -251,15 +257,10 @@ impl Grid {
                         "vv: {}: decode failed: {err}",
                         self.entries[i].path.display()
                     );
-                    to_remove.push(i);
+                    let e = &mut self.entries[i];
+                    e.queued = false;
+                    e.failed = Some(format!("decode failed: {err}"));
                 }
-            }
-        }
-        // Splice out failed entries (reverse order keeps indices valid).
-        for &i in to_remove.iter().rev() {
-            self.entries.remove(i);
-            if i < self.selected {
-                self.selected -= 1;
             }
         }
         self.selected = self.selected.min(self.entries.len().saturating_sub(1));
@@ -293,7 +294,7 @@ impl Grid {
                 break;
             }
             let e = &mut self.entries[i];
-            if e.texture.is_some() || e.queued || e.viewing {
+            if e.texture.is_some() || e.queued || e.viewing || e.failed.is_some() {
                 continue;
             }
             e.queued = true;
@@ -330,10 +331,19 @@ impl Grid {
         cache.as_ref().expect("just cached").1
     }
 
-    /// Grid index of the entry with this stable id (ids never shift when
-    /// failed entries are spliced out; indices do).
+    /// Grid index of the entry with this stable id (ids stay stable for
+    /// the grid's lifetime; indices do not).
     pub fn index_of(&self, id: u64) -> Option<usize> {
         self.entries.iter().position(|e| e.id == id)
+    }
+
+    /// Mark the entry with this stable id as failed (e.g. a streaming load
+    /// that errored mid-way). The cell stays, dimmed, with an error glyph.
+    pub fn mark_failed(&mut self, id: u64, err: String) {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.id == id) {
+            e.queued = false;
+            e.failed = Some(err);
+        }
     }
 
     /// Remove the entry with this stable id, if present.
@@ -579,6 +589,19 @@ impl Grid {
                     height: tex.height() as f32,
                 };
                 d.draw_texture_pro(tex, src, thumb, Vector2::ZERO, 0.0, Color::WHITE);
+            } else if e.failed.is_some() {
+                // Decode failed: dim red placeholder with an error glyph —
+                // the file stays visible instead of silently vanishing.
+                d.draw_rectangle_rec(thumb, Color::new(72, 26, 26, 255));
+                let msg = "!";
+                let tw = d.measure_text(msg, 24);
+                d.draw_text(
+                    msg,
+                    (thumb.x + (thumb.width - tw as f32) / 2.0) as i32,
+                    (thumb.y + (thumb.height - 24.0) / 2.0) as i32,
+                    24,
+                    Color::new(214, 92, 92, 255),
+                );
             } else {
                 // Still decoding: placeholder square.
                 d.draw_rectangle_rec(thumb, Color::new(28, 28, 28, 255));
@@ -698,6 +721,22 @@ fn grid_layout_at(n: usize, win_w: f32, win_h: f32, zoom: f32) -> (usize, f32, f
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mark_failed_keeps_the_entry() {
+        let dir = std::env::temp_dir().join(format!("vv-test-failed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = image::DynamicImage::new_rgb8(1, 1);
+        png.save(dir.join("a.png")).unwrap();
+        let mut grid = Grid::from_dir(&dir).unwrap();
+        assert_eq!(grid.entries.len(), 1);
+        let id = grid.entries[0].id;
+        grid.mark_failed(id, "boom".to_string());
+        assert_eq!(grid.entries.len(), 1, "failed entry stays in the grid");
+        assert_eq!(grid.entries[0].failed.as_deref(), Some("boom"));
+        assert!(!grid.entries[0].queued);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn make_thumb_center_crops_to_square() {
