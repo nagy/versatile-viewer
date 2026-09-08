@@ -78,7 +78,10 @@ pub struct Loader {
 
 impl Loader {
     /// Spawn the worker for `path`.
-    pub fn start(path: PathBuf) -> Loader {
+    /// `preview_px` caps the long side of progressive-preview buffers: the
+    /// screen never shows more pixels than that, so shipping full-size RGBA
+    /// every PREVIEW_INTERVAL is pure allocation churn.
+    pub fn start(path: PathBuf, preview_px: u32) -> Loader {
         let (tx, rx) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
@@ -87,7 +90,14 @@ impl Loader {
         let blur_enabled = blurbg::enabled();
         let blur_px = blurbg::blur_px();
         std::thread::spawn(move || {
-            if let Err(err) = stream(&path, &worker_cancel, &tx, blur_enabled, blur_px) {
+            if let Err(err) = stream(
+                &path,
+                &worker_cancel,
+                &tx,
+                blur_enabled,
+                blur_px,
+                preview_px,
+            ) {
                 let _ = tx.send(LoaderMsg::Failed(format!("{err:#}")));
             }
         });
@@ -116,6 +126,7 @@ fn stream(
     tx: &Sender<LoaderMsg>,
     blur_enabled: bool,
     blur_px: u32,
+    preview_px: u32,
 ) -> Result<()> {
     if !is_jxl(path) {
         // No progressive data for common formats: one full decode.
@@ -189,6 +200,10 @@ fn stream(
                 // missing; ignore them and retry after the next chunk.
                 if let Ok(render) = img.render_loading_frame() {
                     let (rgba, width, height) = fb_to_rgba(&render.image_all_channels())?;
+                    // Previews never need full resolution (the screen is
+                    // smaller); cap the long side so a 50 MP image does not
+                    // allocate ~200 MB of RGBA per preview.
+                    let (rgba, width, height) = downscale(rgba, width, height, preview_px);
                     let blur =
                         blur_enabled.then(|| blurbg::small_blur(&rgba, width, height, blur_px));
                     let _ = tx.send(LoaderMsg::Preview {
@@ -231,6 +246,23 @@ fn stream(
     Ok(())
 }
 
+/// Downscale an RGBA8 buffer so its long side is at most `long_side`
+/// (below the cap it is returned unchanged — previews are never upscaled).
+fn downscale(rgba: Vec<u8>, width: u32, height: u32, long_side: u32) -> (Vec<u8>, u32, u32) {
+    let (width, height) = (width.max(1), height.max(1));
+    let m = width.max(height);
+    if m <= long_side.max(1) {
+        return (rgba, width, height);
+    }
+    let scale = long_side.max(1) as f32 / m as f32;
+    let nw = ((width as f32 * scale).round() as u32).max(1);
+    let nh = ((height as f32 * scale).round() as u32).max(1);
+    let img: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
+        image::ImageBuffer::from_raw(width, height, rgba).expect("rgba matches dimensions");
+    let small = image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle);
+    (small.into_raw(), nw, nh)
+}
+
 /// Read up to `buf.len()` bytes; 0 at EOF. A single read call: regular files
 /// normally fill the whole buffer, and short reads are fine anyway (the next
 /// loop iteration just reads more).
@@ -264,6 +296,19 @@ mod tests {
     }
 
     #[test]
+    fn downscale_caps_long_side_and_never_upscales() {
+        // Above the cap: 800x200 with cap 64 -> 64x16, RGBA8 length matches.
+        let (out, w, h) = downscale(vec![7u8; 800 * 200 * 4], 800, 200, 64);
+        assert_eq!((w, h), (64, 16));
+        assert_eq!(out.len(), (w * h * 4) as usize);
+        // Below the cap: returned untouched.
+        let rgba = vec![7u8; 32 * 16 * 4];
+        let (out, w, h) = downscale(rgba.clone(), 32, 16, 64);
+        assert_eq!((w, h), (32, 16));
+        assert_eq!(out, rgba);
+    }
+
+    #[test]
     fn png_loads_as_single_done_message() {
         // Non-JXL formats have no progressive data: exactly one Done, no
         // Header/Preview, correct dimensions.
@@ -271,7 +316,7 @@ mod tests {
         let path = dir.join("img.png");
         image::DynamicImage::new_rgb8(4, 3).save(&path).unwrap();
 
-        let loader = Loader::start(path);
+        let loader = Loader::start(path, 512);
         let mut saw_header_or_preview = false;
         let done;
         loop {
@@ -305,7 +350,7 @@ mod tests {
         let path = dir.join("x.jxl");
         std::fs::write(&path, b"not really jxl").unwrap();
 
-        let loader = Loader::start(path);
+        let loader = Loader::start(path, 512);
         loop {
             match wait(&loader, Duration::from_secs(10)).expect("loader timed out") {
                 LoaderMsg::Failed(_) => break,
@@ -323,7 +368,7 @@ mod tests {
         let path = dir.join("truncated.jxl");
         std::fs::write(&path, [0xffu8, 0x0a, 0x01, 0x02]).unwrap();
 
-        let loader = Loader::start(path);
+        let loader = Loader::start(path, 512);
         loop {
             match wait(&loader, Duration::from_secs(10)).expect("loader timed out") {
                 LoaderMsg::Failed(_) => break,
@@ -344,7 +389,7 @@ mod tests {
         let path = dir.join("img.png");
         image::DynamicImage::new_rgb8(16, 16).save(&path).unwrap();
 
-        let loader = Loader::start(path);
+        let loader = Loader::start(path, 512);
         drop(loader);
         std::thread::sleep(Duration::from_millis(50));
         // Nothing to assert beyond "no panic, no hang"; try_recv on the

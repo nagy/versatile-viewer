@@ -348,7 +348,8 @@ fn show_entry(
         st.loader = if queued {
             None // a grid decode is in flight; wait for it
         } else {
-            Some(Loader::start(path))
+            let preview_px = rl.get_screen_width().max(rl.get_screen_height()) as u32;
+            Some(Loader::start(path, preview_px))
         };
     }
 }
@@ -554,7 +555,9 @@ fn main() -> Result<()> {
                             // restart via the streaming loader.
                             st.view_loading = true;
                             st.view_loading_since = rl.get_time();
-                            st.loader = Some(Loader::start(e.path.clone()));
+                            let preview_px =
+                                rl.get_screen_width().max(rl.get_screen_height()) as u32;
+                            st.loader = Some(Loader::start(e.path.clone(), preview_px));
                         }
                         // else: decode still in flight — wait.
                     }
