@@ -61,6 +61,49 @@ enum Mode {
     Image,
 }
 
+/// Image-view state: what is shown and how it is framed.
+struct ViewState {
+    mode: Mode,
+    /// Grid entry open in image mode, by stable id (None on a single-file
+    /// launch).
+    open_id: Option<u64>,
+    /// Id of the grid entry whose full-res texture the view currently
+    /// holds; it goes back when leaving image mode or switching entries.
+    view_from_grid: Option<u64>,
+    /// Texture currently shown in image mode.
+    view_tex: Option<Texture2D>,
+    view_loading: bool,
+    /// When the current load started (rl.get_time()); the "decoding..."
+    /// indicator only appears once the load exceeds 1 s.
+    view_loading_since: f64,
+    /// Full-resolution image dimensions (0 until known).
+    img_w: f32,
+    img_h: f32,
+    zoom: ZoomMode,
+    /// On-screen pan offset, eased toward `target_pan` each frame.
+    pan: Vector2,
+    target_pan: Vector2,
+    /// On-screen scale, eased toward the target scale each frame.
+    view_scale: Option<f32>,
+    /// Streaming loader for the open image; drop cancels the worker.
+    loader: Option<Loader>,
+    /// VV_BLUR_BG background (None when the gimmick is off). Declared after
+    /// `rl` (via ViewState) so it drops and unloads before the window.
+    blur_bg: Option<BlurBg>,
+}
+
+impl ViewState {
+    /// Reset fit/pan state for a freshly shown image.
+    fn reset_view(&mut self) {
+        // Freshly shown images open fit-all (Shift+W behavior): upscale or
+        // downscale until the image first touches a window border.
+        self.zoom = ZoomMode::FitAll;
+        self.pan = Vector2::ZERO;
+        self.target_pan = Vector2::ZERO;
+        self.view_scale = None;
+    }
+}
+
 /// Decode a JPEG XL file with jxl-oxide (pure Rust).
 fn decode_jxl(path: &Path) -> Result<DecodedImage> {
     let image = jxl_oxide::JxlImage::builder()
@@ -249,19 +292,65 @@ fn put_back_view(
     *view_tex = None;
 }
 
-/// Reset fit/pan state for a freshly shown image.
-fn reset_view(
-    zoom: &mut ZoomMode,
-    pan: &mut Vector2,
-    target_pan: &mut Vector2,
-    view_scale: &mut Option<f32>,
+/// Make the entry at index `idx` the open image. Three paths, shared by
+/// grid-open, prev/next navigation and the decode-landed takeover:
+/// 1. its full-res texture was kept for it (keep-set): show instantly;
+/// 2. a decode is in flight (`queued`): show "decoding" and wait for the
+///    decode-landed takeover in a later frame;
+/// 3. otherwise: start the streaming loader (JXL: blurry preview fast).
+///
+/// With `set_scale_now`, the initial fit scale is set immediately because
+/// the caller's frame skips the per-frame scale math (it ran earlier).
+fn show_entry(
+    st: &mut ViewState,
+    grid: &mut Grid,
+    idx: usize,
+    rl: &mut RaylibHandle,
+    thread: &RaylibThread,
+    win: (f32, f32),
+    set_scale_now: bool,
 ) {
-    // Freshly shown images open fit-all (Shift+W behavior): upscale or
-    // downscale until the image first touches a window border.
-    *zoom = ZoomMode::FitAll;
-    *pan = Vector2::ZERO;
-    *target_pan = Vector2::ZERO;
-    *view_scale = None;
+    let (id, tex, w, h, path, queued, blur) = {
+        let e = &mut grid.entries[idx];
+        (
+            e.id,
+            e.full.take(),
+            e.width,
+            e.height,
+            e.path.clone(),
+            e.queued,
+            e.blur.clone(),
+        )
+    };
+    st.open_id = Some(id);
+    st.mode = Mode::Image;
+    st.reset_view();
+    if let Some(tex) = tex {
+        grid.entries[idx].viewing = true;
+        st.view_from_grid = Some(id);
+        st.view_tex = Some(tex);
+        st.img_w = w as f32;
+        st.img_h = h as f32;
+        st.loader = None;
+        st.view_loading = false;
+        if set_scale_now {
+            let (win_w, win_h) = win;
+            st.view_scale = Some((win_w / st.img_w).min(win_h / st.img_h));
+        }
+        attach_blur_bg(&mut st.blur_bg, rl, thread, blur.as_ref(), st.open_id);
+    } else {
+        st.view_from_grid = None;
+        st.view_tex = None;
+        st.view_loading = true;
+        st.view_loading_since = rl.get_time();
+        st.img_w = 0.0; // dimensions arrive with the header/texture
+        st.img_h = 0.0;
+        st.loader = if queued {
+            None // a grid decode is in flight; wait for it
+        } else {
+            Some(Loader::start(path))
+        };
+    }
 }
 
 fn main() -> Result<()> {
@@ -325,29 +414,34 @@ fn main() -> Result<()> {
 
     // VV_BLUR_BG gimmick: blurred copy of the viewed image behind it. Declared
     // after `rl` so it drops (and unloads its texture) before the window.
-    let mut blur_bg: Option<BlurBg> = BlurBg::from_env();
-
     // Take the grid AFTER the window exists: it holds GPU textures, and
     // being declared after `rl` it is dropped (and unloaded) BEFORE the
     // window closes — both on normal exit and on panic unwinding.
     let mut grid = dir_grid;
-    // Background streamer for the open image (no GL objects inside, but like
-    // `grid` declared after `rl` so it drops before the window closes). Drop
-    // cancels the worker.
-    let mut loader: Option<Loader> = None;
-
-    // Texture currently shown in image mode (single-file launch sets it up
-    // front; grid-opened images stream in via the loader).
-    let mut view_tex: Option<Texture2D> = None;
-    let mut view_loading = false;
-    // When the current load started (rl.get_time()); the "decoding..."
-    // indicator only appears once the load exceeds 1 s so fast loads never
-    // flash text on screen.
-    let mut view_loading_since = 0.0f64;
-    let mut img_w = 0.0f32;
-    let mut img_h = 0.0f32;
+    // Image-view state: what is shown and how it is framed. Its Loader field
+    // drops (and cancels the worker) before the window closes, like `grid`.
+    let mut st = ViewState {
+        mode: if grid.is_none() {
+            Mode::Image
+        } else {
+            Mode::Grid
+        },
+        open_id: None,
+        view_from_grid: None,
+        view_tex: None,
+        view_loading: false,
+        view_loading_since: 0.0,
+        img_w: 0.0,
+        img_h: 0.0,
+        zoom: ZoomMode::FitDown,
+        pan: Vector2::ZERO,
+        target_pan: Vector2::ZERO,
+        view_scale: None,
+        loader: None,
+        blur_bg: BlurBg::from_env(),
+    };
     if let Some(decoded) = single_decoded {
-        view_tex = Some(upload_rgba(
+        st.view_tex = Some(upload_rgba(
             &mut rl,
             &thread,
             &decoded.rgba,
@@ -355,24 +449,13 @@ fn main() -> Result<()> {
             decoded.height,
         )?);
         drop(decoded.rgba);
-        img_w = win0_w as f32;
-        img_h = win0_h as f32;
+        st.img_w = win0_w as f32;
+        st.img_h = win0_h as f32;
         if let Some(data) = single_blur {
-            attach_blur_bg(&mut blur_bg, &mut rl, &thread, Some(&data), None);
+            attach_blur_bg(&mut st.blur_bg, &mut rl, &thread, Some(&data), None);
         }
     }
 
-    let mut mode = if grid.is_none() {
-        Mode::Image
-    } else {
-        Mode::Grid
-    };
-    // Which grid entry is open in image mode, by stable id (None when
-    // launched with a file).
-    let mut open_id: Option<u64> = None;
-    // Set when the texture currently shown was taken out of a grid entry
-    // (its id); it goes back when leaving image mode or switching entries.
-    let mut view_from_grid: Option<u64> = None;
     // Set when the viewer should exit entirely.
     let mut quit = false;
     // VV_DEBUG=1: trace grid open/return events to stderr.
@@ -381,12 +464,6 @@ fn main() -> Result<()> {
     let mut prev_down = [false; 349];
 
     rl.set_target_fps(60);
-    let mut zoom = ZoomMode::FitDown;
-    // Target pan offset; on-screen pan eases toward it (same easing as zoom).
-    let mut target_pan = Vector2::ZERO;
-    let mut pan = Vector2::ZERO;
-    // On-screen scale, eased toward the target scale each frame.
-    let mut view_scale: Option<f32> = None;
     // Auto-repeat state for image-mode prev/next (xset r rate values).
     let mut rep_nav_fwd = keyrepeat::RepeatState::new();
     let mut rep_nav_back = keyrepeat::RepeatState::new();
@@ -425,8 +502,11 @@ fn main() -> Result<()> {
         // (left/right/up/down); in image mode the previous/next entries.
         // load_pending drains finished decodes (texture uploads happen here,
         // on the main thread) and dispatches new ones to the rayon pool.
-        let (priority, scan_start) = if mode == Mode::Image {
-            match open_id.and_then(|id| grid.as_ref().and_then(|g| g.index_of(id))) {
+        let (priority, scan_start) = if st.mode == Mode::Image {
+            match st
+                .open_id
+                .and_then(|id| grid.as_ref().and_then(|g| g.index_of(id)))
+            {
                 Some(i) => {
                     let n = grid.as_ref().unwrap().entries.len();
                     let mut v = Vec::new();
@@ -451,62 +531,48 @@ fn main() -> Result<()> {
 
         // Image mode: drain the streaming loader first; texture uploads need
         // the main thread.
-        if mode == Mode::Image {
+        if st.mode == Mode::Image {
             let mut open_failed = false;
             // Waiting on a grid decode (no streaming loader for this open):
             // when its texture lands, take it over as the view.
-            if view_tex.is_none()
-                && loader.is_none()
-                && let (Some(g), Some(id)) = (grid.as_mut(), open_id)
-            {
-                match g.entries.iter_mut().find(|e| e.id == id) {
-                    Some(e) => {
-                        // Decode landed: its full-res texture was kept for
-                        // the open entry (keep-set) — take it over. If it
-                        // landed without one (opened while the entry was
-                        // outside the keep set), fall back to streaming.
-                        if let Some(tex) = e.full.take() {
-                            e.viewing = true;
-                            view_from_grid = Some(id);
-                            view_tex = Some(tex);
-                            img_w = e.width as f32;
-                            img_h = e.height as f32;
-                            zoom = ZoomMode::FitAll;
-                            pan = Vector2::ZERO;
-                            target_pan = Vector2::ZERO;
-                            view_scale = None;
-                            view_loading = false;
-                            attach_blur_bg(
-                                &mut blur_bg,
-                                &mut rl,
-                                &thread,
-                                e.blur.as_ref(),
-                                Some(id),
-                            );
+            if st.view_tex.is_none() && st.loader.is_none() && st.open_id.is_some() {
+                let id = st.open_id.expect("checked above");
+                match grid
+                    .as_mut()
+                    .and_then(|g| g.entries.iter().position(|e| e.id == id).map(|i| (g, i)))
+                {
+                    Some((g, i)) => {
+                        let e = &g.entries[i];
+                        if e.full.is_some() {
+                            // Decode landed: its full-res texture was kept
+                            // for the open entry (keep-set) — show_entry
+                            // takes it over.
+                            show_entry(&mut st, g, i, &mut rl, &thread, (win_w, win_h), false);
                         } else if !e.queued && e.texture.is_some() {
                             // Decode finished but its full-res texture was
                             // evicted meanwhile (we left the keep set):
                             // restart via the streaming loader.
-                            view_loading = true;
-                            view_loading_since = rl.get_time();
-                            loader = Some(Loader::start(e.path.clone()));
+                            st.view_loading = true;
+                            st.view_loading_since = rl.get_time();
+                            st.loader = Some(Loader::start(e.path.clone()));
                         }
+                        // else: decode still in flight — wait.
                     }
                     None => open_failed = true, // entry vanished (decode failed)
                 }
             }
-            if let Some(loader) = &loader {
+            if let Some(loader) = &st.loader {
                 while let Some(msg) = loader.try_recv() {
                     match msg {
                         LoaderMsg::Header { width, height } => {
                             // Dimensions known: fit-down immediately (the
                             // ease block only runs from the next frame on).
-                            img_w = width as f32;
-                            img_h = height as f32;
-                            zoom = ZoomMode::FitAll;
-                            pan = Vector2::ZERO;
-                            target_pan = Vector2::ZERO;
-                            view_scale = Some((win_w / img_w).min(win_h / img_h));
+                            st.img_w = width as f32;
+                            st.img_h = height as f32;
+                            st.zoom = ZoomMode::FitAll;
+                            st.pan = Vector2::ZERO;
+                            st.target_pan = Vector2::ZERO;
+                            st.view_scale = Some((win_w / st.img_w).min(win_h / st.img_h));
                         }
                         LoaderMsg::Preview {
                             rgba,
@@ -515,8 +581,14 @@ fn main() -> Result<()> {
                             blur,
                         } => {
                             // Progressively better render of the same image.
-                            show_frame(&mut rl, &thread, &mut view_tex, &rgba, width, height)?;
-                            attach_blur_bg(&mut blur_bg, &mut rl, &thread, blur.as_ref(), open_id);
+                            show_frame(&mut rl, &thread, &mut st.view_tex, &rgba, width, height)?;
+                            attach_blur_bg(
+                                &mut st.blur_bg,
+                                &mut rl,
+                                &thread,
+                                blur.as_ref(),
+                                st.open_id,
+                            );
                         }
                         LoaderMsg::Done {
                             rgba,
@@ -525,17 +597,23 @@ fn main() -> Result<()> {
                             blur,
                         } => {
                             // Non-JXL formats only learn dimensions here.
-                            if img_w == 0.0 {
-                                img_w = width as f32;
-                                img_h = height as f32;
-                                zoom = ZoomMode::FitAll;
-                                pan = Vector2::ZERO;
-                                target_pan = Vector2::ZERO;
-                                view_scale = Some((win_w / img_w).min(win_h / img_h));
+                            if st.img_w == 0.0 {
+                                st.img_w = width as f32;
+                                st.img_h = height as f32;
+                                st.zoom = ZoomMode::FitAll;
+                                st.pan = Vector2::ZERO;
+                                st.target_pan = Vector2::ZERO;
+                                st.view_scale = Some((win_w / st.img_w).min(win_h / st.img_h));
                             }
-                            show_frame(&mut rl, &thread, &mut view_tex, &rgba, width, height)?;
-                            attach_blur_bg(&mut blur_bg, &mut rl, &thread, blur.as_ref(), open_id);
-                            view_loading = false;
+                            show_frame(&mut rl, &thread, &mut st.view_tex, &rgba, width, height)?;
+                            attach_blur_bg(
+                                &mut st.blur_bg,
+                                &mut rl,
+                                &thread,
+                                blur.as_ref(),
+                                st.open_id,
+                            );
+                            st.view_loading = false;
                         }
                         LoaderMsg::Failed(err) => {
                             eprintln!("vv: {err}");
@@ -545,18 +623,18 @@ fn main() -> Result<()> {
                 }
             }
             if open_failed {
-                loader = None; // cancel the worker
-                if let Some(id) = open_id.take() {
+                st.loader = None; // cancel the worker
+                if let Some(id) = st.open_id.take() {
                     grid.as_mut().unwrap().remove_entry_by_id(id);
                 }
-                view_from_grid = None;
-                mode = Mode::Grid;
-                view_tex = None;
-                view_loading = false;
+                st.view_from_grid = None;
+                st.mode = Mode::Grid;
+                st.view_tex = None;
+                st.view_loading = false;
             }
         }
 
-        if mode == Mode::Grid {
+        if st.mode == Mode::Grid {
             // Grid navigation: h/j/k/l + arrows move the selection,
             // Enter opens the selected image, q quits (ESC is inert here;
             // the grid is the home view).
@@ -565,58 +643,15 @@ fn main() -> Result<()> {
                     if debug {
                         eprintln!("vv: enter pressed -> open idx {i}");
                     }
-                    // If the entry's decode already finished, its full-res
-                    // texture was kept for it (keep-set): take it and show
-                    // it this frame — no decode, no black gap. If a decode
-                    // is already in flight, just wait for it (no duplicate
-                    // work). Otherwise fall back to the streaming loader
-                    // (JXL: blurry preview fast).
-                    let (id, tex, w, h, path, queued, blur) = {
-                        let g = grid.as_mut().unwrap();
-                        let e = &mut g.entries[i];
-                        (
-                            e.id,
-                            e.full.take(),
-                            e.width,
-                            e.height,
-                            e.path.clone(),
-                            e.queued,
-                            e.blur.clone(),
-                        )
-                    };
-                    open_id = Some(id);
-                    mode = Mode::Image;
-                    reset_view(&mut zoom, &mut pan, &mut target_pan, &mut view_scale);
-                    if let Some(tex) = tex {
-                        grid.as_mut().unwrap().entries[i].viewing = true;
-                        view_from_grid = Some(id);
-                        view_tex = Some(tex);
-                        img_w = w as f32;
-                        img_h = h as f32;
-                        // The image-mode scale math runs only from the next
-                        // frame on (this frame took the grid branch); set the
-                        // initial fit-all scale here so the draw this frame
-                        // has it.
-                        view_scale = Some((win_w / img_w).min(win_h / img_h));
-                        view_loading = false;
-                        attach_blur_bg(&mut blur_bg, &mut rl, &thread, blur.as_ref(), open_id);
-                    } else if queued {
-                        view_from_grid = None;
-                        loader = None;
-                        view_tex = None;
-                        view_loading = true;
-                        view_loading_since = rl.get_time();
-                        img_w = 0.0; // dimensions arrive with the texture
-                        img_h = 0.0;
-                    } else {
-                        view_from_grid = None;
-                        loader = Some(Loader::start(path));
-                        view_tex = None;
-                        view_loading = true;
-                        view_loading_since = rl.get_time();
-                        img_w = 0.0; // dimensions arrive with the header message
-                        img_h = 0.0;
-                    }
+                    show_entry(
+                        &mut st,
+                        grid.as_mut().unwrap(),
+                        i,
+                        &mut rl,
+                        &thread,
+                        (win_w, win_h),
+                        true,
+                    );
                 }
                 GridAction::Quit => quit = true,
                 GridAction::None => {}
@@ -691,7 +726,9 @@ fn main() -> Result<()> {
             };
             // g/G: jump to the first/last image (as a nav delta).
             if (jump_first || jump_last)
-                && let Some(cur) = open_id.and_then(|id| grid.as_ref().and_then(|g| g.index_of(id)))
+                && let Some(cur) = st
+                    .open_id
+                    .and_then(|id| grid.as_ref().and_then(|g| g.index_of(id)))
             {
                 let n = grid.as_ref().unwrap().entries.len();
                 let t = if jump_first { 0 } else { n - 1 };
@@ -720,11 +757,11 @@ fn main() -> Result<()> {
                 return_to_grid = true;
             }
             if return_to_grid {
-                mode = Mode::Grid;
+                st.mode = Mode::Grid;
                 // Hand the shown texture back to its grid entry and make
                 // that entry the grid selection (nsxiv-like).
-                put_back_view(&mut grid, &mut view_from_grid, &mut view_tex);
-                if let Some(id) = open_id.take()
+                put_back_view(&mut grid, &mut st.view_from_grid, &mut st.view_tex);
+                if let Some(id) = st.open_id.take()
                     && let Some(g) = grid.as_mut()
                     && let Some(i) = g.index_of(id)
                 {
@@ -732,9 +769,9 @@ fn main() -> Result<()> {
                     // Scrolled (zoomed-in) grids: bring it back on screen.
                     g.ensure_visible(win_w, win_h);
                 }
-                loader = None; // cancels a still-running stream
-                view_loading = false;
-                view_loading_since = 0.0;
+                st.loader = None; // cancels a still-running stream
+                st.view_loading = false;
+                st.view_loading_since = 0.0;
             }
 
             // Prev/next while viewing (only with a grid to navigate). A
@@ -743,110 +780,76 @@ fn main() -> Result<()> {
             // loader takes over. The new entry's own neighbors are prefetched
             // via the priority list at the top of the loop.
             if !return_to_grid && let Some(delta) = nav {
-                let cur = open_id.and_then(|id| grid.as_ref().and_then(|g| g.index_of(id)));
+                let cur = st
+                    .open_id
+                    .and_then(|id| grid.as_ref().and_then(|g| g.index_of(id)));
                 if let Some(cur) = cur {
                     let n = grid.as_ref().unwrap().entries.len();
                     let t = cur as i64 + delta;
                     if t >= 0 && (t as usize) < n {
                         let j = t as usize;
-                        put_back_view(&mut grid, &mut view_from_grid, &mut view_tex);
-                        loader = None;
-                        let (id, tex, w, h, path, queued, blur) = {
-                            let g = grid.as_mut().unwrap();
-                            let e = &mut g.entries[j];
-                            (
-                                e.id,
-                                e.full.take(),
-                                e.width,
-                                e.height,
-                                e.path.clone(),
-                                e.queued,
-                                e.blur.clone(),
-                            )
-                        };
-                        open_id = Some(id);
-                        reset_view(&mut zoom, &mut pan, &mut target_pan, &mut view_scale);
-                        if let Some(tex) = tex {
-                            grid.as_mut().unwrap().entries[j].viewing = true;
-                            view_from_grid = Some(id);
-                            view_tex = Some(tex);
-                            img_w = w as f32;
-                            img_h = h as f32;
-                            // Set the initial fit-all scale here: the
-                            // scale math below already ran past the nav
-                            // code only afterwards, and this frame's draw
-                            // needs a scale now.
-                            view_scale = Some((win_w / img_w).min(win_h / img_h));
-                            view_loading = false;
-                            attach_blur_bg(&mut blur_bg, &mut rl, &thread, blur.as_ref(), open_id);
-                        } else if queued {
-                            view_from_grid = None;
-                            view_tex = None;
-                            view_loading = true;
-                            view_loading_since = rl.get_time();
-                            img_w = 0.0;
-                            img_h = 0.0;
-                        } else {
-                            view_from_grid = None;
-                            loader = Some(Loader::start(path));
-                            view_tex = None;
-                            view_loading = true;
-                            view_loading_since = rl.get_time();
-                            img_w = 0.0;
-                            img_h = 0.0;
-                        }
+                        put_back_view(&mut grid, &mut st.view_from_grid, &mut st.view_tex);
+                        show_entry(
+                            &mut st,
+                            grid.as_mut().unwrap(),
+                            j,
+                            &mut rl,
+                            &thread,
+                            (win_w, win_h),
+                            true,
+                        );
                     }
                 }
             }
 
             // Keyboard shortcuts. Capital W / capital E arrive as W/E + shift.
             if rl.is_key_pressed(KeyboardKey::KEY_W) {
-                zoom = if shift {
+                st.zoom = if shift {
                     ZoomMode::FitAll
                 } else {
                     ZoomMode::FitDown
                 };
-                target_pan = Vector2::ZERO;
+                st.target_pan = Vector2::ZERO;
             } else if rl.is_key_pressed(KeyboardKey::KEY_E) {
-                zoom = if shift {
+                st.zoom = if shift {
                     ZoomMode::FitHeight
                 } else {
                     ZoomMode::FitWidth
                 };
-                target_pan = Vector2::ZERO;
+                st.target_pan = Vector2::ZERO;
             } else if rl.is_key_pressed(KeyboardKey::KEY_T) {
                 // Two-state toggle: whole image visible (fit-all) vs window
                 // completely covered (fill). Distinct for any image/window
                 // combination, unlike a fit-width/fit-height cycle.
-                zoom = if zoom == ZoomMode::Fill {
+                st.zoom = if st.zoom == ZoomMode::Fill {
                     ZoomMode::FitAll
                 } else {
                     ZoomMode::Fill
                 };
-                target_pan = Vector2::ZERO;
+                st.target_pan = Vector2::ZERO;
             }
 
             // Before the header arrives the image dimensions are unknown;
             // skip all scale/pan math (it divides by img_w/img_h).
-            if img_w > 0.0 {
+            if st.img_w > 0.0 {
                 // Scale for the current mode (fit modes recompute every frame, so
                 // resizing stays correct).
-                let target_scale = match zoom {
-                    ZoomMode::FitDown => (win_w / img_w).min(win_h / img_h).min(1.0),
-                    ZoomMode::FitAll => (win_w / img_w).min(win_h / img_h),
-                    ZoomMode::FitWidth => win_w / img_w,
-                    ZoomMode::FitHeight => win_h / img_h,
+                let target_scale = match st.zoom {
+                    ZoomMode::FitDown => (win_w / st.img_w).min(win_h / st.img_h).min(1.0),
+                    ZoomMode::FitAll => (win_w / st.img_w).min(win_h / st.img_h),
+                    ZoomMode::FitWidth => win_w / st.img_w,
+                    ZoomMode::FitHeight => win_h / st.img_h,
                     // Cover: the larger ratio wins, so the image fills the
                     // window and the other axis is cropped.
-                    ZoomMode::Fill => (win_w / img_w).max(win_h / img_h),
+                    ZoomMode::Fill => (win_w / st.img_w).max(win_h / st.img_h),
                     ZoomMode::Free(scale) => scale,
                 };
 
                 // Ease the on-screen scale toward the target so zoom steps animate
                 // smoothly (~95% of the way after 150 ms; snap when close enough).
-                let prev_scale = view_scale;
+                let prev_scale = st.view_scale;
                 let alpha = 1.0 - (-rl.get_frame_time() / 0.05).exp();
-                view_scale = Some(match view_scale {
+                st.view_scale = Some(match st.view_scale {
                     None => target_scale,
                     Some(s) => {
                         let s = s + (target_scale - s) * alpha;
@@ -870,7 +873,7 @@ fn main() -> Result<()> {
                     || zoom_out_char;
                 if zoom_in || zoom_out {
                     let factor = if zoom_in { 1.25 } else { 1.0 / 1.25 };
-                    zoom = ZoomMode::Free((target_scale * factor).clamp(0.01, 100.0));
+                    st.zoom = ZoomMode::Free((target_scale * factor).clamp(0.01, 100.0));
                 }
 
                 // Window-center-anchored zoom (free zoom only): while the on-screen
@@ -878,8 +881,8 @@ fn main() -> Result<()> {
                 // the window center stays fixed. offset = center + pan, so keeping
                 // the anchor's image point put gives
                 //   offset' = anchor - (anchor - offset) * (scale'/scale).
-                let scale = view_scale.unwrap();
-                if matches!(zoom, ZoomMode::Free(_))
+                let scale = st.view_scale.unwrap();
+                if matches!(st.zoom, ZoomMode::Free(_))
                     && let Some(s_old) = prev_scale
                     && (scale - s_old).abs() > f32::EPSILON
                     && s_old > 0.0
@@ -887,13 +890,13 @@ fn main() -> Result<()> {
                     let r = scale / s_old;
                     let ax = win_w / 2.0;
                     let ay = win_h / 2.0;
-                    let ox = ax - (ax - (win_w - img_w * s_old) / 2.0 - pan.x) * r;
-                    let oy = ay - (ay - (win_h - img_h * s_old) / 2.0 - pan.y) * r;
-                    pan.x = ox - (win_w - img_w * scale) / 2.0;
-                    pan.y = oy - (win_h - img_h * scale) / 2.0;
+                    let ox = ax - (ax - (win_w - st.img_w * s_old) / 2.0 - st.pan.x) * r;
+                    let oy = ay - (ay - (win_h - st.img_h * s_old) / 2.0 - st.pan.y) * r;
+                    st.pan.x = ox - (win_w - st.img_w * scale) / 2.0;
+                    st.pan.y = oy - (win_h - st.img_h * scale) / 2.0;
                     // Pin the target too, so pan easing doesn't fight the anchor.
-                    target_pan.x = pan.x;
-                    target_pan.y = pan.y;
+                    st.target_pan.x = st.pan.x;
+                    st.target_pan.y = st.pan.y;
                 }
 
                 // Vim-style panning (h/j/k/l + arrow keys); held keys move the
@@ -912,37 +915,37 @@ fn main() -> Result<()> {
                 let pan_down =
                     rl.is_key_down(KeyboardKey::KEY_J) || rl.is_key_down(KeyboardKey::KEY_DOWN);
                 if pan_left {
-                    target_pan.x += speed;
+                    st.target_pan.x += speed;
                 }
                 if pan_right {
-                    target_pan.x -= speed;
+                    st.target_pan.x -= speed;
                 }
                 if pan_up {
-                    target_pan.y += speed;
+                    st.target_pan.y += speed;
                 }
                 if pan_down {
-                    target_pan.y -= speed;
+                    st.target_pan.y -= speed;
                 }
                 let pan_alpha = 1.0 - (-rl.get_frame_time() / 0.05).exp();
-                pan = Vector2 {
-                    x: pan.x + (target_pan.x - pan.x) * pan_alpha,
-                    y: pan.y + (target_pan.y - pan.y) * pan_alpha,
+                st.pan = Vector2 {
+                    x: st.pan.x + (st.target_pan.x - st.pan.x) * pan_alpha,
+                    y: st.pan.y + (st.target_pan.y - st.pan.y) * pan_alpha,
                 };
                 // Snap when the residual glide is sub-pixel.
-                if (target_pan.x - pan.x).abs() < 0.25 {
-                    pan.x = target_pan.x;
+                if (st.target_pan.x - st.pan.x).abs() < 0.25 {
+                    st.pan.x = st.target_pan.x;
                 }
-                if (target_pan.y - pan.y).abs() < 0.25 {
-                    pan.y = target_pan.y;
+                if (st.target_pan.y - st.pan.y).abs() < 0.25 {
+                    st.pan.y = st.target_pan.y;
                 }
-            } // img_w > 0.0: fit/pan math needs known dimensions
+            } // st.img_w > 0.0: fit/pan math needs known dimensions
         }
 
         // VV_BLUR_BG in grid mode: the background follows the selected
         // entry with a slow crossfade (starts as soon as the entry's
         // blurred copy has been decoded by the grid workers).
-        if mode == Mode::Grid
-            && let (Some(bg), Some(g)) = (blur_bg.as_mut(), grid.as_ref())
+        if st.mode == Mode::Grid
+            && let (Some(bg), Some(g)) = (st.blur_bg.as_mut(), grid.as_ref())
             && let Some(e) = g.entries.get(g.selected)
             && let Some(data) = &e.blur
         {
@@ -953,16 +956,16 @@ fn main() -> Result<()> {
         // once the load has taken over a second; brief loads would otherwise
         // flash the text for a few frames. Computed before begin_drawing
         // (rl is mutably borrowed by the draw handle).
-        let show_decoding = view_loading && rl.get_time() - view_loading_since > 1.0;
+        let show_decoding = st.view_loading && rl.get_time() - st.view_loading_since > 1.0;
 
         let mut d = rl.begin_drawing(&thread);
         d.clear_background(Color::BLACK);
 
-        if mode == Mode::Grid {
+        if st.mode == Mode::Grid {
             // VV_BLUR_BG gimmick: blurred background follows the selection
             // (crossfading; no-op when the gimmick is off). Drawn before
             // the grid so fades run under the thumbnails.
-            if let Some(bg) = &mut blur_bg {
+            if let Some(bg) = &mut st.blur_bg {
                 bg.draw(&mut d, win_w, win_h);
             }
             grid.as_ref().unwrap().draw(&mut d, win_w, win_h);
@@ -970,22 +973,22 @@ fn main() -> Result<()> {
             // VV_BLUR_BG gimmick: blurred copy of the image, scaled to
             // cover the whole window (fit on the narrower side; the other
             // axis overflows and is cropped) behind the sharp image.
-            if let Some(bg) = &mut blur_bg {
+            if let Some(bg) = &mut st.blur_bg {
                 bg.draw(&mut d, win_w, win_h);
             }
-            if let Some(texture) = &view_tex {
-                let dw = img_w * view_scale.unwrap();
-                let dh = img_h * view_scale.unwrap();
+            if let Some(texture) = &st.view_tex {
+                let dw = st.img_w * st.view_scale.unwrap();
+                let dh = st.img_h * st.view_scale.unwrap();
 
                 let src = Rectangle {
                     x: 0.0,
                     y: 0.0,
-                    width: img_w,
-                    height: img_h,
+                    width: st.img_w,
+                    height: st.img_h,
                 };
                 let dest = Rectangle {
-                    x: (win_w - dw) / 2.0 + pan.x,
-                    y: (win_h - dh) / 2.0 + pan.y,
+                    x: (win_w - dw) / 2.0 + st.pan.x,
+                    y: (win_h - dh) / 2.0 + st.pan.y,
                     width: dw,
                     height: dh,
                 };
