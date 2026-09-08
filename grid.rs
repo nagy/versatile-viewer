@@ -103,7 +103,12 @@ impl Grid {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
             .with_context(|| format!("failed to read directory {dir:?}"))?
             .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.is_file() && is_image_path(p))
+            .filter(|p| {
+                p.is_file()
+                    // Dotfiles are hidden, like nsxiv and file managers do.
+                    && !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'))
+                    && is_image_path(p)
+            })
             .collect();
         paths.sort_by_key(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()));
 
@@ -704,6 +709,7 @@ mod tests {
         png.save(dir.join("b.png")).unwrap();
         std::fs::write(dir.join("a.txt"), "not an image").unwrap();
         std::fs::write(dir.join("c.png"), "invalid png content").unwrap(); // listed, decode fails later
+        std::fs::write(dir.join(".hidden.png"), "dotfile").unwrap(); // skipped
 
         let grid = Grid::from_dir(&dir).unwrap();
         let names: Vec<String> = grid
