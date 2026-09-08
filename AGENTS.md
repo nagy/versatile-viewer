@@ -50,4 +50,7 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
    view (nsxiv-style; arrows and h/j/k/l stay panning); nav keys and grid
    h/j/k/l auto-repeat while held, at the X server's rate (xset r rate).
    g/G jump to the first/last image (grid selection and image view).
+   +/- zoom the grid thumbs (25% steps; default zoom fills the window
+   exactly, zoom-out refits with smaller thumbs, zoom-in overflows and
+   scrolls — mouse wheel + selection-follow).
 9. Video playback (mpv inspiration; backend TBD).

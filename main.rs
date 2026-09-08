@@ -642,6 +642,8 @@ fn main() -> Result<()> {
                     if let Some(g) = grid.as_mut() {
                         if let Some(i) = g.index_of(id) {
                             g.selected = i;
+                            // Scrolled (zoomed-in) grids: bring it back on screen.
+                            g.ensure_visible(win_w, win_h);
                         }
                     }
                 }

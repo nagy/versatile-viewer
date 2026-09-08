@@ -2,6 +2,13 @@
 //! whole window (unlike nsxiv's fixed thumbnail sizes), with a white border
 //! on the selection.
 //!
+//! +/- zoom the thumbnails (same 25% steps as the image-view free zoom).
+//! The default zoom fills the window exactly (largest possible square
+//! thumbs); zooming out re-fits with more, smaller thumbnails — still an
+//! exact fill; zooming in grows the thumbs past that maximum, so the grid
+//! overflows vertically and scrolls (mouse wheel; the selection is kept on
+//! screen while navigating).
+//!
 //! Decoding runs on the shared rayon pool (several files decode in
 //! parallel); the main thread only drains finished decodes and uploads
 //! textures (which needs the GL context). Jobs are dispatched
@@ -20,6 +27,10 @@ use raylib::{color::Color, prelude::*};
 
 const MARGIN: f32 = 8.0;
 const GAP: f32 = 8.0;
+/// Grid zoom step for +/- (same 25% steps as the image-view free zoom).
+const GRID_ZOOM_STEP: f32 = 1.25;
+/// Lower bound for the thumbnail side when zooming the grid out.
+const GRID_MIN_SIDE: f32 = 32.0;
 /// Maximum number of decodes in flight at once (jobs run in parallel on the
 /// shared rayon pool; jxl-oxide parallelizes each decode further inside).
 const MAX_INFLIGHT: usize = 6;
@@ -66,6 +77,10 @@ pub struct Grid {
     /// Auto-repeat state for the four direction keys (h/j/k/l + arrows),
     /// indexed [left, right, up, down] (xset r rate values).
     rep_dir: [crate::keyrepeat::RepeatState; 4],
+    /// Thumbnail size zoom (1.0 = exact-fill default; +/- steps it).
+    zoom: f32,
+    /// Vertical scroll offset (only used when zoomed in past the exact fill).
+    scroll: f32,
 }
 
 impl Grid {
@@ -100,6 +115,8 @@ impl Grid {
             result_rx: res_rx,
             inflight: 0,
             rep_dir: Default::default(),
+            zoom: 1.0,
+            scroll: 0.0,
         })
     }
 
@@ -220,7 +237,7 @@ impl Grid {
         if n == 0 {
             return Vec::new();
         }
-        let (cols, ..) = grid_layout(n, win_w, win_h);
+        let (cols, ..) = grid_layout_at(n, win_w, win_h, self.zoom);
         let mut v = Vec::with_capacity(4);
         for i in [
             sel.checked_sub(1),
@@ -235,6 +252,28 @@ impl Grid {
             }
         }
         v
+    }
+
+    /// Scroll the selection into view. Used when the selection was set (or
+    /// the layout changed) from outside the navigation code — e.g. when
+    /// returning to the grid from image view, or after a +/- zoom step.
+    pub fn ensure_visible(&mut self, win_w: f32, win_h: f32) {
+        if self.entries.is_empty() {
+            return;
+        }
+        let n = self.entries.len();
+        let (cols, _cw, ch, _side, content_h) = grid_layout_at(n, win_w, win_h, self.zoom);
+        let scroll_max = (content_h - win_h).max(0.0);
+        let row = self.selected / cols;
+        let top = MARGIN + row as f32 * (ch + GAP);
+        let bottom = top + ch;
+        if top - self.scroll < MARGIN {
+            self.scroll = top - MARGIN;
+        }
+        if bottom - self.scroll > win_h - MARGIN {
+            self.scroll = bottom - (win_h - MARGIN);
+        }
+        self.scroll = self.scroll.clamp(0.0, scroll_max);
     }
 
     /// Remove a failed entry so it disappears from the grid. Indices after
@@ -269,6 +308,8 @@ impl Grid {
         let mut down = false;
         let mut jump_first = false;
         let mut jump_last = false;
+        let mut zoom_in = false;
+        let mut zoom_out = false;
         while let Some(k) = rl.get_key_pressed() {
             match k {
                 KeyboardKey::KEY_ENTER | KeyboardKey::KEY_KP_ENTER => enter = true,
@@ -286,16 +327,22 @@ impl Grid {
                         jump_first = true;
                     }
                 }
+                KeyboardKey::KEY_EQUAL | KeyboardKey::KEY_KP_ADD => zoom_in = true,
+                KeyboardKey::KEY_MINUS | KeyboardKey::KEY_KP_SUBTRACT => zoom_out = true,
                 _ => {}
             }
         }
         // Some input setups (IMEs, unusual X11 input methods) deliver Enter
         // as a character event ('\n'/'\r') instead of (or in addition to) a
-        // key-press event; accept both. The queue is drained every frame, so
-        // unmatched chars never pile up.
+        // key-press event; accept both. This drain also covers the +/- zoom
+        // characters, so nothing piles up. The queue is drained every frame,
+        // so unmatched chars never accumulate.
         while let Some(c) = rl.get_char_pressed() {
-            if c == '\n' || c == '\r' {
-                enter = true;
+            match c {
+                '\n' | '\r' => enter = true,
+                '+' => zoom_in = true,
+                '-' => zoom_out = true,
+                _ => {}
             }
         }
         // Auto-repeat for the direction keys: the initial press fires
@@ -313,8 +360,37 @@ impl Grid {
         let right = rep[1].tick(right, down_right, now, delay, rate);
         let up = rep[2].tick(up, down_up, now, delay, rate);
         let down = rep[3].tick(down, down_down, now, delay, rate);
-        let (cols, ..) = grid_layout(self.entries.len(), win_w, win_h);
+        // +/- zoom the thumbnails (same 25% steps and key detection as the
+        // image-view free zoom: the US-layout =/- keycodes, numpad included,
+        // plus the typed character for non-US layouts). The default zoom is
+        // the exact-fill layout; zooming out re-fits with more, smaller
+        // thumbnails (still an exact fill); zooming in overflows the window
+        // vertically and enables scrolling.
         let n = self.entries.len();
+        let mut follow = false;
+        if zoom_in || zoom_out {
+            let aw = (win_w - 2.0 * MARGIN).max(1.0);
+            let ah = (win_h - 2.0 * MARGIN).max(1.0);
+            let base = best_fill_side(n, aw, ah);
+            if zoom_in {
+                // Largest useful thumb side: one thumb fills the window.
+                let max_zoom = (aw.min(ah) / base).max(1.0);
+                self.zoom = (self.zoom * GRID_ZOOM_STEP).min(max_zoom);
+            } else {
+                let min_zoom = (GRID_MIN_SIDE / base).min(1.0);
+                self.zoom = (self.zoom / GRID_ZOOM_STEP).max(min_zoom);
+            }
+            follow = true;
+        }
+        let (cols, _cw, _ch, side, content_h) = grid_layout_at(n, win_w, win_h, self.zoom);
+        let scroll_max = (content_h - win_h).max(0.0);
+        // Mouse wheel scrolls the grid (only meaningful once zoomed in past
+        // the exact-fill layout, where nothing overflows).
+        let wheel = rl.get_mouse_wheel_move();
+        if wheel != 0.0 && scroll_max > 0.0 {
+            self.scroll = (self.scroll - wheel * (side + GAP) * 3.0).clamp(0.0, scroll_max);
+        }
+        let old_sel = self.selected;
         let mut sel = self.selected;
         if left && sel % cols != 0 {
             sel -= 1;
@@ -336,6 +412,11 @@ impl Grid {
             sel = n - 1;
         }
         self.selected = sel;
+        // Keep the selection on screen after it moved or the layout changed
+        // under it (+/- zoom); manual wheel scrolling is left untouched.
+        if self.selected != old_sel || follow {
+            self.ensure_visible(win_w, win_h);
+        }
         if enter {
             return GridAction::Open(self.selected);
         }
@@ -358,12 +439,16 @@ impl Grid {
             );
             return;
         }
-        let (cols, cw, ch, side) = grid_layout(self.entries.len(), win_w, win_h);
+        let (cols, cw, ch, side, _) = grid_layout_at(self.entries.len(), win_w, win_h, self.zoom);
         for (i, e) in self.entries.iter().enumerate() {
             let col = i % cols;
             let row = i / cols;
             let cx = MARGIN + col as f32 * (cw + GAP);
-            let cy = MARGIN + row as f32 * (ch + GAP);
+            let cy = MARGIN + row as f32 * (ch + GAP) - self.scroll;
+            // Offscreen (scrolled out) cells: skip the draw work.
+            if cy + ch < 0.0 || cy > win_h {
+                continue;
+            }
             let thumb = Rectangle {
                 x: cx + (cw - side) / 2.0,
                 y: cy + (ch - side) / 2.0,
@@ -403,20 +488,14 @@ fn is_image_path(path: &Path) -> bool {
     })
 }
 
-/// Compute the grid layout: how many columns, and the cell size, so square
-/// thumbnails fill the whole window. The thumbnail size is chosen fresh
-/// every frame (unlike nsxiv's fixed sizes) by trying every column count
-/// and keeping the one with the largest square side; ties prefer the
-/// column count whose cells are closest to square (least empty space).
-/// Returns (columns, cell_w, cell_h, square side).
-fn grid_layout(n: usize, win_w: f32, win_h: f32) -> (usize, f32, f32, f32) {
+/// Largest exact-fill square thumbnail side for `n` entries in an
+/// `aw` x `ah` available area: the best over all column counts (ties prefer
+/// the column count whose cells are closest to square, i.e. least empty
+/// space). This is also the zoom-1.0 reference size for +/- zooming.
+fn best_fill_side(n: usize, aw: f32, ah: f32) -> f32 {
     let n = n.max(1);
-    let aw = (win_w - 2.0 * MARGIN).max(1.0);
-    let ah = (win_h - 2.0 * MARGIN).max(1.0);
-
-    let mut best = (1usize, aw, ah);
-    // No layout chosen yet: -inf so the first candidate always wins.
     let mut best_score = (f32::NEG_INFINITY, 0.0f32);
+    let mut best_side = 1.0f32;
     for cols in 1..=n {
         let rows = (n + cols - 1) / cols;
         let cw = ((aw - (cols - 1) as f32 * GAP) / cols as f32).max(1.0);
@@ -424,11 +503,67 @@ fn grid_layout(n: usize, win_w: f32, win_h: f32) -> (usize, f32, f32, f32) {
         let score = (cw.min(ch), -cw.max(ch));
         if score > best_score {
             best_score = score;
-            best = (cols, cw, ch);
+            best_side = cw.min(ch);
         }
     }
-    let (cols, cw, ch) = best;
-    (cols, cw, ch, cw.min(ch))
+    best_side
+}
+
+/// Compute the grid layout for `n` entries at zoom `zoom` (1.0 = default):
+/// how many columns, the cell size, the square thumbnail side, and the total
+/// content height (which may exceed the window when zoomed in; the caller
+/// scrolls by the excess).
+///
+/// At the default zoom the layout is the exact fill described in
+/// [`best_fill_side`]: cells divide the available space, so the grid spans
+/// the whole window in both dimensions.
+///
+/// Zooming out shrinks the target thumbnail side and picks the column count
+/// whose fill-derived side lands closest to it — the grid still spans the
+/// window exactly, now with more (smaller) thumbnails.
+///
+/// Zooming in grows the target side past the largest exact-fill size, so the
+/// rows no longer fit vertically: cells stay square at the target side
+/// (columns stretch a little so the grid still spans the width), rows
+/// overflow, and the caller scrolls.
+fn grid_layout_at(n: usize, win_w: f32, win_h: f32, zoom: f32) -> (usize, f32, f32, f32, f32) {
+    let n = n.max(1);
+    let aw = (win_w - 2.0 * MARGIN).max(1.0);
+    let ah = (win_h - 2.0 * MARGIN).max(1.0);
+
+    let base = best_fill_side(n, aw, ah);
+    let target = (base * zoom).max(GRID_MIN_SIDE);
+    if target <= base {
+        // Exact fill: pick the column count whose fill-derived side is
+        // closest to the target (at zoom 1.0 this reproduces the exact-fill
+        // optimum; ties prefer the least empty space, i.e. the smaller
+        // max(cw, ch)).
+        let mut best = (1usize, aw, ah);
+        let mut best_key = (f32::INFINITY, f32::INFINITY);
+        for cols in 1..=n {
+            let rows = (n + cols - 1) / cols;
+            let cw = ((aw - (cols - 1) as f32 * GAP) / cols as f32).max(1.0);
+            let ch = ((ah - (rows - 1) as f32 * GAP) / rows as f32).max(1.0);
+            let key = ((cw.min(ch) - target).abs(), cw.max(ch));
+            if key < best_key {
+                best_key = key;
+                best = (cols, cw, ch);
+            }
+        }
+        let (cols, cw, ch) = best;
+        let rows = (n + cols - 1) / cols;
+        let content_h = 2.0 * MARGIN + rows as f32 * ch + (rows - 1) as f32 * GAP;
+        (cols, cw, ch, cw.min(ch), content_h)
+    } else {
+        // Overflow: square cells at the target side, as many columns as fit
+        // the width; the rows scroll vertically.
+        let target = target.min(aw.min(ah));
+        let cols = (((aw + GAP) / (target + GAP)).floor() as usize).clamp(1, n);
+        let cw = ((aw - (cols - 1) as f32 * GAP) / cols as f32).max(target);
+        let rows = (n + cols - 1) / cols;
+        let content_h = 2.0 * MARGIN + rows as f32 * target + (rows - 1) as f32 * GAP;
+        (cols, cw, target, target, content_h)
+    }
 }
 
 #[cfg(test)]
@@ -436,40 +571,77 @@ mod tests {
     use super::*;
 
     #[test]
-    fn grid_layout_single_image_fills_smaller_side() {
+    fn grid_layout_default_single_image_fills_smaller_side() {
         // One image, 100x100 window, 8px margin -> 84x84 cell and thumb.
-        let (cols, cw, ch, side) = grid_layout(1, 100.0, 100.0);
+        let (cols, cw, ch, side, content_h) = grid_layout_at(1, 100.0, 100.0, 1.0);
         assert_eq!(cols, 1);
         assert_eq!(cw, 84.0);
         assert_eq!(ch, 84.0);
         assert_eq!(side, 84.0);
+        assert_eq!(content_h, 100.0);
     }
 
     #[test]
-    fn grid_layout_spans_full_window() {
-        // Cells are sized to divide the available space, so the grid must
-        // span the whole window in both dimensions (grid takes all space).
+    fn grid_layout_default_spans_full_window() {
+        // At the default zoom, cells are sized to divide the available
+        // space, so the grid must span the whole window in both dimensions
+        // and the content height must equal the window height.
         for (n, win_w, win_h) in [(1, 100.0, 100.0), (7, 1200.0, 700.0), (100, 1600.0, 900.0)] {
-            let (cols, cw, ch, side) = grid_layout(n, win_w, win_h);
+            let (cols, cw, ch, side, content_h) = grid_layout_at(n, win_w, win_h, 1.0);
             let rows = (n + cols - 1) / cols;
             let span_w = 2.0 * MARGIN + cols as f32 * cw + (cols - 1) as f32 * GAP;
             let span_h = 2.0 * MARGIN + rows as f32 * ch + (rows - 1) as f32 * GAP;
             assert!((span_w - win_w).abs() < 0.01, "n={n}: span_w={span_w}");
             assert!((span_h - win_h).abs() < 0.01, "n={n}: span_h={span_h}");
+            assert_eq!(content_h, win_h);
             assert_eq!(side, cw.min(ch));
         }
     }
 
     #[test]
     fn grid_layout_never_crashes_on_degenerate_input() {
-        let (cols, _, _, side) = grid_layout(3, 50.0, 800.0);
+        let (cols, _, _, side, _) = grid_layout_at(3, 50.0, 800.0, 1.0);
         assert!(cols >= 1 && side > 0.0);
-        let _ = grid_layout(0, 0.0, 0.0);
+        let _ = grid_layout_at(0, 0.0, 0.0, 1.0);
+        let _ = grid_layout_at(5, 800.0, 600.0, 0.0);
+        let _ = grid_layout_at(5, 800.0, 600.0, 1000.0);
+    }
+
+    #[test]
+    fn grid_layout_zoom_out_keeps_exact_fill_with_smaller_thumbs() {
+        // 9 images in a 640x640 window: default is 3x3 with ~208px thumbs;
+        // zooming out must shrink the thumbs, add columns, and still span
+        // the window exactly (no scrolling).
+        let (d_cols, _, _, d_side, _) = grid_layout_at(9, 640.0, 640.0, 1.0);
+        let (cols, cw, ch, side, content_h) = grid_layout_at(9, 640.0, 640.0, 0.8);
+        assert!(cols > d_cols, "cols={cols}, default={d_cols}");
+        assert!(side < d_side);
+        assert_eq!(side, cw.min(ch));
+        let rows = (9 + cols - 1) / cols;
+        let span_w = 2.0 * MARGIN + cols as f32 * cw + (cols - 1) as f32 * GAP;
+        let span_h = 2.0 * MARGIN + rows as f32 * ch + (rows - 1) as f32 * GAP;
+        assert!((span_w - 640.0).abs() < 0.01, "span_w={span_w}");
+        assert!((span_h - 640.0).abs() < 0.01, "span_h={span_h}");
+        assert_eq!(content_h, 640.0);
+    }
+
+    #[test]
+    fn grid_layout_zoom_in_overflows_and_grows_thumbs() {
+        // Zooming in grows thumbs past the largest exact-fill size: fewer
+        // columns, square thumbs at the zoomed size, content taller than
+        // the window (scrollable).
+        let (d_cols, _, _, d_side, _) = grid_layout_at(9, 640.0, 640.0, 1.0);
+        let (cols, cw, ch, side, content_h) = grid_layout_at(9, 640.0, 640.0, 2.0);
+        assert!(cols < d_cols, "cols={cols}, default={d_cols}");
+        assert!(side > d_side);
+        assert_eq!(side, ch);
+        assert!(cw >= side);
+        assert!(content_h > 640.0, "content_h={content_h}");
     }
 
     #[test]
     fn grid_layout_side_is_square_of_cell_minimum() {
-        let (_, cw, ch, side) = grid_layout(7, 1200.0, 700.0);
+        let (_, cw, ch, side, _) = grid_layout_at(7, 1200.0, 700.0, 1.0);
         assert_eq!(side, cw.min(ch));
     }
 
