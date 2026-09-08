@@ -181,7 +181,7 @@ impl Grid {
     }
 
     /// Grid navigation: h/j/k/l + arrows move the selection, Enter opens the
-    /// selected image, q/ESC quit.
+    /// selected image, q quits. ESC is inert here (grid is the home view).
     pub fn handle_input(&mut self, rl: &mut RaylibHandle, win_w: f32, win_h: f32) -> GridAction {
         if self.entries.is_empty() {
             return GridAction::None;
@@ -202,7 +202,7 @@ impl Grid {
         while let Some(k) = rl.get_key_pressed() {
             match k {
                 KeyboardKey::KEY_ENTER | KeyboardKey::KEY_KP_ENTER => enter = true,
-                KeyboardKey::KEY_Q | KeyboardKey::KEY_ESCAPE => quit = true,
+                KeyboardKey::KEY_Q => quit = true,
                 KeyboardKey::KEY_H | KeyboardKey::KEY_LEFT => left = true,
                 KeyboardKey::KEY_L | KeyboardKey::KEY_RIGHT => right = true,
                 KeyboardKey::KEY_K | KeyboardKey::KEY_UP => up = true,

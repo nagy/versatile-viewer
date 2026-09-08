@@ -17,11 +17,12 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
   - `nix flake check` — run checks
   - `nix develop` — dev shell (LD_LIBRARY_PATH + rpath RUSTFLAGS set;
     treefmt wrapper included)
-- Run: `nix run . -- <image-path>`; ESC/q quits. Binary name: `vv`.
+- Run: `nix run . -- <image-path>`; q quits, ESC/Enter toggle grid ↔ image
+  view (ESC never quits). Binary name: `vv`.
 
 ## Milestones (step by step)
 
-1. [x] Single image window: JXL + PNG + JPEG, ESC/q.
+1. [x] Single image window: JXL + PNG + JPEG, q quits.
 2. [x] Fit to window (aspect preserved, centered, no upscale, refits on resize).
 3. [x] Zoom modes: `W` fit-down (default, no upscale), `Shift+W` fit all
    sides (upscales until first border touch), `e` fit width, `Shift+E`
@@ -38,6 +39,6 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
    first preview renders, for eyeballing the refinement.
 8. [x] Directory browsing: thumbnail grid fills the window (square
    center-crop thumbs, dynamic layout, white selection border, background
-   decode thread); Enter opens, ESC returns. Still open: nsxiv-style
+   decode thread); Enter/ESC open, Enter/ESC return. Still open: nsxiv-style
    left/right navigation while viewing an image.
 9. Video playback (mpv inspiration; backend TBD).

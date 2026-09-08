@@ -1,5 +1,5 @@
 //! versatile-viewer — image viewer (JXL first-class, plus PNG/JPEG) with a
-//! directory thumbnail grid. ESC or q quits.
+//! directory thumbnail grid. q quits; ESC/Enter toggle grid ↔ image view.
 //!
 //! Usage: versatile-viewer <image-path-or-directory>
 
@@ -226,7 +226,8 @@ fn main() -> Result<()> {
         ))
         .resizable()
         .build();
-    // We quit via q/ESC handling ourselves (ESC returns to the grid first).
+    // We quit via the q key handling ourselves (set_exit_key would make ESC
+    // close the window outright instead of returning to the grid).
     rl.set_exit_key(None);
 
     // Take the grid AFTER the window exists: it holds GPU textures, and
@@ -385,7 +386,8 @@ fn main() -> Result<()> {
             g.load_pending(&mut rl, &thread);
 
             // Grid navigation: h/j/k/l + arrows move the selection,
-            // Enter opens the selected image, q/ESC quit.
+            // Enter opens the selected image, q quits (ESC is inert here;
+            // the grid is the home view).
             match g.handle_input(&mut rl, win_w, win_h) {
                 GridAction::Open(i) => {
                     if debug {
@@ -420,12 +422,17 @@ fn main() -> Result<()> {
             // missed Enter immediately reopening the just-viewed image).
             // State queries (is_key_down panning, is_key_pressed W/E/=/-)
             // are unaffected: the queue is separate from the key snapshot.
+            // Enter/ESC return to the grid when one exists (nsxiv-like:
+            // Enter toggles between grid and the open image); q quits,
+            // ESC never quits the program (inert in single-file launches,
+            // where there is no grid to return to).
             let mut enter = false;
             let mut quit_pressed = false;
             while let Some(k) = rl.get_key_pressed() {
                 match k {
                     KeyboardKey::KEY_ENTER | KeyboardKey::KEY_KP_ENTER => enter = true,
-                    KeyboardKey::KEY_Q | KeyboardKey::KEY_ESCAPE => quit_pressed = true,
+                    KeyboardKey::KEY_ESCAPE => enter = true,
+                    KeyboardKey::KEY_Q => quit_pressed = true,
                     _ => {}
                 }
             }
@@ -446,14 +453,8 @@ fn main() -> Result<()> {
 
             let mut return_to_grid = false;
             if quit_pressed {
-                if grid.is_none() {
-                    quit = true; // launched with a single file
-                } else {
-                    return_to_grid = true;
-                }
+                quit = true; // single-file launch: no grid to fall back to
             }
-            // Enter also returns to the grid when one exists (nsxiv-like:
-            // Enter toggles between grid and the open image).
             if grid.is_some() && enter {
                 return_to_grid = true;
             }
