@@ -45,6 +45,9 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
    (instant, no re-decode); while a decode is in flight the viewer waits
    for it instead of decoding twice; otherwise the streaming loader takes
    over. Decodes are prefetched: grid selection's left/right/up/down
-   neighbors, and prev/next while viewing. Space/Backspace switch
-   prev/next in image view (nsxiv-style; arrows and h/j/k/l stay panning).
+   neighbors, and prev/next while viewing. Opening an image fit-all
+   (Shift+W behavior). Space/Backspace or n/p switch prev/next in image
+   view (nsxiv-style; arrows and h/j/k/l stay panning); nav keys and grid
+   h/j/k/l auto-repeat while held, at the X server's rate (xset r rate).
+   g/G jump to the first/last image (grid selection and image view).
 9. Video playback (mpv inspiration; backend TBD).

@@ -63,6 +63,9 @@ pub struct Grid {
     result_tx: Sender<DecodeResult>,
     result_rx: Receiver<DecodeResult>,
     inflight: usize,
+    /// Auto-repeat state for the four direction keys (h/j/k/l + arrows),
+    /// indexed [left, right, up, down] (xset r rate values).
+    rep_dir: [crate::keyrepeat::RepeatState; 4],
 }
 
 impl Grid {
@@ -96,6 +99,7 @@ impl Grid {
             result_tx: res_tx,
             result_rx: res_rx,
             inflight: 0,
+            rep_dir: Default::default(),
         })
     }
 
@@ -242,8 +246,10 @@ impl Grid {
         }
     }
 
-    /// Grid navigation: h/j/k/l + arrows move the selection, Enter opens the
-    /// selected image, q quits. ESC is inert here (grid is the home view).
+    /// Grid navigation: h/j/k/l + arrows move the selection (auto-repeat
+    /// while held, at the X server's rate — xset r rate), g/G jump to the
+    /// first/last image, Enter opens the selected image, q quits. ESC is
+    /// inert here (grid is the home view).
     pub fn handle_input(&mut self, rl: &mut RaylibHandle, win_w: f32, win_h: f32) -> GridAction {
         if self.entries.is_empty() {
             return GridAction::None;
@@ -261,6 +267,8 @@ impl Grid {
         let mut right = false;
         let mut up = false;
         let mut down = false;
+        let mut jump_first = false;
+        let mut jump_last = false;
         while let Some(k) = rl.get_key_pressed() {
             match k {
                 KeyboardKey::KEY_ENTER | KeyboardKey::KEY_KP_ENTER => enter = true,
@@ -269,6 +277,15 @@ impl Grid {
                 KeyboardKey::KEY_L | KeyboardKey::KEY_RIGHT => right = true,
                 KeyboardKey::KEY_K | KeyboardKey::KEY_UP => up = true,
                 KeyboardKey::KEY_J | KeyboardKey::KEY_DOWN => down = true,
+                KeyboardKey::KEY_G => {
+                    if rl.is_key_down(KeyboardKey::KEY_LEFT_SHIFT)
+                        || rl.is_key_down(KeyboardKey::KEY_RIGHT_SHIFT)
+                    {
+                        jump_last = true;
+                    } else {
+                        jump_first = true;
+                    }
+                }
                 _ => {}
             }
         }
@@ -281,6 +298,21 @@ impl Grid {
                 enter = true;
             }
         }
+        // Auto-repeat for the direction keys: the initial press fires
+        // immediately (edge from the queue above); holding fires at the X
+        // server's repeat rate after its delay (xset r rate values).
+        let now = rl.get_time();
+        let (delay, rate) = crate::keyrepeat::settings();
+        let down_left = rl.is_key_down(KeyboardKey::KEY_H) || rl.is_key_down(KeyboardKey::KEY_LEFT);
+        let down_right =
+            rl.is_key_down(KeyboardKey::KEY_L) || rl.is_key_down(KeyboardKey::KEY_RIGHT);
+        let down_up = rl.is_key_down(KeyboardKey::KEY_K) || rl.is_key_down(KeyboardKey::KEY_UP);
+        let down_down = rl.is_key_down(KeyboardKey::KEY_J) || rl.is_key_down(KeyboardKey::KEY_DOWN);
+        let rep = &mut self.rep_dir;
+        let left = rep[0].tick(left, down_left, now, delay, rate);
+        let right = rep[1].tick(right, down_right, now, delay, rate);
+        let up = rep[2].tick(up, down_up, now, delay, rate);
+        let down = rep[3].tick(down, down_down, now, delay, rate);
         let (cols, ..) = grid_layout(self.entries.len(), win_w, win_h);
         let n = self.entries.len();
         let mut sel = self.selected;
@@ -295,6 +327,13 @@ impl Grid {
         }
         if down && sel + cols < n {
             sel += cols;
+        }
+        // g/G: jump to the first/last image (overrides held direction keys).
+        if jump_first {
+            sel = 0;
+        }
+        if jump_last {
+            sel = n - 1;
         }
         self.selected = sel;
         if enter {

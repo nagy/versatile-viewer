@@ -13,6 +13,7 @@ use raylib::{
 };
 
 mod grid;
+mod keyrepeat;
 mod loader;
 use grid::{Grid, GridAction};
 use loader::{Loader, LoaderMsg};
@@ -208,7 +209,9 @@ fn reset_view(
     target_pan: &mut Vector2,
     view_scale: &mut Option<f32>,
 ) {
-    *zoom = ZoomMode::FitDown;
+    // Freshly shown images open fit-all (Shift+W behavior): upscale or
+    // downscale until the image first touches a window border.
+    *zoom = ZoomMode::FitAll;
     *pan = Vector2::ZERO;
     *target_pan = Vector2::ZERO;
     *view_scale = None;
@@ -323,6 +326,9 @@ fn main() -> Result<()> {
     let mut pan = Vector2::ZERO;
     // On-screen scale, eased toward the target scale each frame.
     let mut view_scale: Option<f32> = None;
+    // Auto-repeat state for image-mode prev/next (xset r rate values).
+    let mut rep_nav_fwd = keyrepeat::RepeatState::new();
+    let mut rep_nav_back = keyrepeat::RepeatState::new();
 
     while !rl.window_should_close() && !quit {
         // VV_DEBUG: trace every key raylib sees (keycode per raylib/GLFW:
@@ -398,7 +404,7 @@ fn main() -> Result<()> {
                                 view_tex = Some(tex);
                                 img_w = e.width as f32;
                                 img_h = e.height as f32;
-                                zoom = ZoomMode::FitDown;
+                                zoom = ZoomMode::FitAll;
                                 pan = Vector2::ZERO;
                                 target_pan = Vector2::ZERO;
                                 view_scale = None;
@@ -417,10 +423,10 @@ fn main() -> Result<()> {
                             // ease block only runs from the next frame on).
                             img_w = width as f32;
                             img_h = height as f32;
-                            zoom = ZoomMode::FitDown;
+                            zoom = ZoomMode::FitAll;
                             pan = Vector2::ZERO;
                             target_pan = Vector2::ZERO;
-                            view_scale = Some((win_w / img_w).min(win_h / img_h).min(1.0));
+                            view_scale = Some((win_w / img_w).min(win_h / img_h));
                         }
                         LoaderMsg::Preview {
                             rgba,
@@ -439,10 +445,10 @@ fn main() -> Result<()> {
                             if img_w == 0.0 {
                                 img_w = width as f32;
                                 img_h = height as f32;
-                                zoom = ZoomMode::FitDown;
+                                zoom = ZoomMode::FitAll;
                                 pan = Vector2::ZERO;
                                 target_pan = Vector2::ZERO;
-                                view_scale = Some((win_w / img_w).min(win_h / img_h).min(1.0));
+                                view_scale = Some((win_w / img_w).min(win_h / img_h));
                             }
                             show_frame(&mut rl, &thread, &mut view_tex, &rgba, width, height)?;
                             view_loading = false;
@@ -503,8 +509,9 @@ fn main() -> Result<()> {
                         img_h = h as f32;
                         // The image-mode scale math runs only from the next
                         // frame on (this frame took the grid branch); set the
-                        // initial fit scale here so the draw this frame has it.
-                        view_scale = Some((win_w / img_w).min(win_h / img_h).min(1.0));
+                        // initial fit-all scale here so the draw this frame
+                        // has it.
+                        view_scale = Some((win_w / img_w).min(win_h / img_h));
                         view_loading = false;
                     } else if queued {
                         view_from_grid = None;
@@ -541,19 +548,67 @@ fn main() -> Result<()> {
             // Enter toggles between grid and the open image); q quits,
             // ESC never quits the program (inert in single-file launches,
             // where there is no grid to return to). Space/Backspace switch
-            // to the next/previous image (nsxiv-style nav; arrows and
-            // h/j/k/l stay panning).
+            // to the next/previous image (nsxiv-style nav; Space/n next,
+            // Backspace/p previous; arrows and h/j/k/l stay panning).
+            // Nav keys auto-repeat while held, at the X server's rate
+            // (xset r rate; keyrepeat::settings). g/G jump to the
+            // first/last image.
             let mut enter = false;
             let mut quit_pressed = false;
-            let mut nav: Option<i64> = None;
+            let mut nav_next_edge = false;
+            let mut nav_prev_edge = false;
+            let mut jump_first = false;
+            let mut jump_last = false;
+            let shift = rl.is_key_down(KeyboardKey::KEY_LEFT_SHIFT)
+                || rl.is_key_down(KeyboardKey::KEY_RIGHT_SHIFT);
             while let Some(k) = rl.get_key_pressed() {
                 match k {
                     KeyboardKey::KEY_ENTER | KeyboardKey::KEY_KP_ENTER => enter = true,
                     KeyboardKey::KEY_ESCAPE => enter = true,
                     KeyboardKey::KEY_Q => quit_pressed = true,
-                    KeyboardKey::KEY_SPACE => nav = Some(1),
-                    KeyboardKey::KEY_BACKSPACE => nav = Some(-1),
+                    KeyboardKey::KEY_SPACE | KeyboardKey::KEY_N => nav_next_edge = true,
+                    KeyboardKey::KEY_BACKSPACE | KeyboardKey::KEY_P => nav_prev_edge = true,
+                    KeyboardKey::KEY_G => {
+                        if shift {
+                            jump_last = true;
+                        } else {
+                            jump_first = true;
+                        }
+                    }
                     _ => {}
+                }
+            }
+            // Auto-repeat: the initial press fires immediately (edge from
+            // the queue above), holding fires at the X server's repeat rate
+            // after its delay.
+            let now = rl.get_time();
+            let (delay, rate) = keyrepeat::settings();
+            let mut nav = if rep_nav_fwd.tick(
+                nav_next_edge,
+                rl.is_key_down(KeyboardKey::KEY_N) || rl.is_key_down(KeyboardKey::KEY_SPACE),
+                now,
+                delay,
+                rate,
+            ) {
+                Some(1)
+            } else if rep_nav_back.tick(
+                nav_prev_edge,
+                rl.is_key_down(KeyboardKey::KEY_P) || rl.is_key_down(KeyboardKey::KEY_BACKSPACE),
+                now,
+                delay,
+                rate,
+            ) {
+                Some(-1)
+            } else {
+                None
+            };
+            // g/G: jump to the first/last image (as a nav delta).
+            if jump_first || jump_last {
+                if let Some(cur) = open_id.and_then(|id| grid.as_ref().and_then(|g| g.index_of(id)))
+                {
+                    let n = grid.as_ref().unwrap().entries.len();
+                    let t = if jump_first { 0 } else { n - 1 };
+                    nav = Some(t as i64 - cur as i64);
                 }
             }
             // Some input setups (IMEs, unusual X11 input methods) deliver
@@ -630,11 +685,11 @@ fn main() -> Result<()> {
                                 view_tex = Some(tex);
                                 img_w = w as f32;
                                 img_h = h as f32;
-                                // Set the initial fit scale here: the scale
-                                // math below already ran past the nav code
-                                // only afterwards, and this frame's draw
+                                // Set the initial fit-all scale here: the
+                                // scale math below already ran past the nav
+                                // code only afterwards, and this frame's draw
                                 // needs a scale now.
-                                view_scale = Some((win_w / img_w).min(win_h / img_h).min(1.0));
+                                view_scale = Some((win_w / img_w).min(win_h / img_h));
                                 view_loading = false;
                             } else if queued {
                                 view_from_grid = None;
@@ -658,8 +713,6 @@ fn main() -> Result<()> {
             }
 
             // Keyboard shortcuts. Capital W / capital E arrive as W/E + shift.
-            let shift = rl.is_key_down(KeyboardKey::KEY_LEFT_SHIFT)
-                || rl.is_key_down(KeyboardKey::KEY_RIGHT_SHIFT);
             if rl.is_key_pressed(KeyboardKey::KEY_W) {
                 zoom = if shift {
                     ZoomMode::FitAll
