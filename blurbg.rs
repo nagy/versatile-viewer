@@ -110,10 +110,10 @@ impl BlurBg {
         let (rgba, width, height) = data;
         let same = matches!(&self.tex, Some(t) if t.width() == width as i32 && t.height() == height as i32);
         if same {
-            if let Some(t) = &mut self.tex {
-                if t.update_texture(&rgba).is_err() {
-                    self.tex = None;
-                }
+            if let Some(t) = &mut self.tex
+                && t.update_texture(&rgba).is_err()
+            {
+                self.tex = None;
             }
             return;
         }
@@ -121,7 +121,7 @@ impl BlurBg {
             Ok(t) => {
                 // Bilinear filtering is what turns the tiny copy into a
                 // smooth blur when the GPU upscales it every frame.
-                let _ = t.set_texture_filter(thread, TextureFilter::TEXTURE_FILTER_BILINEAR);
+                t.set_texture_filter(thread, TextureFilter::TEXTURE_FILTER_BILINEAR);
                 self.tex = Some(t); // drops (unloads) any previous texture
             }
             Err(err) => {
@@ -168,7 +168,7 @@ impl BlurBg {
         let first = self.tex.is_none();
         match crate::upload_rgba(rl, thread, rgba, *width, *height) {
             Ok(t) => {
-                let _ = t.set_texture_filter(thread, TextureFilter::TEXTURE_FILTER_BILINEAR);
+                t.set_texture_filter(thread, TextureFilter::TEXTURE_FILTER_BILINEAR);
                 if first {
                     self.old = None;
                     self.fade_start = None;
@@ -272,7 +272,7 @@ mod tests {
         let (_, w, h) = small_blur(&rgba, 800, 200, 256);
         assert_eq!((w, h), (256, 64));
         // Degenerate 1xN input still yields at least 1px on each side.
-        let rgba = vec![0u8; 1 * 9 * 4];
+        let rgba = vec![0u8; 9 * 4];
         let (out, w, h) = small_blur(&rgba, 1, 9, 64);
         assert!(w >= 1 && h >= 1);
         assert_eq!(out.len(), (w * h * 4) as usize);

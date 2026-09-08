@@ -273,10 +273,11 @@ impl Grid {
             sel.checked_sub(cols),
             Some(sel + cols),
         ] {
-            if let Some(i) = i {
-                if i < n && !v.contains(&i) {
-                    v.push(i);
-                }
+            if let Some(i) = i
+                && i < n
+                && !v.contains(&i)
+            {
+                v.push(i);
             }
         }
         v
@@ -420,7 +421,7 @@ impl Grid {
         }
         let old_sel = self.selected;
         let mut sel = self.selected;
-        if left && sel % cols != 0 {
+        if left && !sel.is_multiple_of(cols) {
             sel -= 1;
         }
         if right && sel % cols != cols - 1 && sel + 1 < n {
@@ -525,7 +526,7 @@ fn best_fill_side(n: usize, aw: f32, ah: f32) -> f32 {
     let mut best_score = (f32::NEG_INFINITY, 0.0f32);
     let mut best_side = 1.0f32;
     for cols in 1..=n {
-        let rows = (n + cols - 1) / cols;
+        let rows = n.div_ceil(cols);
         let cw = ((aw - (cols - 1) as f32 * GAP) / cols as f32).max(1.0);
         let ch = ((ah - (rows - 1) as f32 * GAP) / rows as f32).max(1.0);
         let score = (cw.min(ch), -cw.max(ch));
@@ -569,7 +570,7 @@ fn grid_layout_at(n: usize, win_w: f32, win_h: f32, zoom: f32) -> (usize, f32, f
         let mut best = (1usize, aw, ah);
         let mut best_key = (f32::INFINITY, f32::INFINITY);
         for cols in 1..=n {
-            let rows = (n + cols - 1) / cols;
+            let rows = n.div_ceil(cols);
             let cw = ((aw - (cols - 1) as f32 * GAP) / cols as f32).max(1.0);
             let ch = ((ah - (rows - 1) as f32 * GAP) / rows as f32).max(1.0);
             let key = ((cw.min(ch) - target).abs(), cw.max(ch));
@@ -579,7 +580,7 @@ fn grid_layout_at(n: usize, win_w: f32, win_h: f32, zoom: f32) -> (usize, f32, f
             }
         }
         let (cols, cw, ch) = best;
-        let rows = (n + cols - 1) / cols;
+        let rows = n.div_ceil(cols);
         let content_h = 2.0 * MARGIN + rows as f32 * ch + (rows - 1) as f32 * GAP;
         (cols, cw, ch, cw.min(ch), content_h)
     } else {
@@ -588,7 +589,7 @@ fn grid_layout_at(n: usize, win_w: f32, win_h: f32, zoom: f32) -> (usize, f32, f
         let target = target.min(aw.min(ah));
         let cols = (((aw + GAP) / (target + GAP)).floor() as usize).clamp(1, n);
         let cw = ((aw - (cols - 1) as f32 * GAP) / cols as f32).max(target);
-        let rows = (n + cols - 1) / cols;
+        let rows = n.div_ceil(cols);
         let content_h = 2.0 * MARGIN + rows as f32 * target + (rows - 1) as f32 * GAP;
         (cols, cw, target, target, content_h)
     }
@@ -616,7 +617,7 @@ mod tests {
         // and the content height must equal the window height.
         for (n, win_w, win_h) in [(1, 100.0, 100.0), (7, 1200.0, 700.0), (100, 1600.0, 900.0)] {
             let (cols, cw, ch, side, content_h) = grid_layout_at(n, win_w, win_h, 1.0);
-            let rows = (n + cols - 1) / cols;
+            let rows = n.div_ceil(cols);
             let span_w = 2.0 * MARGIN + cols as f32 * cw + (cols - 1) as f32 * GAP;
             let span_h = 2.0 * MARGIN + rows as f32 * ch + (rows - 1) as f32 * GAP;
             assert!((span_w - win_w).abs() < 0.01, "n={n}: span_w={span_w}");
@@ -645,7 +646,7 @@ mod tests {
         assert!(cols > d_cols, "cols={cols}, default={d_cols}");
         assert!(side < d_side);
         assert_eq!(side, cw.min(ch));
-        let rows = (9 + cols - 1) / cols;
+        let rows = 9_usize.div_ceil(cols);
         let span_w = 2.0 * MARGIN + cols as f32 * cw + (cols - 1) as f32 * GAP;
         let span_h = 2.0 * MARGIN + rows as f32 * ch + (rows - 1) as f32 * GAP;
         assert!((span_w - 640.0).abs() < 0.01, "span_w={span_w}");

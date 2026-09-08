@@ -125,7 +125,7 @@ fn decode_common(path: &Path) -> Result<DecodedImage> {
 /// files start with a box header, not the codestream magic).
 fn is_jxl(path: &Path) -> bool {
     match file_magic(path) {
-        Some(m) if m == [0xff, 0x0a] => true, // raw JXL codestream
+        Some([0xff, 0x0a]) => true, // raw JXL codestream
         Some(m) if is_common_magic(m) => false,
         _ => path
             .extension()
@@ -238,14 +238,13 @@ fn put_back_view(
     view_from_grid: &mut Option<u64>,
     view_tex: &mut Option<Texture2D>,
 ) {
-    if let Some(id) = view_from_grid.take() {
-        if let Some(e) = grid
+    if let Some(id) = view_from_grid.take()
+        && let Some(e) = grid
             .as_mut()
             .and_then(|g| g.entries.iter_mut().find(|e| e.id == id))
-        {
-            e.texture = view_tex.take();
-            e.viewing = false;
-        }
+    {
+        e.texture = view_tex.take();
+        e.viewing = false;
     }
     *view_tex = None;
 }
@@ -312,14 +311,10 @@ fn main() -> Result<()> {
         .size(win0_w, win0_h)
         .title(&format!(
             "versatile-viewer — {}",
-            if dir_grid.is_none() {
-                path.display().to_string()
+            if let Some(g) = &dir_grid {
+                format!("{} ({} images)", path.display(), g.entries.len())
             } else {
-                format!(
-                    "{} ({} images)",
-                    path.display(),
-                    dir_grid.as_ref().unwrap().entries.len()
-                )
+                path.display().to_string()
             }
         ))
         .resizable()
@@ -352,7 +347,13 @@ fn main() -> Result<()> {
     let mut img_w = 0.0f32;
     let mut img_h = 0.0f32;
     if let Some(decoded) = single_decoded {
-        view_tex = Some(upload_rgba(&mut rl, &thread, &decoded.rgba, decoded.width, decoded.height)?);
+        view_tex = Some(upload_rgba(
+            &mut rl,
+            &thread,
+            &decoded.rgba,
+            decoded.width,
+            decoded.height,
+        )?);
         drop(decoded.rgba);
         img_w = win0_w as f32;
         img_h = win0_h as f32;
@@ -454,32 +455,33 @@ fn main() -> Result<()> {
             let mut open_failed = false;
             // Waiting on a grid decode (no streaming loader for this open):
             // when its texture lands, take it over as the view.
-            if view_tex.is_none() && loader.is_none() {
-                if let (Some(g), Some(id)) = (grid.as_mut(), open_id) {
-                    match g.entries.iter_mut().find(|e| e.id == id) {
-                        Some(e) => {
-                            if let Some(tex) = e.texture.take() {
-                                e.viewing = true;
-                                view_from_grid = Some(id);
-                                view_tex = Some(tex);
-                                img_w = e.width as f32;
-                                img_h = e.height as f32;
-                                zoom = ZoomMode::FitAll;
-                                pan = Vector2::ZERO;
-                                target_pan = Vector2::ZERO;
-                                view_scale = None;
-                                view_loading = false;
-                                attach_blur_bg(
-                                    &mut blur_bg,
-                                    &mut rl,
-                                    &thread,
-                                    e.blur.as_ref(),
-                                    Some(id),
-                                );
-                            }
+            if view_tex.is_none()
+                && loader.is_none()
+                && let (Some(g), Some(id)) = (grid.as_mut(), open_id)
+            {
+                match g.entries.iter_mut().find(|e| e.id == id) {
+                    Some(e) => {
+                        if let Some(tex) = e.texture.take() {
+                            e.viewing = true;
+                            view_from_grid = Some(id);
+                            view_tex = Some(tex);
+                            img_w = e.width as f32;
+                            img_h = e.height as f32;
+                            zoom = ZoomMode::FitAll;
+                            pan = Vector2::ZERO;
+                            target_pan = Vector2::ZERO;
+                            view_scale = None;
+                            view_loading = false;
+                            attach_blur_bg(
+                                &mut blur_bg,
+                                &mut rl,
+                                &thread,
+                                e.blur.as_ref(),
+                                Some(id),
+                            );
                         }
-                        None => open_failed = true, // entry vanished (decode failed)
                     }
+                    None => open_failed = true, // entry vanished (decode failed)
                 }
             }
             if let Some(loader) = &loader {
@@ -676,13 +678,12 @@ fn main() -> Result<()> {
                 None
             };
             // g/G: jump to the first/last image (as a nav delta).
-            if jump_first || jump_last {
-                if let Some(cur) = open_id.and_then(|id| grid.as_ref().and_then(|g| g.index_of(id)))
-                {
-                    let n = grid.as_ref().unwrap().entries.len();
-                    let t = if jump_first { 0 } else { n - 1 };
-                    nav = Some(t as i64 - cur as i64);
-                }
+            if (jump_first || jump_last)
+                && let Some(cur) = open_id.and_then(|id| grid.as_ref().and_then(|g| g.index_of(id)))
+            {
+                let n = grid.as_ref().unwrap().entries.len();
+                let t = if jump_first { 0 } else { n - 1 };
+                nav = Some(t as i64 - cur as i64);
             }
             // Some input setups (IMEs, unusual X11 input methods) deliver
             // Enter as a character event ('\n'/'\r'); accept both. This
@@ -711,14 +712,13 @@ fn main() -> Result<()> {
                 // Hand the shown texture back to its grid entry and make
                 // that entry the grid selection (nsxiv-like).
                 put_back_view(&mut grid, &mut view_from_grid, &mut view_tex);
-                if let Some(id) = open_id.take() {
-                    if let Some(g) = grid.as_mut() {
-                        if let Some(i) = g.index_of(id) {
-                            g.selected = i;
-                            // Scrolled (zoomed-in) grids: bring it back on screen.
-                            g.ensure_visible(win_w, win_h);
-                        }
-                    }
+                if let Some(id) = open_id.take()
+                    && let Some(g) = grid.as_mut()
+                    && let Some(i) = g.index_of(id)
+                {
+                    g.selected = i;
+                    // Scrolled (zoomed-in) grids: bring it back on screen.
+                    g.ensure_visible(win_w, win_h);
                 }
                 loader = None; // cancels a still-running stream
                 view_loading = false;
@@ -730,66 +730,58 @@ fn main() -> Result<()> {
             // waited on (auto-swap when it lands); otherwise the streaming
             // loader takes over. The new entry's own neighbors are prefetched
             // via the priority list at the top of the loop.
-            if !return_to_grid {
-                if let Some(delta) = nav {
-                    let cur = open_id.and_then(|id| grid.as_ref().and_then(|g| g.index_of(id)));
-                    if let Some(cur) = cur {
-                        let n = grid.as_ref().unwrap().entries.len();
-                        let t = cur as i64 + delta;
-                        if t >= 0 && (t as usize) < n {
-                            let j = t as usize;
-                            put_back_view(&mut grid, &mut view_from_grid, &mut view_tex);
-                            loader = None;
-                            let (id, tex, w, h, path, queued, blur) = {
-                                let g = grid.as_mut().unwrap();
-                                let e = &mut g.entries[j];
-                                (
-                                    e.id,
-                                    e.texture.take(),
-                                    e.width,
-                                    e.height,
-                                    e.path.clone(),
-                                    e.queued,
-                                    e.blur.clone(),
-                                )
-                            };
-                            open_id = Some(id);
-                            reset_view(&mut zoom, &mut pan, &mut target_pan, &mut view_scale);
-                            if let Some(tex) = tex {
-                                grid.as_mut().unwrap().entries[j].viewing = true;
-                                view_from_grid = Some(id);
-                                view_tex = Some(tex);
-                                img_w = w as f32;
-                                img_h = h as f32;
-                                // Set the initial fit-all scale here: the
-                                // scale math below already ran past the nav
-                                // code only afterwards, and this frame's draw
-                                // needs a scale now.
-                                view_scale = Some((win_w / img_w).min(win_h / img_h));
-                                view_loading = false;
-                                attach_blur_bg(
-                                    &mut blur_bg,
-                                    &mut rl,
-                                    &thread,
-                                    blur.as_ref(),
-                                    open_id,
-                                );
-                            } else if queued {
-                                view_from_grid = None;
-                                view_tex = None;
-                                view_loading = true;
-                                view_loading_since = rl.get_time();
-                                img_w = 0.0;
-                                img_h = 0.0;
-                            } else {
-                                view_from_grid = None;
-                                loader = Some(Loader::start(path));
-                                view_tex = None;
-                                view_loading = true;
-                                view_loading_since = rl.get_time();
-                                img_w = 0.0;
-                                img_h = 0.0;
-                            }
+            if !return_to_grid && let Some(delta) = nav {
+                let cur = open_id.and_then(|id| grid.as_ref().and_then(|g| g.index_of(id)));
+                if let Some(cur) = cur {
+                    let n = grid.as_ref().unwrap().entries.len();
+                    let t = cur as i64 + delta;
+                    if t >= 0 && (t as usize) < n {
+                        let j = t as usize;
+                        put_back_view(&mut grid, &mut view_from_grid, &mut view_tex);
+                        loader = None;
+                        let (id, tex, w, h, path, queued, blur) = {
+                            let g = grid.as_mut().unwrap();
+                            let e = &mut g.entries[j];
+                            (
+                                e.id,
+                                e.texture.take(),
+                                e.width,
+                                e.height,
+                                e.path.clone(),
+                                e.queued,
+                                e.blur.clone(),
+                            )
+                        };
+                        open_id = Some(id);
+                        reset_view(&mut zoom, &mut pan, &mut target_pan, &mut view_scale);
+                        if let Some(tex) = tex {
+                            grid.as_mut().unwrap().entries[j].viewing = true;
+                            view_from_grid = Some(id);
+                            view_tex = Some(tex);
+                            img_w = w as f32;
+                            img_h = h as f32;
+                            // Set the initial fit-all scale here: the
+                            // scale math below already ran past the nav
+                            // code only afterwards, and this frame's draw
+                            // needs a scale now.
+                            view_scale = Some((win_w / img_w).min(win_h / img_h));
+                            view_loading = false;
+                            attach_blur_bg(&mut blur_bg, &mut rl, &thread, blur.as_ref(), open_id);
+                        } else if queued {
+                            view_from_grid = None;
+                            view_tex = None;
+                            view_loading = true;
+                            view_loading_since = rl.get_time();
+                            img_w = 0.0;
+                            img_h = 0.0;
+                        } else {
+                            view_from_grid = None;
+                            loader = Some(Loader::start(path));
+                            view_tex = None;
+                            view_loading = true;
+                            view_loading_since = rl.get_time();
+                            img_w = 0.0;
+                            img_h = 0.0;
                         }
                     }
                 }
@@ -858,10 +850,10 @@ fn main() -> Result<()> {
                 // scale currently on screen. Detected two ways: the keycode of the
                 // US-layout =/- keys (incl. numpad) and the typed character, which
                 // covers non-US layouts where '+' lives on another physical key.
-                let mut zoom_in = rl.is_key_pressed(KeyboardKey::KEY_EQUAL)
+                let zoom_in = rl.is_key_pressed(KeyboardKey::KEY_EQUAL)
                     || rl.is_key_pressed(KeyboardKey::KEY_KP_ADD)
                     || zoom_in_char;
-                let mut zoom_out = rl.is_key_pressed(KeyboardKey::KEY_MINUS)
+                let zoom_out = rl.is_key_pressed(KeyboardKey::KEY_MINUS)
                     || rl.is_key_pressed(KeyboardKey::KEY_KP_SUBTRACT)
                     || zoom_out_char;
                 if zoom_in || zoom_out {
@@ -875,21 +867,21 @@ fn main() -> Result<()> {
                 // the anchor's image point put gives
                 //   offset' = anchor - (anchor - offset) * (scale'/scale).
                 let scale = view_scale.unwrap();
-                if matches!(zoom, ZoomMode::Free(_)) {
-                    if let Some(s_old) = prev_scale {
-                        if (scale - s_old).abs() > f32::EPSILON && s_old > 0.0 {
-                            let r = scale / s_old;
-                            let ax = win_w / 2.0;
-                            let ay = win_h / 2.0;
-                            let ox = ax - (ax - (win_w - img_w * s_old) / 2.0 - pan.x) * r;
-                            let oy = ay - (ay - (win_h - img_h * s_old) / 2.0 - pan.y) * r;
-                            pan.x = ox - (win_w - img_w * scale) / 2.0;
-                            pan.y = oy - (win_h - img_h * scale) / 2.0;
-                            // Pin the target too, so pan easing doesn't fight the anchor.
-                            target_pan.x = pan.x;
-                            target_pan.y = pan.y;
-                        }
-                    }
+                if matches!(zoom, ZoomMode::Free(_))
+                    && let Some(s_old) = prev_scale
+                    && (scale - s_old).abs() > f32::EPSILON
+                    && s_old > 0.0
+                {
+                    let r = scale / s_old;
+                    let ax = win_w / 2.0;
+                    let ay = win_h / 2.0;
+                    let ox = ax - (ax - (win_w - img_w * s_old) / 2.0 - pan.x) * r;
+                    let oy = ay - (ay - (win_h - img_h * s_old) / 2.0 - pan.y) * r;
+                    pan.x = ox - (win_w - img_w * scale) / 2.0;
+                    pan.y = oy - (win_h - img_h * scale) / 2.0;
+                    // Pin the target too, so pan easing doesn't fight the anchor.
+                    target_pan.x = pan.x;
+                    target_pan.y = pan.y;
                 }
 
                 // Vim-style panning (h/j/k/l + arrow keys); held keys move the
@@ -937,14 +929,12 @@ fn main() -> Result<()> {
         // VV_BLUR_BG in grid mode: the background follows the selected
         // entry with a slow crossfade (starts as soon as the entry's
         // blurred copy has been decoded by the grid workers).
-        if mode == Mode::Grid {
-            if let (Some(bg), Some(g)) = (blur_bg.as_mut(), grid.as_ref()) {
-                if let Some(e) = g.entries.get(g.selected) {
-                    if let Some(data) = &e.blur {
-                        bg.transition(&mut rl, &thread, data, e.id);
-                    }
-                }
-            }
+        if mode == Mode::Grid
+            && let (Some(bg), Some(g)) = (blur_bg.as_mut(), grid.as_ref())
+            && let Some(e) = g.entries.get(g.selected)
+            && let Some(data) = &e.blur
+        {
+            bg.transition(&mut rl, &thread, data, e.id);
         }
 
         // Whether the "decoding..." indicator should show this frame: only

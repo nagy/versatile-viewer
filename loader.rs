@@ -179,24 +179,25 @@ fn stream(
         // any frame has finished (the only frame, for stills), wait for the
         // final render — this also keeps animations from overwriting frame 0
         // with a half-loaded frame 1.
-        if let Some(img) = &mut image {
-            if img.num_loaded_keyframes() == 0 && !img.is_loading_done() {
-                let due = last_preview.map_or(true, |t| t.elapsed() >= PREVIEW_INTERVAL);
-                if due {
-                    // Render errors are expected while groups/passes are
-                    // missing; ignore them and retry after the next chunk.
-                    if let Ok(render) = img.render_loading_frame() {
-                        let (rgba, width, height) = fb_to_rgba(&render.image_all_channels())?;
-                        let blur =
-                            blur_enabled.then(|| blurbg::small_blur(&rgba, width, height, blur_px));
-                        let _ = tx.send(LoaderMsg::Preview {
-                            rgba,
-                            width,
-                            height,
-                            blur,
-                        });
-                        last_preview = Some(Instant::now());
-                    }
+        if let Some(img) = &mut image
+            && img.num_loaded_keyframes() == 0
+            && !img.is_loading_done()
+        {
+            let due = last_preview.is_none_or(|t| t.elapsed() >= PREVIEW_INTERVAL);
+            if due {
+                // Render errors are expected while groups/passes are
+                // missing; ignore them and retry after the next chunk.
+                if let Ok(render) = img.render_loading_frame() {
+                    let (rgba, width, height) = fb_to_rgba(&render.image_all_channels())?;
+                    let blur =
+                        blur_enabled.then(|| blurbg::small_blur(&rgba, width, height, blur_px));
+                    let _ = tx.send(LoaderMsg::Preview {
+                        rgba,
+                        width,
+                        height,
+                        blur,
+                    });
+                    last_preview = Some(Instant::now());
                 }
             }
         }

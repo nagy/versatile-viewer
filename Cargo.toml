@@ -29,3 +29,9 @@ rayon = "1"
 [[bin]]
 name = "vv"
 path = "main.rs"
+
+[lints.clippy]
+# Keep the warning count at zero (enforced by CI once R6 lands).
+# Turn on `pedantic = "warn"` later and burn down the findings; the full
+# suite currently reports ~150 hits, too noisy to be useful.
+all = "deny"
