@@ -7,8 +7,9 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
 - JXL decode: `jxl-oxide`, pure Rust, no libjxl C dependency.
   jxl-oxide supports progressive decoding (partial bytes -> blurry preview,
   full bytes -> full image); planned for a later milestone.
-- Common formats: `image` crate (PNG, JPEG, WebP; webp via pure-Rust
-  image-webp, lossy + lossless decode).
+- Common formats: `image` crate (PNG, JPEG, WebP, GIF, BMP, TIFF, TGA;
+  webp via pure-Rust image-webp, lossy + lossless decode). Features must
+  stay in sync with the grid's extension filter (grid.rs `is_image_path`).
 - Build: nix flake (crane).
   - `nix build` — package
   - `nix build .#checks.default` — tests

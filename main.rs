@@ -1062,6 +1062,30 @@ mod tests {
     }
 
     #[test]
+    fn decode_image_reads_grid_filter_formats() {
+        // Every format the grid filter accepts (grid.rs is_image_path) must
+        // actually decode — the filter and the image-crate features must stay
+        // in sync (see the Cargo.toml comment).
+        let dir = std::env::temp_dir().join(format!("vv-test-formats-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (ext, format) in [
+            ("bmp", image::ImageFormat::Bmp),
+            ("gif", image::ImageFormat::Gif),
+            ("tga", image::ImageFormat::Tga),
+            ("tif", image::ImageFormat::Tiff),
+        ] {
+            let path = dir.join(format!("img.{ext}"));
+            image::DynamicImage::new_rgb8(4, 2)
+                .save_with_format(&path, format)
+                .unwrap_or_else(|e| panic!("encode {ext}: {e}"));
+            let decoded = decode_image(&path).unwrap_or_else(|e| panic!("decode {ext}: {e}"));
+            assert_eq!((decoded.width, decoded.height), (4, 2), "{ext}");
+            assert_eq!(decoded.rgba.len(), 4 * 2 * 4, "{ext}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn decode_image_fails_cleanly_on_garbage() {
         let dir = std::env::temp_dir().join(format!("vv-test-bad-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
