@@ -12,18 +12,17 @@ use raylib::{
     prelude::*,
 };
 
+mod document;
 mod grid;
 mod keyrepeat;
 mod loader;
-use grid::{Grid, GridAction};
-use loader::{Loader, LoaderMsg};
+mod pdf;
 
-struct DecodedImage {
-    width: u32,
-    height: u32,
-    /// RGBA8, row-major, 4 bytes per pixel.
-    rgba: Vec<u8>,
-}
+use std::sync::Arc;
+
+use document::{DecodedImage, Document, PageInfo, open_document};
+use grid::{EntrySource, Grid, GridAction};
+use loader::{Loader, LoaderMsg};
 
 /// How the image is scaled to the window. Scale is recomputed every frame,
 /// so resizing always stays correct.
@@ -50,89 +49,6 @@ enum ZoomMode {
 enum Mode {
     Grid,
     Image,
-}
-
-/// Decode a JPEG XL file with jxl-oxide (pure Rust).
-fn decode_jxl(path: &Path) -> Result<DecodedImage> {
-    let image = jxl_oxide::JxlImage::builder()
-        .open(path)
-        .map_err(|e| anyhow::anyhow!("jxl-oxide: {e}"))
-        .context("failed to open file")?;
-    let render = image
-        .render_frame(0)
-        .map_err(|e| anyhow::anyhow!("jxl-oxide: {e}"))
-        .context("failed to render frame")?;
-
-    let (rgba, width, height) = fb_to_rgba(&render.image_all_channels())?;
-    Ok(DecodedImage {
-        width,
-        height,
-        rgba,
-    })
-}
-
-/// Convert a jxl-oxide framebuffer (f32 samples, 3 or 4 interleaved channels)
-/// to RGBA8, forcing alpha = 1.0 for opaque 3-channel data.
-pub(crate) fn fb_to_rgba(fb: &jxl_oxide::FrameBuffer) -> Result<(Vec<u8>, u32, u32)> {
-    let width = fb.width() as u32;
-    let height = fb.height() as u32;
-    let channels = fb.channels();
-    let samples = fb.buf();
-    if !matches!(channels, 3 | 4) {
-        bail!("unexpected channel count from jxl-oxide: {channels}");
-    }
-
-    let mut rgba = vec![0u8; width as usize * height as usize * 4];
-    for (dst, src) in rgba.chunks_exact_mut(4).zip(samples.chunks_exact(channels)) {
-        dst[0] = to_u8(src[0]);
-        dst[1] = to_u8(src[1]);
-        dst[2] = to_u8(src[2]);
-        dst[3] = to_u8(src.get(3).copied().unwrap_or(1.0));
-    }
-    Ok((rgba, width, height))
-}
-
-fn to_u8(v: f32) -> u8 {
-    (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
-}
-
-/// Decode common formats (PNG, JPEG, ...) with the `image` crate.
-fn decode_common(path: &Path) -> Result<DecodedImage> {
-    let rgba = image::ImageReader::open(path)?
-        .with_guessed_format()?
-        .decode()?
-        .into_rgba8();
-    let (width, height) = rgba.dimensions();
-    Ok(DecodedImage {
-        width,
-        height,
-        rgba: rgba.into_raw(),
-    })
-}
-
-fn is_jxl(path: &Path) -> bool {
-    path.extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("jxl"))
-        || {
-            // JXL codestream sniff when extension is missing.
-            std::fs::File::open(path)
-                .and_then(|mut f| {
-                    use std::io::Read;
-                    let mut magic = [0u8; 2];
-                    f.read_exact(&mut magic)?;
-                    Ok(magic == [0xff, 0x0a])
-                })
-                .unwrap_or(false)
-        }
-}
-
-fn decode_image(path: &Path) -> Result<DecodedImage> {
-    if is_jxl(path) {
-        decode_jxl(path)
-    } else {
-        decode_common(path)
-    }
-    .with_context(|| format!("failed to decode {path:?}"))
 }
 
 /// Decode an image and upload it as a GPU texture. The raw RGBA buffer is
@@ -206,6 +122,55 @@ fn put_back_view(
 }
 
 /// Reset fit/pan state for a freshly shown image.
+/// Document-backed view state for a grid entry source (None for plain image
+/// files; doc + page for pages of multi-page documents).
+fn view_doc_of(source: &EntrySource) -> Option<(Arc<dyn Document>, usize)> {
+    match source {
+        EntrySource::File(_) => None,
+        EntrySource::DocPage { doc, page } => Some((doc.clone(), *page)),
+    }
+}
+
+/// Fit-all scale for a page of natural size `info` inside a win_w x win_h
+/// window, clamped so renders neither vanish nor explode (see pdf.rs caps).
+fn fit_scale(info: PageInfo, win_w: f32, win_h: f32) -> f32 {
+    (win_w / info.width as f32)
+        .min(win_h / info.height as f32)
+        .clamp(0.01, 8.0)
+}
+
+/// Open + start the loader for a grid entry with no ready texture. Returns
+/// (loader, document-backed view if any, initial render scale). The document
+/// opens here because texture-cached entries never need it; a failure aborts
+/// the open and the caller removes the entry.
+fn start_entry_loader(
+    source: &EntrySource,
+    win_w: f32,
+    win_h: f32,
+) -> Result<(Loader, Option<(Arc<dyn Document>, usize)>, f32)> {
+    match source {
+        EntrySource::File(path) => {
+            let doc = open_document(path)?;
+            if doc.page_count() > 1 {
+                // Multi-page (PDF): start on page 0 at the window's fit
+                // scale; n/p moves between pages, zoom re-renders sharper.
+                let fit = fit_scale(doc.page_info(0)?, win_w, win_h);
+                Ok((Loader::start_doc(doc.clone(), 0, fit), Some((doc, 0)), fit))
+            } else {
+                Ok((Loader::start_doc(doc, 0, 1.0), None, 1.0))
+            }
+        }
+        EntrySource::DocPage { doc, page } => {
+            let fit = fit_scale(doc.page_info(*page)?, win_w, win_h);
+            Ok((
+                Loader::start_doc(doc.clone(), *page, fit),
+                Some((doc.clone(), *page)),
+                fit,
+            ))
+        }
+    }
+}
+
 fn reset_view(
     zoom: &mut ZoomMode,
     pan: &mut Vector2,
@@ -237,17 +202,33 @@ fn main() -> Result<()> {
         bail!("no such file or directory: {path:?}");
     };
 
-    // Single-image launch: decode before opening the window so it can be
-    // sized to the image. Directory launch: fixed default window size.
-    let single_decoded = if dir_grid.is_none() {
-        Some(decode_image(path)?)
+    // Single-file launch: open the document before the window so it can be
+    // sized to page 0. Single-page documents decode up front (window = image
+    // size); multi-page documents (PDF) start on the loader and get a
+    // default window fitted to page 0. Directory launch: fixed window size.
+    let mut single_doc = if dir_grid.is_none() {
+        Some(open_document(path)?)
     } else {
         None
     };
-    let (win0_w, win0_h) = single_decoded
-        .as_ref()
-        .map(|d| (d.width as i32, d.height as i32))
-        .unwrap_or((1024, 768));
+    let single_decoded = match &single_doc {
+        Some(doc) if doc.page_count() == 1 => Some(doc.render(0, 1.0)?),
+        _ => None,
+    };
+    let (win0_w, win0_h) = match (&single_decoded, &single_doc) {
+        (Some(d), _) => (d.width as i32, d.height as i32),
+        (None, Some(doc)) => {
+            let info = doc.page_info(0)?;
+            // Fit page 0 into ~1024x768 (never upscale past 1 pt = 2 px).
+            let f = (1024.0 / info.width as f32)
+                .min(768.0 / info.height as f32)
+                .min(2.0);
+            let w = (info.width as f32 * f).round() as i32;
+            let h = (info.height as f32 * f).round() as i32;
+            (w.max(320), h.max(240))
+        }
+        _ => (1024, 768),
+    };
 
     let (mut rl, thread) = raylib::init()
         .size(win0_w, win0_h)
@@ -272,7 +253,10 @@ fn main() -> Result<()> {
     // Take the grid AFTER the window exists: it holds GPU textures, and
     // being declared after `rl` it is dropped (and unloaded) BEFORE the
     // window closes — both on normal exit and on panic unwinding.
+    // Active grid (directory grid, or a PDF's page-overview grid on top of
+    // it). `home_grid` holds the directory grid while a page grid is open.
     let mut grid = dir_grid;
+    let mut home_grid: Option<Grid> = None;
     // Background streamer for the open image (no GL objects inside, but like
     // `grid` declared after `rl` so it drops before the window closes). Drop
     // cancels the worker.
@@ -302,6 +286,26 @@ fn main() -> Result<()> {
         drop(decoded.rgba);
         img_w = win0_w as f32;
         img_h = win0_h as f32;
+    }
+
+    // Document-backed view: Some((doc, page)) while the open view shows a
+    // page of a multi-page document (PDF). Enables in-document page
+    // navigation (n/p) and scale-matched re-rendering (sharp zoom).
+    let mut view_doc: Option<(Arc<dyn Document>, usize)> = None;
+    // Scale the current view texture was rendered at (1.0 = natural size):
+    // images render once at native size; PDF pages re-render at the settled
+    // zoom scale (the refine logic in the frame loop).
+    let mut view_render_scale: f32 = 1.0;
+    // In-flight refine render: (entry id, page, scale, result channel).
+    let mut refine: Option<
+        std::sync::mpsc::Receiver<(u64, usize, f32, Result<DecodedImage, String>)>,
+    > = None;
+
+    // A single-file multi-page document (PDF) launches into its page grid;
+    // single-file images launch into the image view.
+    if single_doc.as_ref().is_some_and(|d| d.page_count() > 1) {
+        let doc = single_doc.take().unwrap();
+        grid = Some(Grid::from_document(doc));
     }
 
     let mut mode = if grid.is_none() {
@@ -436,6 +440,10 @@ fn main() -> Result<()> {
                             width,
                             height,
                         } => {
+                            // Texture px per natural unit (points for PDFs).
+                            if img_w > 0.0 && img_h > 0.0 && width > 0 {
+                                view_render_scale = width as f32 / img_w;
+                            }
                             // Progressively better render of the same image.
                             show_frame(&mut rl, &thread, &mut view_tex, &rgba, width, height)?;
                         }
@@ -454,6 +462,9 @@ fn main() -> Result<()> {
                                 view_scale = Some((win_w / img_w).min(win_h / img_h));
                             }
                             show_frame(&mut rl, &thread, &mut view_tex, &rgba, width, height)?;
+                            if img_w > 0.0 && img_h > 0.0 && width > 0 {
+                                view_render_scale = width as f32 / img_w;
+                            }
                             view_loading = false;
                         }
                         LoaderMsg::Failed(err) => {
@@ -469,6 +480,9 @@ fn main() -> Result<()> {
                     grid.as_mut().unwrap().remove_entry_by_id(id);
                 }
                 view_from_grid = None;
+                view_doc = None;
+                refine = None;
+                view_render_scale = 1.0;
                 mode = Mode::Grid;
                 view_tex = None;
                 view_loading = false;
@@ -481,6 +495,26 @@ fn main() -> Result<()> {
             // the grid is the home view).
             match grid.as_mut().unwrap().handle_input(&mut rl, win_w, win_h) {
                 GridAction::Open(i) => {
+                    // PDF entries open a page-overview grid (one entry per
+                    // page, decoded on the same rayon pool) instead of the
+                    // image view; ESC pops back to the directory grid.
+                    if let EntrySource::File(p) = &grid.as_ref().unwrap().entries[i].source {
+                        if crate::document::is_pdf(p) {
+                            match open_document(p) {
+                                Ok(doc) if doc.page_count() > 1 => {
+                                    home_grid = grid.take();
+                                    grid = Some(Grid::from_document(doc));
+                                    continue;
+                                }
+                                Ok(_) => {} // single-page PDF: open like an image
+                                Err(err) => {
+                                    eprintln!("vv: {err:#}");
+                                    grid.as_mut().unwrap().remove_entry(i);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     if debug {
                         eprintln!("vv: enter pressed -> open idx {i}");
                     }
@@ -489,7 +523,7 @@ fn main() -> Result<()> {
                     // decode, no black gap. If a decode is already in flight,
                     // just wait for it (no duplicate work). Otherwise fall
                     // back to the streaming loader (JXL: blurry preview fast).
-                    let (id, tex, w, h, path, queued) = {
+                    let (id, tex, w, h, source, queued) = {
                         let g = grid.as_mut().unwrap();
                         let e = &mut g.entries[i];
                         (
@@ -497,11 +531,14 @@ fn main() -> Result<()> {
                             e.texture.take(),
                             e.width,
                             e.height,
-                            e.path.clone(),
+                            e.source.clone(),
                             e.queued,
                         )
                     };
                     open_id = Some(id);
+                    view_doc = view_doc_of(&source);
+                    view_render_scale = 1.0;
+                    refine = None;
                     mode = Mode::Image;
                     reset_view(&mut zoom, &mut pan, &mut target_pan, &mut view_scale);
                     if let Some(tex) = tex {
@@ -526,12 +563,31 @@ fn main() -> Result<()> {
                         img_h = 0.0;
                     } else {
                         view_from_grid = None;
-                        loader = Some(Loader::start(path));
+                        match start_entry_loader(&source, win_w, win_h) {
+                            Ok((l, vd, rs)) => {
+                                loader = Some(l);
+                                view_doc = vd;
+                                view_render_scale = rs;
+                            }
+                            Err(err) => {
+                                eprintln!("vv: {err:#}");
+                                grid.as_mut().unwrap().remove_entry_by_id(id);
+                                open_id = None;
+                                mode = Mode::Grid;
+                            }
+                        }
                         view_tex = None;
-                        view_loading = true;
+                        view_loading = loader.is_some();
                         view_loading_since = rl.get_time();
                         img_w = 0.0; // dimensions arrive with the header message
                         img_h = 0.0;
+                    }
+                }
+                GridAction::Back => {
+                    // ESC on a page-overview grid: pop it (its textures drop
+                    // with it) and restore the directory grid.
+                    if let Some(home) = home_grid.take() {
+                        grid = Some(home);
                     }
                 }
                 GridAction::Quit => quit = true,
@@ -653,6 +709,9 @@ fn main() -> Result<()> {
                 loader = None; // cancels a still-running stream
                 view_loading = false;
                 view_loading_since = 0.0;
+                view_doc = None;
+                refine = None;
+                view_render_scale = 1.0;
             }
 
             // Prev/next while viewing (only with a grid to navigate). A
@@ -662,15 +721,46 @@ fn main() -> Result<()> {
             // via the priority list at the top of the loop.
             if !return_to_grid {
                 if let Some(delta) = nav {
-                    let cur = open_id.and_then(|id| grid.as_ref().and_then(|g| g.index_of(id)));
-                    if let Some(cur) = cur {
+                    if let Some((doc, page)) = view_doc.clone() {
+                        // Multi-page document: n/p (and g/G) move between
+                        // pages. The shown texture goes back to its entry,
+                        // the target page streams in via the loader.
+                        let n = doc.page_count();
+                        let mut t = page as i64 + delta;
+                        if jump_first {
+                            t = 0;
+                        }
+                        if jump_last {
+                            t = n as i64 - 1;
+                        }
+                        if t >= 0 && t < n as i64 {
+                            let t = t as usize;
+                            put_back_view(&mut grid, &mut view_from_grid, &mut view_tex);
+                            refine = None;
+                            loader = None;
+                            let fit = doc
+                                .page_info(t)
+                                .map(|i| fit_scale(i, win_w, win_h))
+                                .unwrap_or(1.0);
+                            view_doc = Some((doc.clone(), t));
+                            view_render_scale = fit;
+                            view_loading = true;
+                            view_loading_since = rl.get_time();
+                            img_w = 0.0;
+                            img_h = 0.0;
+                            loader = Some(Loader::start_doc(doc, t, fit));
+                        }
+                    } else if let Some(cur) =
+                        open_id.and_then(|id| grid.as_ref().and_then(|g| g.index_of(id)))
+                    {
+                        let cur = cur;
                         let n = grid.as_ref().unwrap().entries.len();
                         let t = cur as i64 + delta;
                         if t >= 0 && (t as usize) < n {
                             let j = t as usize;
                             put_back_view(&mut grid, &mut view_from_grid, &mut view_tex);
                             loader = None;
-                            let (id, tex, w, h, path, queued) = {
+                            let (id, tex, w, h, source, queued) = {
                                 let g = grid.as_mut().unwrap();
                                 let e = &mut g.entries[j];
                                 (
@@ -678,11 +768,14 @@ fn main() -> Result<()> {
                                     e.texture.take(),
                                     e.width,
                                     e.height,
-                                    e.path.clone(),
+                                    e.source.clone(),
                                     e.queued,
                                 )
                             };
                             open_id = Some(id);
+                            view_doc = view_doc_of(&source);
+                            view_render_scale = 1.0;
+                            refine = None;
                             reset_view(&mut zoom, &mut pan, &mut target_pan, &mut view_scale);
                             if let Some(tex) = tex {
                                 grid.as_mut().unwrap().entries[j].viewing = true;
@@ -705,9 +798,21 @@ fn main() -> Result<()> {
                                 img_h = 0.0;
                             } else {
                                 view_from_grid = None;
-                                loader = Some(Loader::start(path));
+                                match start_entry_loader(&source, win_w, win_h) {
+                                    Ok((l, vd, rs)) => {
+                                        loader = Some(l);
+                                        view_doc = vd;
+                                        view_render_scale = rs;
+                                    }
+                                    Err(err) => {
+                                        eprintln!("vv: {err:#}");
+                                        grid.as_mut().unwrap().remove_entry_by_id(id);
+                                        open_id = None;
+                                        mode = Mode::Grid;
+                                    }
+                                }
                                 view_tex = None;
-                                view_loading = true;
+                                view_loading = loader.is_some();
                                 view_loading_since = rl.get_time();
                                 img_w = 0.0;
                                 img_h = 0.0;
@@ -853,6 +958,58 @@ fn main() -> Result<()> {
                 if (target_pan.y - pan.y).abs() < 0.25 {
                     pan.y = target_pan.y;
                 }
+                // Document pages (PDF): once the zoom animation settles and
+                // the settled scale differs enough from the scale the current
+                // texture was rendered at, re-render the page at that scale.
+                // Text stays sharp at every resting zoom level (fresh
+                // rasterization at screen resolution — same trick zathura/
+                // mupdf use). While the render runs, the old texture keeps
+                // showing (slightly soft, never blank).
+                if let Some((doc, page)) = view_doc.as_ref() {
+                    let settled = view_scale
+                        .map(|s| (s - target_scale).abs() <= target_scale * 0.001)
+                        .unwrap_or(false);
+                    let scale = view_scale.unwrap_or(1.0);
+                    let rel_diff = (scale - view_render_scale).abs() / view_render_scale.max(1e-3);
+                    if settled && refine.is_none() && rel_diff > 0.15 {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        let doc = doc.clone();
+                        let page = *page;
+                        let id = open_id.unwrap_or(u64::MAX);
+                        let rs = scale.clamp(0.05, 8.0);
+                        rayon::spawn(move || {
+                            let res = doc.render(page, rs).map_err(|e| format!("{e:#}"));
+                            // Receiver gone (view left): result discarded.
+                            let _ = tx.send((id, page, rs, res));
+                        });
+                        refine = Some(rx);
+                    }
+                }
+                // Poll a finished refine render; accept it only if it still
+                // matches what is on screen (same entry, page and zoom).
+                if let Some(rx) = &refine {
+                    if let Ok((id, page, rs, res)) = rx.try_recv() {
+                        refine = None;
+                        if open_id == Some(id)
+                            && view_doc.as_ref().is_some_and(|(_, p)| *p == page)
+                            && view_scale
+                                .map(|s| (s - rs).abs() <= rs * 0.2)
+                                .unwrap_or(false)
+                        {
+                            if let Ok(d) = res {
+                                show_frame(
+                                    &mut rl,
+                                    &thread,
+                                    &mut view_tex,
+                                    &d.rgba,
+                                    d.width,
+                                    d.height,
+                                )?;
+                                view_render_scale = rs;
+                            }
+                        }
+                    }
+                }
             } // img_w > 0.0: fit/pan math needs known dimensions
         }
 
@@ -872,11 +1029,20 @@ fn main() -> Result<()> {
                 let dw = img_w * view_scale.unwrap();
                 let dh = img_h * view_scale.unwrap();
 
+                // Source rect in TEXTURE pixels, not natural units: PDF
+                // pages re-render at the settled zoom scale, so the texture
+                // holds points * scale pixels while img_w/img_h stay in
+                // points (the fit math works in natural units). Sampling
+                // img_w here would crop the top-left fraction of a refined
+                // texture and stretch it over the full dest — the page
+                // would look zoomed-in after every refine. For plain images
+                // texture pixels equal natural pixels, so this is a no-op
+                // there.
                 let src = Rectangle {
                     x: 0.0,
                     y: 0.0,
-                    width: img_w,
-                    height: img_h,
+                    width: texture.width() as f32,
+                    height: texture.height() as f32,
                 };
                 let dest = Rectangle {
                     x: (win_w - dw) / 2.0 + pan.x,
@@ -906,76 +1072,5 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn to_u8_clamps_and_rounds() {
-        assert_eq!(to_u8(0.0), 0);
-        assert_eq!(to_u8(1.0), 255);
-        assert_eq!(to_u8(-5.0), 0);
-        assert_eq!(to_u8(42.0), 255);
-        assert_eq!(to_u8(0.5), 128); // 0.5 * 255 + 0.5 = 128
-        assert_eq!(to_u8(1.0 / 255.0), 1);
-    }
-
-    #[test]
-    fn is_jxl_detects_codestream_magic() {
-        let dir = std::env::temp_dir();
-        let bare = dir.join(format!("vv-test-jxl-{}", std::process::id()));
-        // Raw codestream starts with 0xFF 0x0A — JXL even without extension.
-        std::fs::write(&bare, [0xffu8, 0x0a, 0x01, 0x02]).unwrap();
-        assert!(is_jxl(&bare));
-        // Not a codestream.
-        std::fs::write(&bare, b"PNG").unwrap();
-        assert!(!is_jxl(&bare));
-        std::fs::remove_file(&bare).ok();
-    }
-
-    #[test]
-    fn jxl_extension_is_honored_even_for_bad_content() {
-        // Extension decides first; sniffing only runs without a .jxl suffix.
-        let path = std::env::temp_dir().join(format!("vv-test-ext-{}.jxl", std::process::id()));
-        std::fs::write(&path, b"not really jxl").unwrap();
-        assert!(is_jxl(&path));
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
-    fn decode_common_reads_png() {
-        let dir = std::env::temp_dir().join(format!("vv-test-decode-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("img.png");
-        image::DynamicImage::new_rgb8(3, 2).save(&path).unwrap();
-        let decoded = decode_image(&path).unwrap();
-        assert_eq!(decoded.width, 3);
-        assert_eq!(decoded.height, 2);
-        assert_eq!(decoded.rgba.len(), 3 * 2 * 4);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn decode_image_reads_webp() {
-        // Lossless encode via image-webp, then decode back through
-        // decode_image (format sniffed from bytes, not extension).
-        let dir = std::env::temp_dir().join(format!("vv-test-webp-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("img.webp");
-        image::DynamicImage::new_rgb8(5, 4)
-            .save_with_format(&path, image::ImageFormat::WebP)
-            .unwrap();
-        let decoded = decode_image(&path).unwrap();
-        assert_eq!(decoded.width, 5);
-        assert_eq!(decoded.height, 4);
-        assert_eq!(decoded.rgba.len(), 5 * 4 * 4);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn decode_image_fails_cleanly_on_garbage() {
-        let dir = std::env::temp_dir().join(format!("vv-test-bad-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("x.png");
-        std::fs::write(&path, b"garbage").unwrap();
-        assert!(decode_image(&path).is_err());
-        std::fs::remove_dir_all(&dir).ok();
-    }
+    use crate::document::{fb_to_rgba, to_u8};
 }

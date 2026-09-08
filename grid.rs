@@ -19,11 +19,26 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::mpsc::{Receiver, Sender, channel},
+    sync::{
+        Arc,
+        mpsc::{Receiver, Sender, channel},
+    },
 };
 
 use anyhow::{Context, Result};
 use raylib::{color::Color, prelude::*};
+
+use crate::document::{Document, open_document};
+
+/// What a grid cell shows: an image/PDF file (directory grid) or one page of
+/// an open document (page grid).
+#[derive(Clone)]
+pub enum EntrySource {
+    /// A file on disk. Decoded lazily: `open_document` at decode time.
+    File(PathBuf),
+    /// Page `page` of an already-open document (page grid).
+    DocPage { doc: Arc<dyn Document>, page: usize },
+}
 
 const MARGIN: f32 = 8.0;
 const GAP: f32 = 8.0;
@@ -42,11 +57,13 @@ struct DecodeResult {
     res: Result<(Vec<u8>, u32, u32), String>,
 }
 
-/// One grid cell: the image file plus its uploaded full-resolution texture
-/// (thumbs are drawn by cropping a center square, so a resize never needs a
-/// re-decode; the GPU scales it down every frame).
+/// One grid cell: a source (file or document page) plus its uploaded
+/// full-resolution texture (thumbs are drawn by cropping a center square, or
+/// for document pages by aspect-fitting the whole page, so a resize never
+/// needs a re-decode; the GPU scales it down every frame).
 pub struct GridEntry {
-    pub path: PathBuf,
+    pub source: EntrySource,
+    /// Natural dimensions (pixels, or PDF points for document pages).
     pub width: u32,
     pub height: u32,
     pub texture: Option<Texture2D>,
@@ -65,12 +82,17 @@ pub enum GridAction {
     None,
     /// Open the grid entry at this index in image mode.
     Open(usize),
+    /// Leave this grid (ESC on a page grid; back to the previous grid).
+    Back,
     Quit,
 }
 
 pub struct Grid {
     pub entries: Vec<GridEntry>,
     pub selected: usize,
+    /// True for the directory grid (the home view; ESC does nothing there),
+    /// false for page grids pushed on top of it (ESC goes back).
+    pub root: bool,
     result_tx: Sender<DecodeResult>,
     result_rx: Receiver<DecodeResult>,
     inflight: usize,
@@ -84,8 +106,8 @@ pub struct Grid {
 }
 
 impl Grid {
-    /// List the images in a directory (sorted by file name) and spawn the
-    /// background decode worker.
+    /// List the images (and PDFs) in a directory (sorted by file name) and
+    /// spawn the background decode worker.
     pub fn from_dir(dir: &Path) -> Result<Grid> {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
             .with_context(|| format!("failed to read directory {dir:?}"))?
@@ -101,7 +123,7 @@ impl Grid {
                 .into_iter()
                 .enumerate()
                 .map(|(i, path)| GridEntry {
-                    path,
+                    source: EntrySource::File(path),
                     width: 0,
                     height: 0,
                     texture: None,
@@ -111,6 +133,7 @@ impl Grid {
                 })
                 .collect(),
             selected: 0,
+            root: true,
             result_tx: res_tx,
             result_rx: res_rx,
             inflight: 0,
@@ -118,6 +141,56 @@ impl Grid {
             zoom: 1.0,
             scroll: 0.0,
         })
+    }
+
+    /// Build a page-overview grid for an open document: one entry per page.
+    /// Entries start texture-less; decoding dispatches like any other grid
+    /// (rayon pool, priority = selection neighbors). ESC pops back out.
+    pub fn from_document(doc: Arc<dyn Document>) -> Grid {
+        let entries = (0..doc.page_count())
+            .map(|page| {
+                // Natural size known up front (PDF points); failures fall
+                // back to 0x0 and the decode job reports the real error.
+                let (width, height) = doc
+                    .page_info(page)
+                    .map(|i| (i.width, i.height))
+                    .unwrap_or((0, 0));
+                GridEntry {
+                    source: EntrySource::DocPage {
+                        doc: doc.clone(),
+                        page,
+                    },
+                    width,
+                    height,
+                    texture: None,
+                    id: page as u64,
+                    queued: false,
+                    viewing: false,
+                }
+            })
+            .collect();
+        let (res_tx, res_rx) = channel::<DecodeResult>();
+        Grid {
+            entries,
+            selected: 0,
+            root: false,
+            result_tx: res_tx,
+            result_rx: res_rx,
+            inflight: 0,
+            rep_dir: Default::default(),
+            zoom: 1.0,
+            scroll: 0.0,
+        }
+    }
+
+    /// Human-readable label for log lines: file path or "page N of M".
+    fn label(&self, i: usize) -> String {
+        match &self.entries[i].source {
+            EntrySource::File(p) => p.display().to_string(),
+            EntrySource::DocPage { page, .. } => {
+                format!("page {} of {}", page + 1, self.entries.len())
+            }
+        }
     }
 
     /// Drain finished background decodes (uploading textures, which needs
@@ -150,17 +223,14 @@ impl Grid {
                             e.texture = Some(t);
                         }
                         Err(err) => {
-                            eprintln!("vv: {}: {err:#}", self.entries[i].path.display());
+                            eprintln!("vv: {}: {err:#}", self.label(i));
                             to_remove.push(i);
                         }
                     }
                 }
                 Ok(_) => {} // texture already loaded (opened synchronously)
                 Err(err) => {
-                    eprintln!(
-                        "vv: {}: decode failed: {err}",
-                        self.entries[i].path.display()
-                    );
+                    eprintln!("vv: {}: decode failed: {err}", self.label(i));
                     to_remove.push(i);
                 }
             }
@@ -203,12 +273,18 @@ impl Grid {
             e.queued = true;
             self.inflight += 1;
             let id = e.id;
-            let path = e.path.clone();
+            let source = e.source.clone();
             let tx = self.result_tx.clone();
             rayon::spawn(move || {
-                let res = crate::decode_image(&path)
-                    .map(|d| (d.rgba, d.width, d.height))
-                    .map_err(|e| format!("{e:#}"));
+                // Image files: open (sniff) + render page 0 at native size.
+                // Document pages: render at 1.0 = natural size (PDF points,
+                // plenty for thumbnails; the GPU downscales per frame).
+                let res = match &source {
+                    EntrySource::File(path) => open_document(path).and_then(|d| d.render(0, 1.0)),
+                    EntrySource::DocPage { doc, page } => doc.render(*page, 1.0),
+                }
+                .map(|d| (d.rgba, d.width, d.height))
+                .map_err(|e| format!("{e:#}"));
                 // Receiver gone (grid dropped): result is discarded and the
                 // job simply ends.
                 let _ = tx.send(DecodeResult { id, res });
@@ -302,6 +378,7 @@ impl Grid {
         // queue every press event during the poll, so nothing is lost.
         let mut enter = false;
         let mut quit = false;
+        let mut back = false;
         let mut left = false;
         let mut right = false;
         let mut up = false;
@@ -314,6 +391,9 @@ impl Grid {
             match k {
                 KeyboardKey::KEY_ENTER | KeyboardKey::KEY_KP_ENTER => enter = true,
                 KeyboardKey::KEY_Q => quit = true,
+                // ESC: on a page grid, leave it (back to the directory grid).
+                // On the root grid ESC is inert — it never quits the program.
+                KeyboardKey::KEY_ESCAPE => back = true,
                 KeyboardKey::KEY_H | KeyboardKey::KEY_LEFT => left = true,
                 KeyboardKey::KEY_L | KeyboardKey::KEY_RIGHT => right = true,
                 KeyboardKey::KEY_K | KeyboardKey::KEY_UP => up = true,
@@ -417,6 +497,9 @@ impl Grid {
         if self.selected != old_sel || follow {
             self.ensure_visible(win_w, win_h);
         }
+        if back && !self.root {
+            return GridAction::Back;
+        }
         if enter {
             return GridAction::Open(self.selected);
         }
@@ -449,16 +532,36 @@ impl Grid {
             if cy + ch < 0.0 || cy > win_h {
                 continue;
             }
-            let thumb = Rectangle {
-                x: cx + (cw - side) / 2.0,
-                y: cy + (ch - side) / 2.0,
-                width: side,
-                height: side,
-            };
-            if let Some(tex) = &e.texture {
-                // Square thumbnail: crop the center square out of the full
-                // texture and scale it into the cell (GPU does the downscale,
-                // so resizing never re-decodes).
+            // Thumbnails: image files crop a center square out of the full
+            // texture (GPU scales it down); document pages aspect-fit the
+            // whole page into the cell — cropping a text page would cut
+            // content away, and the point-dimensions give the right shape.
+            let (thumb, src) = if let EntrySource::DocPage { .. } = &e.source {
+                let (ew, eh) = (e.width.max(1) as f32, e.height.max(1) as f32);
+                let s = (side / ew).min(side / eh);
+                let fw = ew * s;
+                let fh = eh * s;
+                (
+                    Rectangle {
+                        x: cx + (cw - fw) / 2.0,
+                        y: cy + (ch - fh) / 2.0,
+                        width: fw,
+                        height: fh,
+                    },
+                    Rectangle {
+                        x: 0.0,
+                        y: 0.0,
+                        width: e.width as f32,
+                        height: e.height as f32,
+                    },
+                )
+            } else {
+                let thumb = Rectangle {
+                    x: cx + (cw - side) / 2.0,
+                    y: cy + (ch - side) / 2.0,
+                    width: side,
+                    height: side,
+                };
                 let s = e.width.min(e.height) as f32;
                 let src = Rectangle {
                     x: (e.width as f32 - s) / 2.0,
@@ -466,9 +569,12 @@ impl Grid {
                     width: s,
                     height: s,
                 };
+                (thumb, src)
+            };
+            if let Some(tex) = &e.texture {
                 d.draw_texture_pro(tex, src, thumb, Vector2::ZERO, 0.0, Color::WHITE);
             } else {
-                // Still decoding: placeholder square.
+                // Still decoding: placeholder.
                 d.draw_rectangle_rec(thumb, Color::new(28, 28, 28, 255));
             }
             if i == self.selected {
@@ -478,12 +584,23 @@ impl Grid {
     }
 }
 
-/// Is this path likely an image we can decode? (Grid directory filter.)
+/// Is this path likely something we can decode? (Grid directory filter.)
+/// PDFs included: they open a page-overview grid instead of an image view.
 fn is_image_path(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
         matches!(
             e.to_ascii_lowercase().as_str(),
-            "jpg" | "jpeg" | "png" | "jxl" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "tga"
+            "jpg"
+                | "jpeg"
+                | "png"
+                | "jxl"
+                | "gif"
+                | "webp"
+                | "bmp"
+                | "tif"
+                | "tiff"
+                | "tga"
+                | "pdf"
         )
     })
 }
@@ -686,10 +803,30 @@ mod tests {
         let names: Vec<String> = grid
             .entries
             .iter()
-            .map(|e| e.path.file_name().unwrap().to_string_lossy().to_string())
+            .map(|e| match &e.source {
+                EntrySource::File(p) => p.file_name().unwrap().to_string_lossy().to_string(),
+                EntrySource::DocPage { .. } => unreachable!("dir grid only lists files"),
+            })
             .collect();
         assert_eq!(names, vec!["b.png", "c.png"]);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn from_document_builds_one_entry_per_page() {
+        // Multi-page document: one entry per page with point dimensions,
+        // non-root (ESC pops), textures decoded lazily like any other grid.
+        let doc =
+            crate::pdf::PdfDocument::from_data(crate::pdf::tests::MINIMAL_PDF.to_vec()).unwrap();
+        let grid = Grid::from_document(Arc::new(doc) as Arc<dyn Document>);
+        assert_eq!(grid.entries.len(), 1);
+        assert!(!grid.root);
+        assert_eq!(grid.entries[0].width, 612);
+        assert_eq!(grid.entries[0].height, 792);
+        assert!(matches!(
+            &grid.entries[0].source,
+            EntrySource::DocPage { page: 0, .. }
+        ));
     }
 }

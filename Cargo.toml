@@ -20,6 +20,7 @@ raylib = "6"
 # Work pool for parallel background decodes (grid prefetch); jxl-oxide also
 # uses rayon internally for single-image decode (its default feature).
 rayon = "1"
+hayro = "0.7.1"
 
 [[bin]]
 name = "vv"

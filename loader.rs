@@ -1,16 +1,19 @@
-//! Background streaming loader for the image view.
+//! Background loader for the image view: renders one document page off the
+//! main thread and streams results back over a channel.
 //!
-//! Opens an image off the main thread and streams results back over a
-//! channel. JPEG XL is decoded progressively: the file is read in chunks and
-//! fed into jxl-oxide, which renders a blurry full-size preview long before
-//! all bytes arrive; the final full-quality render is sent when decoding
-//! completes. Every other format decodes in one go.
+//! Two quality paths, per [`Document`]:
+//! - JPEG XL (`stream_path`): the file is read in chunks and fed into
+//!   jxl-oxide, which renders a blurry full-size preview long before all
+//!   bytes arrive; the final full-quality render is sent when decoding
+//!   completes.
+//! - Everything else: optionally a fast low-resolution preview render first
+//!   (PDFs), then the full-quality render at the requested scale.
 //!
 //! Cancellation: dropping the `Loader` sets a flag the worker checks between
 //! chunks and closes the channel, so pending sends fail and the worker exits.
 
 use std::{
-    path::{Path, PathBuf},
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -20,20 +23,16 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use jxl_oxide::{InitializeResult, JxlImage};
 
-use crate::{decode_common, fb_to_rgba, is_jxl};
-
-/// Wrap a jxl-oxide error (a bare boxed trait object) into anyhow.
-fn jxl_err(e: Box<dyn std::error::Error + Send + Sync + 'static>) -> anyhow::Error {
-    anyhow::anyhow!("jxl-oxide: {e}")
-}
+use crate::document::{Document, fb_to_rgba};
 
 /// Normal read chunk size: big enough that file IO never bottlenecks.
 const CHUNK: usize = 256 * 1024;
 /// Minimum time between progressive preview uploads, so the main thread is
 /// not flooded with full-size RGBA buffers.
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(100);
+/// Target for the cheap preview render's longest side, in pixels.
+const PREVIEW_TARGET: f32 = 600.0;
 /// VV_SLOW_STREAM=1: dribble chunks of this size with a pause between them
 /// until the first preview renders (or `SLOW_DRIBBLE_MAX` bytes have been
 /// dribbled), then continue normally — makes progressive decoding visible
@@ -44,17 +43,17 @@ const SLOW_DRIBBLE_MAX: usize = 256 * 1024;
 
 /// Messages from the loader worker to the main thread.
 pub enum LoaderMsg {
-    /// JXL header parsed: final (orientation-applied) dimensions are known,
+    /// Page dimensions are known (in natural units: pixels or PDF points),
     /// before any pixel data arrives.
     Header { width: u32, height: u32 },
-    /// Progressive preview of the still-loading frame (full-size RGBA8,
-    /// blurry until done). Sent at most every `PREVIEW_INTERVAL`.
+    /// Fast low-quality preview of the still-loading page (full-size RGBA8
+    /// for its scale). Sent at most every `PREVIEW_INTERVAL`.
     Preview {
         rgba: Vec<u8>,
         width: u32,
         height: u32,
     },
-    /// Final full-quality image.
+    /// Final full-quality render at the requested scale.
     Done {
         rgba: Vec<u8>,
         width: u32,
@@ -64,22 +63,23 @@ pub enum LoaderMsg {
     Failed(String),
 }
 
-/// Handle for one in-flight image load. Drop to cancel.
+/// Handle for one in-flight page load. Drop to cancel.
 pub struct Loader {
     cancel: Arc<AtomicBool>,
     rx: Receiver<LoaderMsg>,
 }
 
 impl Loader {
-    /// Spawn the worker for `path`.
-    pub fn start(path: PathBuf) -> Loader {
+    /// Start rendering `page` of `doc` at `scale` (1.0 = natural size) on a
+    /// worker thread.
+    pub fn start_doc(doc: Arc<dyn Document>, page: usize, scale: f32) -> Loader {
         let (tx, rx) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
         // Detached on purpose: the main thread never joins; the worker ends
         // on cancellation or when sends start failing (receiver dropped).
         std::thread::spawn(move || {
-            if let Err(err) = stream(&path, &worker_cancel, &tx) {
+            if let Err(err) = stream_doc(&doc, page, scale, &worker_cancel, &tx) {
                 let _ = tx.send(LoaderMsg::Failed(format!("{err:#}")));
             }
         });
@@ -102,17 +102,52 @@ impl Drop for Loader {
 }
 
 /// Worker body. The caller turns errors into `Failed` messages.
-fn stream(path: &Path, cancel: &AtomicBool, tx: &Sender<LoaderMsg>) -> Result<()> {
-    if !is_jxl(path) {
-        // No progressive data for common formats: one full decode.
-        let decoded = decode_common(path)?;
-        let _ = tx.send(LoaderMsg::Done {
-            rgba: decoded.rgba,
-            width: decoded.width,
-            height: decoded.height,
-        });
-        return Ok(());
+fn stream_doc(
+    doc: &Arc<dyn Document>,
+    page: usize,
+    scale: f32,
+    cancel: &AtomicBool,
+    tx: &Sender<LoaderMsg>,
+) -> Result<()> {
+    // Dimensions first, so the view can fit and lay out before pixels land.
+    let info = doc.page_info(page)?;
+    let _ = tx.send(LoaderMsg::Header {
+        width: info.width,
+        height: info.height,
+    });
+
+    if page == 0
+        && let Some(path) = doc.stream_path()
+    {
+        // JPEG XL: progressive byte-stream decode with blurry previews.
+        return stream_jxl(path, cancel, tx);
     }
+
+    // Cheap low-res render first, so something shows up fast (PDFs).
+    if doc.previews() && (info.width.max(info.height) as f32) > PREVIEW_TARGET {
+        let ps = (PREVIEW_TARGET / info.width.max(info.height) as f32).min(scale);
+        if let Ok(preview) = doc.render(page, ps) {
+            let _ = tx.send(LoaderMsg::Preview {
+                rgba: preview.rgba,
+                width: preview.width,
+                height: preview.height,
+            });
+        }
+    }
+
+    let decoded = doc.render(page, scale)?;
+    let _ = tx.send(LoaderMsg::Done {
+        rgba: decoded.rgba,
+        width: decoded.width,
+        height: decoded.height,
+    });
+    Ok(())
+}
+
+/// JPEG XL progressive decode: feed bytes in chunks, render previews while
+/// the first frame is still loading, send the full render at the end.
+fn stream_jxl(path: &Path, cancel: &AtomicBool, tx: &Sender<LoaderMsg>) -> Result<()> {
+    use jxl_oxide::{InitializeResult, JxlImage};
 
     let mut file = std::fs::File::open(path).with_context(|| format!("failed to open {path:?}"))?;
     let slow = std::env::var_os("VV_SLOW_STREAM").is_some();
@@ -140,21 +175,21 @@ fn stream(path: &Path, cancel: &AtomicBool, tx: &Sender<LoaderMsg>) -> Result<()
         match &mut image {
             None => {
                 let mut u = uninit.take().expect("header state");
-                u.feed_bytes(&buf[..n]).map_err(jxl_err)?;
-                match u.try_init().map_err(jxl_err)? {
+                u.feed_bytes(&buf[..n])
+                    .map_err(|e| anyhow::anyhow!("jxl-oxide: {e}"))?;
+                match u
+                    .try_init()
+                    .map_err(|e| anyhow::anyhow!("jxl-oxide: {e}"))?
+                {
                     InitializeResult::NeedMoreData(u) => uninit = Some(u),
                     InitializeResult::Initialized(img) => {
-                        let msg = LoaderMsg::Header {
-                            width: img.width(),
-                            height: img.height(),
-                        };
-                        let _ = tx.send(msg);
                         image = Some(img);
                     }
                 }
             }
             Some(img) => {
-                img.feed_bytes(&buf[..n]).map_err(jxl_err)?;
+                img.feed_bytes(&buf[..n])
+                    .map_err(|e| anyhow::anyhow!("jxl-oxide: {e}"))?;
             }
         }
 
@@ -194,10 +229,11 @@ fn stream(path: &Path, cancel: &AtomicBool, tx: &Sender<LoaderMsg>) -> Result<()
     }
 
     let mut img = image.context("file ended before the image header was complete")?;
-    img.finalize().map_err(jxl_err)?;
+    img.finalize()
+        .map_err(|e| anyhow::anyhow!("jxl-oxide: {e}"))?;
     let render = img
         .render_frame(0)
-        .map_err(jxl_err)
+        .map_err(|e| anyhow::anyhow!("jxl-oxide: {e}"))
         .with_context(|| format!("failed to render {path:?}"))?;
     let (rgba, width, height) = fb_to_rgba(&render.image_all_channels())?;
     let _ = tx.send(LoaderMsg::Done {
@@ -221,8 +257,9 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+    use crate::document::open_document;
 
-    fn temp_dir(name: &str) -> PathBuf {
+    fn temp_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("vv-loader-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -235,21 +272,22 @@ mod tests {
             if let Some(msg) = loader.try_recv() {
                 return Some(msg);
             }
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
         None
     }
 
     #[test]
-    fn png_loads_as_single_done_message() {
-        // Non-JXL formats have no progressive data: exactly one Done, no
-        // Header/Preview, correct dimensions.
+    fn png_loads_as_header_then_done() {
+        // Non-JXL formats have no progressive data: Header, then exactly one
+        // Done, correct dimensions.
         let dir = temp_dir("png");
         let path = dir.join("img.png");
         image::DynamicImage::new_rgb8(4, 3).save(&path).unwrap();
 
-        let loader = Loader::start(path);
-        let mut saw_header_or_preview = false;
+        let doc = open_document(&path).unwrap();
+        let loader = Loader::start_doc(doc, 0, 1.0);
+        let mut saw_header = false;
         let done;
         loop {
             match wait(&loader, Duration::from_secs(10)).expect("loader timed out") {
@@ -261,13 +299,15 @@ mod tests {
                     done = (rgba, width, height);
                     break;
                 }
-                LoaderMsg::Header { .. } | LoaderMsg::Preview { .. } => {
-                    saw_header_or_preview = true
+                LoaderMsg::Header { width, height } => {
+                    saw_header = true;
+                    assert_eq!((width, height), (4, 3));
                 }
+                LoaderMsg::Preview { .. } => panic!("png must not preview"),
                 LoaderMsg::Failed(err) => panic!("unexpected failure: {err}"),
             }
         }
-        assert!(!saw_header_or_preview);
+        assert!(saw_header);
         let (rgba, width, height) = done;
         assert_eq!((width, height), (4, 3));
         assert_eq!(rgba.len(), 4 * 3 * 4);
@@ -281,7 +321,8 @@ mod tests {
         let path = dir.join("x.jxl");
         std::fs::write(&path, b"not really jxl").unwrap();
 
-        let loader = Loader::start(path);
+        let doc = open_document(&path).unwrap();
+        let loader = Loader::start_doc(doc, 0, 1.0);
         loop {
             match wait(&loader, Duration::from_secs(10)).expect("loader timed out") {
                 LoaderMsg::Failed(_) => break,
@@ -299,7 +340,8 @@ mod tests {
         let path = dir.join("truncated.jxl");
         std::fs::write(&path, [0xffu8, 0x0a, 0x01, 0x02]).unwrap();
 
-        let loader = Loader::start(path);
+        let doc = open_document(&path).unwrap();
+        let loader = Loader::start_doc(doc, 0, 1.0);
         loop {
             match wait(&loader, Duration::from_secs(10)).expect("loader timed out") {
                 LoaderMsg::Failed(_) => break,
@@ -313,19 +355,54 @@ mod tests {
     #[test]
     fn cancel_stops_the_worker() {
         // Dropping the loader must terminate the worker without hanging:
-        // join the thread via a fresh handle is not possible, so instead
         // start a loader on a big-ish file, drop it immediately, and assert
-        // no further messages arrive afterwards (channel is closed).
+        // the test process survives (the worker exits on the cancel flag or
+        // on closed-channel send failures).
         let dir = temp_dir("cancel");
         let path = dir.join("img.png");
         image::DynamicImage::new_rgb8(16, 16).save(&path).unwrap();
 
-        let loader = Loader::start(path);
+        let doc = open_document(&path).unwrap();
+        let loader = Loader::start_doc(doc, 0, 1.0);
         drop(loader);
         std::thread::sleep(Duration::from_millis(50));
-        // Nothing to assert beyond "no panic, no hang"; try_recv on the
-        // dropped receiver was never observable. The real check is that this
-        // test finishes.
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pdf_loads_preview_then_done() {
+        // Multi-page documents (PDF) preview before the full render.
+        let dir = temp_dir("pdf");
+        let path = dir.join("doc.pdf");
+        std::fs::write(&path, crate::pdf::tests::MINIMAL_PDF).unwrap();
+        let doc = open_document(&path).unwrap();
+        let loader = Loader::start_doc(doc, 0, 2.0);
+        let mut saw_preview = false;
+        let done;
+        loop {
+            match wait(&loader, Duration::from_secs(20)).expect("loader timed out") {
+                LoaderMsg::Done {
+                    rgba,
+                    width,
+                    height,
+                } => {
+                    done = (rgba, width, height);
+                    break;
+                }
+                LoaderMsg::Header { width, height } => {
+                    assert_eq!((width, height), (612, 792)); // letter, in points
+                }
+                LoaderMsg::Preview { width, height, .. } => {
+                    saw_preview = true;
+                    // Preview longest side capped near PREVIEW_TARGET.
+                    assert!(width.max(height) <= 612); // 600 * 792/612 rounds up
+                }
+                LoaderMsg::Failed(err) => panic!("unexpected failure: {err}"),
+            }
+        }
+        assert!(saw_preview);
+        let (_, width, height) = done;
+        assert_eq!((width, height), (1224, 1584)); // scale 2.0
         std::fs::remove_dir_all(&dir).ok();
     }
 }
