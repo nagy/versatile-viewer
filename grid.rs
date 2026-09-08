@@ -18,6 +18,7 @@
 //! makes the neighbors ready to open instantly.
 
 use std::{
+    cell::RefCell,
     path::{Path, PathBuf},
     sync::mpsc::{Receiver, Sender, channel},
 };
@@ -46,6 +47,11 @@ struct DecodeResult {
     id: u64,
     res: Result<(Vec<u8>, u32, u32, Option<BlurData>), String>,
 }
+
+/// Grid layout: (cols, cell_w, cell_h, side, content_h).
+type Layout = (usize, f32, f32, f32, f32);
+/// Cache key: entry count + bit patterns of window size and zoom.
+type LayoutKey = (usize, u32, u32, u32);
 
 /// One grid cell: the image file plus its uploaded full-resolution texture
 /// (thumbs are drawn by cropping a center square, so a resize never needs a
@@ -89,6 +95,10 @@ pub struct Grid {
     zoom: f32,
     /// Vertical scroll offset (only used when zoomed in past the exact fill).
     scroll: f32,
+    /// Cached layout, keyed by (entry count, window size, zoom) — recomputed
+    /// only when any of those change, since the layout math is O(n). Borrowed
+    /// interiorly because `draw` takes &self.
+    layout_cache: RefCell<Option<(LayoutKey, Layout)>>,
     /// VV_BLUR_BG gimmick on? Read once; decode workers compute the tiny
     /// VV_BLUR_BG gimmick settings, read once: decode workers compute the
     /// tiny blurred copy only when enabled, at this texture long side.
@@ -133,6 +143,7 @@ impl Grid {
             result_tx: res_tx,
             result_rx: res_rx,
             inflight: 0,
+            layout_cache: RefCell::new(None),
             rep_dir: Default::default(),
             zoom: 1.0,
             scroll: 0.0,
@@ -200,20 +211,17 @@ impl Grid {
         // or the open image's neighbors), then a wraparound scan from
         // `scan_start`. Jobs run on the shared rayon pool, so several
         // decodes proceed in parallel; each sends its result back over the
-        // channel, and the main thread uploads the texture above.
+        // channel, and the main thread uploads the texture above. The
+        // per-entry checks below (texture present, queued, viewing) make
+        // revisiting a priority index in the wraparound harmless, so no
+        // extra dedup bookkeeping is needed — O(1) per entry.
         let n = self.entries.len();
-        let mut order: Vec<usize> = Vec::new();
-        for &i in priority {
-            if i < n && !order.contains(&i) {
-                order.push(i);
-            }
-        }
         let start = scan_start.min(n);
-        for i in (start..n).chain(0..start) {
-            if !order.contains(&i) {
-                order.push(i);
-            }
-        }
+        let order = priority
+            .iter()
+            .copied()
+            .filter(|&i| i < n)
+            .chain((start..n).chain(0..start));
         for i in order {
             if self.inflight >= MAX_INFLIGHT {
                 break;
@@ -244,6 +252,17 @@ impl Grid {
         }
     }
 
+    /// Layout for the current state, via the cache (see `layout_cache`).
+    fn layout(&self, win_w: f32, win_h: f32) -> Layout {
+        let n = self.entries.len();
+        let key = (n, win_w.to_bits(), win_h.to_bits(), self.zoom.to_bits());
+        let mut cache = self.layout_cache.borrow_mut();
+        if cache.as_ref().is_none_or(|(k, _)| *k != key) {
+            *cache = Some((key, grid_layout_at(n, win_w, win_h, self.zoom)));
+        }
+        cache.as_ref().expect("just cached").1
+    }
+
     /// Grid index of the entry with this stable id (ids never shift when
     /// failed entries are spliced out; indices do).
     pub fn index_of(&self, id: u64) -> Option<usize> {
@@ -265,7 +284,7 @@ impl Grid {
         if n == 0 {
             return Vec::new();
         }
-        let (cols, ..) = grid_layout_at(n, win_w, win_h, self.zoom);
+        let (cols, ..) = self.layout(win_w, win_h);
         let mut v = Vec::with_capacity(4);
         for i in [
             sel.checked_sub(1),
@@ -290,8 +309,7 @@ impl Grid {
         if self.entries.is_empty() {
             return;
         }
-        let n = self.entries.len();
-        let (cols, _cw, ch, _side, content_h) = grid_layout_at(n, win_w, win_h, self.zoom);
+        let (cols, _cw, ch, _side, content_h) = self.layout(win_w, win_h);
         let scroll_max = (content_h - win_h).max(0.0);
         let row = self.selected / cols;
         let top = MARGIN + row as f32 * (ch + GAP);
@@ -411,7 +429,7 @@ impl Grid {
             }
             follow = true;
         }
-        let (cols, _cw, _ch, side, content_h) = grid_layout_at(n, win_w, win_h, self.zoom);
+        let (cols, _cw, _ch, side, content_h) = self.layout(win_w, win_h);
         let scroll_max = (content_h - win_h).max(0.0);
         // Mouse wheel scrolls the grid (only meaningful once zoomed in past
         // the exact-fill layout, where nothing overflows).
@@ -468,7 +486,7 @@ impl Grid {
             );
             return;
         }
-        let (cols, cw, ch, side, _) = grid_layout_at(self.entries.len(), win_w, win_h, self.zoom);
+        let (cols, cw, ch, side, _) = self.layout(win_w, win_h);
         for (i, e) in self.entries.iter().enumerate() {
             let col = i % cols;
             let row = i / cols;
