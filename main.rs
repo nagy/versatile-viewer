@@ -144,13 +144,11 @@ fn decode_image(path: &Path) -> Result<DecodedImage> {
     .with_context(|| format!("failed to decode {path:?}"))
 }
 
-/// Decode an image and upload it as a GPU texture. The raw RGBA buffer is
-/// wrapped in a raylib Image without re-encoding; the ffi::Image only
-/// borrows it, so the wrapper is forgotten after upload and the Vec stays
-/// Upload a raw RGBA8 buffer as a GPU texture. Must be called on the main
-/// thread (GL context lives there). The buffer is only borrowed for the
-/// upload; the ffi::Image wrapper is forgotten so raylib never frees the
-/// caller's Vec.
+/// Upload a raw RGBA8 buffer as a GPU texture.
+///
+/// Must be called on the main thread (GL context lives there). The buffer
+/// is only borrowed for the upload; the ffi::Image wrapper is forgotten so
+/// raylib never frees the caller's Vec.
 fn upload_rgba(
     rl: &mut RaylibHandle,
     thread: &RaylibThread,
@@ -332,16 +330,7 @@ fn main() -> Result<()> {
     let mut img_w = 0.0f32;
     let mut img_h = 0.0f32;
     if let Some(decoded) = single_decoded {
-        let ffi_image = raylib::ffi::Image {
-            data: decoded.rgba.as_ptr() as *mut std::os::raw::c_void,
-            width: decoded.width as i32,
-            height: decoded.height as i32,
-            mipmaps: 1,
-            format: PixelFormat::PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 as i32,
-        };
-        let image = unsafe { Image::from_raw(ffi_image) };
-        view_tex = Some(rl.load_texture_from_image(&thread, &image)?);
-        image.to_raw(); // forget: drop would MemFree our borrowed Vec
+        view_tex = Some(upload_rgba(&mut rl, &thread, &decoded.rgba, decoded.width, decoded.height)?);
         drop(decoded.rgba);
         img_w = win0_w as f32;
         img_h = win0_h as f32;
