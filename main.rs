@@ -242,6 +242,10 @@ fn main() -> Result<()> {
     // front; grid-opened images stream in via the loader).
     let mut view_tex: Option<Texture2D> = None;
     let mut view_loading = false;
+    // When the current load started (rl.get_time()); the "decoding..."
+    // indicator only appears once the load exceeds 1 s so fast loads never
+    // flash text on screen.
+    let mut view_loading_since = 0.0f64;
     let mut img_w = 0.0f32;
     let mut img_h = 0.0f32;
     if let Some(decoded) = single_decoded {
@@ -394,6 +398,7 @@ fn main() -> Result<()> {
                     open_idx = Some(i);
                     mode = Mode::Image;
                     view_loading = true;
+                    view_loading_since = rl.get_time();
                     img_w = 0.0; // dimensions arrive with the header message
                     img_h = 0.0;
                     view_tex = None;
@@ -407,16 +412,58 @@ fn main() -> Result<()> {
             }
         } else {
             // Image mode.
-            if rl.is_key_pressed(KeyboardKey::KEY_Q) || rl.is_key_pressed(KeyboardKey::KEY_ESCAPE) {
+            // Drain the raw key/char queues every frame (same rationale as
+            // grid.rs handle_input): is_key_pressed misses a press+release
+            // pair that lands inside one frame — easy here while frames
+            // stall on texture uploads or decode. Leftover queue entries
+            // would otherwise leak into grid mode and act there (e.g. a
+            // missed Enter immediately reopening the just-viewed image).
+            // State queries (is_key_down panning, is_key_pressed W/E/=/-)
+            // are unaffected: the queue is separate from the key snapshot.
+            let mut enter = false;
+            let mut quit_pressed = false;
+            while let Some(k) = rl.get_key_pressed() {
+                match k {
+                    KeyboardKey::KEY_ENTER | KeyboardKey::KEY_KP_ENTER => enter = true,
+                    KeyboardKey::KEY_Q | KeyboardKey::KEY_ESCAPE => quit_pressed = true,
+                    _ => {}
+                }
+            }
+            // Some input setups (IMEs, unusual X11 input methods) deliver
+            // Enter as a character event ('\n'/'\r'); accept both. This
+            // drain also covers the +/- zoom chars for every frame, so
+            // nothing piles up while the header has not arrived yet.
+            let mut zoom_in_char = false;
+            let mut zoom_out_char = false;
+            while let Some(c) = rl.get_char_pressed() {
+                match c {
+                    '\n' | '\r' => enter = true,
+                    '+' => zoom_in_char = true,
+                    '-' => zoom_out_char = true,
+                    _ => {}
+                }
+            }
+
+            let mut return_to_grid = false;
+            if quit_pressed {
                 if grid.is_none() {
                     quit = true; // launched with a single file
                 } else {
-                    mode = Mode::Grid;
-                    open_idx = None;
-                    loader = None; // cancels a still-running stream
-                    view_tex = None;
-                    view_loading = false;
+                    return_to_grid = true;
                 }
+            }
+            // Enter also returns to the grid when one exists (nsxiv-like:
+            // Enter toggles between grid and the open image).
+            if grid.is_some() && enter {
+                return_to_grid = true;
+            }
+            if return_to_grid {
+                mode = Mode::Grid;
+                open_idx = None;
+                loader = None; // cancels a still-running stream
+                view_tex = None;
+                view_loading = false;
+                view_loading_since = 0.0;
             }
 
             // Keyboard shortcuts. Capital W / capital E arrive as W/E + shift.
@@ -472,18 +519,11 @@ fn main() -> Result<()> {
                 // US-layout =/- keys (incl. numpad) and the typed character, which
                 // covers non-US layouts where '+' lives on another physical key.
                 let mut zoom_in = rl.is_key_pressed(KeyboardKey::KEY_EQUAL)
-                    || rl.is_key_pressed(KeyboardKey::KEY_KP_ADD);
+                    || rl.is_key_pressed(KeyboardKey::KEY_KP_ADD)
+                    || zoom_in_char;
                 let mut zoom_out = rl.is_key_pressed(KeyboardKey::KEY_MINUS)
-                    || rl.is_key_pressed(KeyboardKey::KEY_KP_SUBTRACT);
-                // Drain the character queue so repeats don't pile up.
-                loop {
-                    match rl.get_char_pressed() {
-                        None => break,
-                        Some('+') => zoom_in = true,
-                        Some('-') => zoom_out = true,
-                        _ => {}
-                    }
-                }
+                    || rl.is_key_pressed(KeyboardKey::KEY_KP_SUBTRACT)
+                    || zoom_out_char;
                 if zoom_in || zoom_out {
                     let factor = if zoom_in { 1.25 } else { 1.0 / 1.25 };
                     zoom = ZoomMode::Free((target_scale * factor).clamp(0.01, 100.0));
@@ -554,6 +594,12 @@ fn main() -> Result<()> {
             } // img_w > 0.0: fit/pan math needs known dimensions
         }
 
+        // Whether the "decoding..." indicator should show this frame: only
+        // once the load has taken over a second; brief loads would otherwise
+        // flash the text for a few frames. Computed before begin_drawing
+        // (rl is mutably borrowed by the draw handle).
+        let show_decoding = view_loading && rl.get_time() - view_loading_since > 1.0;
+
         let mut d = rl.begin_drawing(&thread);
         d.clear_background(Color::BLACK);
 
@@ -578,7 +624,8 @@ fn main() -> Result<()> {
                 };
                 d.draw_texture_pro(texture, src, dest, Vector2::ZERO, 0.0, Color::WHITE);
             }
-            if view_loading {
+            // Threshold check happens above, before begin_drawing.
+            if show_decoding {
                 let msg = "decoding...";
                 let tw = d.measure_text(msg, 20);
                 d.draw_text(
