@@ -1,7 +1,9 @@
 //! versatile-viewer — image viewer (JXL first-class, plus PNG/JPEG) with a
 //! directory thumbnail grid. q quits; ESC/Enter toggle grid ↔ image view.
+//! `--osm` opens an OpenStreetMap slippy-map mode instead (map.rs).
 //!
 //! Usage: versatile-viewer <image-path-or-directory>
+//!        versatile-viewer --osm [z/lat/lon]
 
 use std::{env, path::Path};
 
@@ -15,6 +17,7 @@ use raylib::{
 mod grid;
 mod keyrepeat;
 mod loader;
+mod map;
 use grid::{Grid, GridAction};
 use loader::{Loader, LoaderMsg};
 
@@ -141,8 +144,8 @@ fn decode_image(path: &Path) -> Result<DecodedImage> {
 /// Upload a raw RGBA8 buffer as a GPU texture. Must be called on the main
 /// thread (GL context lives there). The buffer is only borrowed for the
 /// upload; the ffi::Image wrapper is forgotten so raylib never frees the
-/// caller's Vec.
-fn upload_rgba(
+/// caller's Vec. Shared with map.rs (tile textures).
+pub(crate) fn upload_rgba(
     rl: &mut RaylibHandle,
     thread: &RaylibThread,
     rgba: &[u8],
@@ -221,9 +224,18 @@ fn reset_view(
 }
 
 fn main() -> Result<()> {
-    let arg = env::args()
-        .nth(1)
-        .context("usage: versatile-viewer <image-path-or-directory>")?;
+    let mut args = env::args().skip(1);
+    let arg = args.next().context(
+        "usage: versatile-viewer <image-path-or-directory>\n       versatile-viewer --osm \
+         [z/lat/lon]",
+    )?;
+
+    // `--osm` mode: OpenStreetMap slippy map (map.rs). Own run loop; no
+    // file arguments, no grid. Optional position arg: z/lat/lon.
+    if arg == "--osm" {
+        return map::run(args.next());
+    }
+
     let path = Path::new(&arg);
 
     // Directory launch: list the directory before opening the window (the
