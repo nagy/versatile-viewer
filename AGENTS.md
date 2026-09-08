@@ -28,6 +28,8 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
 3. [x] Zoom modes: `W` fit-down (default, no upscale), `Shift+W` fit all
    sides (upscales until first border touch), `e` fit width, `Shift+E`
    fit height.
+   `t` toggles between fit-all (whole image visible) and fill (window fully
+   covered, overflow cropped); distinct for any image/window shape.
 4. [x] Panning: `h/j/k/l` + arrow keys, unrestricted.
 5. [x] Free zoom: `+`/`-` (also numpad, layout-independent via typed
    character), 25% steps; zoom animates smoothly (exponential ease,

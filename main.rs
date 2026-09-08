@@ -38,6 +38,9 @@ enum ZoomMode {
     FitWidth,
     /// Fit to the window height (Shift+E).
     FitHeight,
+    /// Fill the window: scale until the image covers every side (t);
+    /// the shorter relative dimension overflows and is cropped.
+    Fill,
     /// Free zoom factor, set with +/- (multiples of the last fit scale).
     Free(f32),
 }
@@ -729,6 +732,16 @@ fn main() -> Result<()> {
                     ZoomMode::FitWidth
                 };
                 target_pan = Vector2::ZERO;
+            } else if rl.is_key_pressed(KeyboardKey::KEY_T) {
+                // Two-state toggle: whole image visible (fit-all) vs window
+                // completely covered (fill). Distinct for any image/window
+                // combination, unlike a fit-width/fit-height cycle.
+                zoom = if zoom == ZoomMode::Fill {
+                    ZoomMode::FitAll
+                } else {
+                    ZoomMode::Fill
+                };
+                target_pan = Vector2::ZERO;
             }
 
             // Before the header arrives the image dimensions are unknown;
@@ -741,6 +754,9 @@ fn main() -> Result<()> {
                     ZoomMode::FitAll => (win_w / img_w).min(win_h / img_h),
                     ZoomMode::FitWidth => win_w / img_w,
                     ZoomMode::FitHeight => win_h / img_h,
+                    // Cover: the larger ratio wins, so the image fills the
+                    // window and the other axis is cropped.
+                    ZoomMode::Fill => (win_w / img_w).max(win_h / img_h),
                     ZoomMode::Free(scale) => scale,
                 };
 
