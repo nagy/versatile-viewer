@@ -21,6 +21,17 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
 - Run: `nix run . -- <image-path>`; q quits, ESC/Enter toggle grid ↔ image
   view (ESC never quits). Binary name: `vv`.
 
+## Env vars
+
+- `VV_DEBUG=1` — trace grid open/return events and raw key events to stderr.
+- `VV_SLOW_STREAM=1` — see milestone 7.
+- `VV_BLUR_BG=1` — gimmick: image-view background is a tiny blurred copy of
+  the viewed image (`blurbg` module), scaled to cover the window (fit on the
+  narrower side, overflow cropped), GPU-upscaled with bilinear filtering.
+  `VV_BG_DIM=0..1` sets its brightness (default 0.6); `VV_BLUR_PX` sets the
+  tiny texture's long side (default 128, clamped 8..=1024; fewer =
+  blurrier). Off = zero cost, black background as before.
+
 ## Milestones (step by step)
 
 1. [x] Single image window: JXL + PNG + JPEG, q quits.

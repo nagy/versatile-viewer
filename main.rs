@@ -2,6 +2,13 @@
 //! directory thumbnail grid. q quits; ESC/Enter toggle grid ↔ image view.
 //!
 //! Usage: versatile-viewer <image-path-or-directory>
+//!
+//! Env gimmicks: VV_DEBUG=1 traces input events; VV_SLOW_STREAM=1 slows the
+//! JXL stream; VV_BLUR_BG=1 draws a blurred copy of the viewed image as the
+//! image-view background (scaled to cover the window, GPU-upscaled).
+//! VV_BG_DIM=0..1 sets its brightness (default 0.6); VV_BLUR_PX sets the
+//! blur resolution — the tiny texture's long side, default 128, fewer =
+//! blurrier.
 
 use std::{env, path::Path};
 
@@ -12,9 +19,11 @@ use raylib::{
     prelude::*,
 };
 
+mod blurbg;
 mod grid;
 mod keyrepeat;
 mod loader;
+use blurbg::BlurBg;
 use grid::{Grid, GridAction};
 use loader::{Loader, LoaderMsg};
 
@@ -185,6 +194,19 @@ fn show_frame(
     Ok(())
 }
 
+/// Upload a tiny blurred copy as the image-view background (VV_BLUR_BG
+/// gimmick). No-op when the gimmick is off or the copy is missing.
+fn attach_blur_bg(
+    blur_bg: &mut Option<BlurBg>,
+    rl: &mut RaylibHandle,
+    thread: &RaylibThread,
+    blur: Option<&blurbg::BlurData>,
+) {
+    if let (Some(bg), Some(data)) = (blur_bg.as_mut(), blur) {
+        bg.upload(rl, thread, data.clone());
+    }
+}
+
 /// Put the viewed texture back into its grid entry (if it came from one)
 /// and clear the view texture. Called when leaving image mode or switching
 /// to another grid entry.
@@ -244,6 +266,20 @@ fn main() -> Result<()> {
     } else {
         None
     };
+    // Blur-background source for a single-file launch: computed while the
+    // RGBA buffer is still around (before the window/GL context exists);
+    // uploaded once the window is open.
+    let single_blur = if dir_grid.is_none() && blurbg::enabled() {
+        let d = single_decoded.as_ref().unwrap();
+        Some(blurbg::small_blur(
+            &d.rgba,
+            d.width,
+            d.height,
+            blurbg::blur_px(),
+        ))
+    } else {
+        None
+    };
     let (win0_w, win0_h) = single_decoded
         .as_ref()
         .map(|d| (d.width as i32, d.height as i32))
@@ -268,6 +304,10 @@ fn main() -> Result<()> {
     // We quit via the q key handling ourselves (set_exit_key would make ESC
     // close the window outright instead of returning to the grid).
     rl.set_exit_key(None);
+
+    // VV_BLUR_BG gimmick: blurred copy of the viewed image behind it. Declared
+    // after `rl` so it drops (and unloads its texture) before the window.
+    let mut blur_bg: Option<BlurBg> = BlurBg::from_env();
 
     // Take the grid AFTER the window exists: it holds GPU textures, and
     // being declared after `rl` it is dropped (and unloaded) BEFORE the
@@ -302,6 +342,9 @@ fn main() -> Result<()> {
         drop(decoded.rgba);
         img_w = win0_w as f32;
         img_h = win0_h as f32;
+        if let Some(data) = single_blur {
+            attach_blur_bg(&mut blur_bg, &mut rl, &thread, Some(&data));
+        }
     }
 
     let mut mode = if grid.is_none() {
@@ -412,6 +455,7 @@ fn main() -> Result<()> {
                                 target_pan = Vector2::ZERO;
                                 view_scale = None;
                                 view_loading = false;
+                                attach_blur_bg(&mut blur_bg, &mut rl, &thread, e.blur.as_ref());
                             }
                         }
                         None => open_failed = true, // entry vanished (decode failed)
@@ -435,14 +479,17 @@ fn main() -> Result<()> {
                             rgba,
                             width,
                             height,
+                            blur,
                         } => {
                             // Progressively better render of the same image.
                             show_frame(&mut rl, &thread, &mut view_tex, &rgba, width, height)?;
+                            attach_blur_bg(&mut blur_bg, &mut rl, &thread, blur.as_ref());
                         }
                         LoaderMsg::Done {
                             rgba,
                             width,
                             height,
+                            blur,
                         } => {
                             // Non-JXL formats only learn dimensions here.
                             if img_w == 0.0 {
@@ -454,6 +501,7 @@ fn main() -> Result<()> {
                                 view_scale = Some((win_w / img_w).min(win_h / img_h));
                             }
                             show_frame(&mut rl, &thread, &mut view_tex, &rgba, width, height)?;
+                            attach_blur_bg(&mut blur_bg, &mut rl, &thread, blur.as_ref());
                             view_loading = false;
                         }
                         LoaderMsg::Failed(err) => {
@@ -489,7 +537,7 @@ fn main() -> Result<()> {
                     // decode, no black gap. If a decode is already in flight,
                     // just wait for it (no duplicate work). Otherwise fall
                     // back to the streaming loader (JXL: blurry preview fast).
-                    let (id, tex, w, h, path, queued) = {
+                    let (id, tex, w, h, path, queued, blur) = {
                         let g = grid.as_mut().unwrap();
                         let e = &mut g.entries[i];
                         (
@@ -499,6 +547,7 @@ fn main() -> Result<()> {
                             e.height,
                             e.path.clone(),
                             e.queued,
+                            e.blur.clone(),
                         )
                     };
                     open_id = Some(id);
@@ -516,6 +565,7 @@ fn main() -> Result<()> {
                         // has it.
                         view_scale = Some((win_w / img_w).min(win_h / img_h));
                         view_loading = false;
+                        attach_blur_bg(&mut blur_bg, &mut rl, &thread, blur.as_ref());
                     } else if queued {
                         view_from_grid = None;
                         loader = None;
@@ -670,7 +720,7 @@ fn main() -> Result<()> {
                             let j = t as usize;
                             put_back_view(&mut grid, &mut view_from_grid, &mut view_tex);
                             loader = None;
-                            let (id, tex, w, h, path, queued) = {
+                            let (id, tex, w, h, path, queued, blur) = {
                                 let g = grid.as_mut().unwrap();
                                 let e = &mut g.entries[j];
                                 (
@@ -680,6 +730,7 @@ fn main() -> Result<()> {
                                     e.height,
                                     e.path.clone(),
                                     e.queued,
+                                    e.blur.clone(),
                                 )
                             };
                             open_id = Some(id);
@@ -696,6 +747,7 @@ fn main() -> Result<()> {
                                 // needs a scale now.
                                 view_scale = Some((win_w / img_w).min(win_h / img_h));
                                 view_loading = false;
+                                attach_blur_bg(&mut blur_bg, &mut rl, &thread, blur.as_ref());
                             } else if queued {
                                 view_from_grid = None;
                                 view_tex = None;
@@ -868,6 +920,29 @@ fn main() -> Result<()> {
         if mode == Mode::Grid {
             grid.as_ref().unwrap().draw(&mut d, win_w, win_h);
         } else {
+            // VV_BLUR_BG gimmick: blurred copy of the image, scaled to
+            // cover the whole window (fit on the narrower side; the other
+            // axis overflows and is cropped) behind the sharp image.
+            if let Some(bg) = &blur_bg {
+                if let Some(tex) = bg.texture() {
+                    let bw = tex.width() as f32;
+                    let bh = tex.height() as f32;
+                    let s = (win_w / bw).max(win_h / bh);
+                    let src = Rectangle {
+                        x: 0.0,
+                        y: 0.0,
+                        width: bw,
+                        height: bh,
+                    };
+                    let dest = Rectangle {
+                        x: (win_w - bw * s) / 2.0,
+                        y: (win_h - bh * s) / 2.0,
+                        width: bw * s,
+                        height: bh * s,
+                    };
+                    d.draw_texture_pro(tex, src, dest, Vector2::ZERO, 0.0, bg.tint());
+                }
+            }
             if let Some(texture) = &view_tex {
                 let dw = img_w * view_scale.unwrap();
                 let dh = img_h * view_scale.unwrap();

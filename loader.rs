@@ -22,7 +22,10 @@ use std::{
 use anyhow::{Context, Result};
 use jxl_oxide::{InitializeResult, JxlImage};
 
-use crate::{decode_common, fb_to_rgba, is_jxl};
+use crate::{
+    blurbg::{self, BlurData},
+    decode_common, fb_to_rgba, is_jxl,
+};
 
 /// Wrap a jxl-oxide error (a bare boxed trait object) into anyhow.
 fn jxl_err(e: Box<dyn std::error::Error + Send + Sync + 'static>) -> anyhow::Error {
@@ -48,17 +51,20 @@ pub enum LoaderMsg {
     /// before any pixel data arrives.
     Header { width: u32, height: u32 },
     /// Progressive preview of the still-loading frame (full-size RGBA8,
-    /// blurry until done). Sent at most every `PREVIEW_INTERVAL`.
+    /// blurry until done). Sent at most every `PREVIEW_INTERVAL`. `blur` is
+    /// the tiny blurred copy for the VV_BLUR_BG gimmick (None when off).
     Preview {
         rgba: Vec<u8>,
         width: u32,
         height: u32,
+        blur: Option<BlurData>,
     },
     /// Final full-quality image.
     Done {
         rgba: Vec<u8>,
         width: u32,
         height: u32,
+        blur: Option<BlurData>,
     },
     /// Decoding failed; no image will arrive.
     Failed(String),
@@ -78,8 +84,10 @@ impl Loader {
         let worker_cancel = cancel.clone();
         // Detached on purpose: the main thread never joins; the worker ends
         // on cancellation or when sends start failing (receiver dropped).
+        let blur_enabled = blurbg::enabled();
+        let blur_px = blurbg::blur_px();
         std::thread::spawn(move || {
-            if let Err(err) = stream(&path, &worker_cancel, &tx) {
+            if let Err(err) = stream(&path, &worker_cancel, &tx, blur_enabled, blur_px) {
                 let _ = tx.send(LoaderMsg::Failed(format!("{err:#}")));
             }
         });
@@ -102,14 +110,23 @@ impl Drop for Loader {
 }
 
 /// Worker body. The caller turns errors into `Failed` messages.
-fn stream(path: &Path, cancel: &AtomicBool, tx: &Sender<LoaderMsg>) -> Result<()> {
+fn stream(
+    path: &Path,
+    cancel: &AtomicBool,
+    tx: &Sender<LoaderMsg>,
+    blur_enabled: bool,
+    blur_px: u32,
+) -> Result<()> {
     if !is_jxl(path) {
         // No progressive data for common formats: one full decode.
         let decoded = decode_common(path)?;
+        let blur = blur_enabled
+            .then(|| blurbg::small_blur(&decoded.rgba, decoded.width, decoded.height, blur_px));
         let _ = tx.send(LoaderMsg::Done {
             rgba: decoded.rgba,
             width: decoded.width,
             height: decoded.height,
+            blur,
         });
         return Ok(());
     }
@@ -170,10 +187,13 @@ fn stream(path: &Path, cancel: &AtomicBool, tx: &Sender<LoaderMsg>) -> Result<()
                     // missing; ignore them and retry after the next chunk.
                     if let Ok(render) = img.render_loading_frame() {
                         let (rgba, width, height) = fb_to_rgba(&render.image_all_channels())?;
+                        let blur =
+                            blur_enabled.then(|| blurbg::small_blur(&rgba, width, height, blur_px));
                         let _ = tx.send(LoaderMsg::Preview {
                             rgba,
                             width,
                             height,
+                            blur,
                         });
                         last_preview = Some(Instant::now());
                     }
@@ -200,10 +220,12 @@ fn stream(path: &Path, cancel: &AtomicBool, tx: &Sender<LoaderMsg>) -> Result<()
         .map_err(jxl_err)
         .with_context(|| format!("failed to render {path:?}"))?;
     let (rgba, width, height) = fb_to_rgba(&render.image_all_channels())?;
+    let blur = blur_enabled.then(|| blurbg::small_blur(&rgba, width, height, blur_px));
     let _ = tx.send(LoaderMsg::Done {
         rgba,
         width,
         height,
+        blur,
     });
     Ok(())
 }
@@ -257,6 +279,7 @@ mod tests {
                     rgba,
                     width,
                     height,
+                    ..
                 } => {
                     done = (rgba, width, height);
                     break;

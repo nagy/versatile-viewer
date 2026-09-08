@@ -25,6 +25,8 @@ use std::{
 use anyhow::{Context, Result};
 use raylib::{color::Color, prelude::*};
 
+use crate::blurbg::{self, BlurData};
+
 const MARGIN: f32 = 8.0;
 const GAP: f32 = 8.0;
 /// Grid zoom step for +/- (same 25% steps as the image-view free zoom).
@@ -37,9 +39,12 @@ const MAX_INFLIGHT: usize = 6;
 
 /// A finished background decode, matched to an entry by its unique id
 /// (indices shift when failed entries are spliced out; ids never do).
+/// `blur` is the tiny blurred copy for the VV_BLUR_BG gimmick (None when
+/// the gimmick is off), computed here on the worker so the main thread
+/// never touches full-res pixels for it.
 struct DecodeResult {
     id: u64,
-    res: Result<(Vec<u8>, u32, u32), String>,
+    res: Result<(Vec<u8>, u32, u32, Option<BlurData>), String>,
 }
 
 /// One grid cell: the image file plus its uploaded full-resolution texture
@@ -57,6 +62,9 @@ pub struct GridEntry {
     /// Texture currently held by the image view (taken out of the grid); it
     /// is put back when the view is done, and never re-dispatched meanwhile.
     pub viewing: bool,
+    /// Tiny blurred copy for the VV_BLUR_BG background (kept when the
+    /// texture is out in the image view; the view clones it).
+    pub blur: Option<BlurData>,
 }
 
 /// What the user asked the grid to do this frame.
@@ -81,6 +89,11 @@ pub struct Grid {
     zoom: f32,
     /// Vertical scroll offset (only used when zoomed in past the exact fill).
     scroll: f32,
+    /// VV_BLUR_BG gimmick on? Read once; decode workers compute the tiny
+    /// VV_BLUR_BG gimmick settings, read once: decode workers compute the
+    /// tiny blurred copy only when enabled, at this texture long side.
+    blur_enabled: bool,
+    blur_px: u32,
 }
 
 impl Grid {
@@ -108,6 +121,7 @@ impl Grid {
                     id: i as u64,
                     queued: false,
                     viewing: false,
+                    blur: None,
                 })
                 .collect(),
             selected: 0,
@@ -117,6 +131,8 @@ impl Grid {
             rep_dir: Default::default(),
             zoom: 1.0,
             scroll: 0.0,
+            blur_enabled: blurbg::enabled(),
+            blur_px: blurbg::blur_px(),
         })
     }
 
@@ -141,13 +157,14 @@ impl Grid {
                 continue; // entry was spliced out meanwhile; drop the result
             };
             match res.res {
-                Ok((rgba, w, h)) if self.entries[i].texture.is_none() => {
+                Ok((rgba, w, h, blur)) if self.entries[i].texture.is_none() => {
                     match crate::upload_rgba(rl, thread, &rgba, w, h) {
                         Ok(t) => {
                             let e = &mut self.entries[i];
                             e.width = w;
                             e.height = h;
                             e.texture = Some(t);
+                            e.blur = blur;
                         }
                         Err(err) => {
                             eprintln!("vv: {}: {err:#}", self.entries[i].path.display());
@@ -205,9 +222,15 @@ impl Grid {
             let id = e.id;
             let path = e.path.clone();
             let tx = self.result_tx.clone();
+            let blur_enabled = self.blur_enabled;
+            let blur_px = self.blur_px;
             rayon::spawn(move || {
                 let res = crate::decode_image(&path)
-                    .map(|d| (d.rgba, d.width, d.height))
+                    .map(|d| {
+                        let blur = blur_enabled
+                            .then(|| blurbg::small_blur(&d.rgba, d.width, d.height, blur_px));
+                        (d.rgba, d.width, d.height, blur)
+                    })
                     .map_err(|e| format!("{e:#}"));
                 // Receiver gone (grid dropped): result is discarded and the
                 // job simply ends.
