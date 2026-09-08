@@ -195,15 +195,18 @@ fn show_frame(
 }
 
 /// Upload a tiny blurred copy as the image-view background (VV_BLUR_BG
-/// gimmick). No-op when the gimmick is off or the copy is missing.
+/// gimmick). `tag` identifies the source image (grid entry id; None for a
+/// single-file launch) so grid crossfades can skip redundant transitions.
+/// No-op when the gimmick is off or the copy is missing.
 fn attach_blur_bg(
     blur_bg: &mut Option<BlurBg>,
     rl: &mut RaylibHandle,
     thread: &RaylibThread,
     blur: Option<&blurbg::BlurData>,
+    tag: Option<u64>,
 ) {
     if let (Some(bg), Some(data)) = (blur_bg.as_mut(), blur) {
-        bg.upload(rl, thread, data.clone());
+        bg.attach(rl, thread, data.clone(), tag);
     }
 }
 
@@ -343,7 +346,7 @@ fn main() -> Result<()> {
         img_w = win0_w as f32;
         img_h = win0_h as f32;
         if let Some(data) = single_blur {
-            attach_blur_bg(&mut blur_bg, &mut rl, &thread, Some(&data));
+            attach_blur_bg(&mut blur_bg, &mut rl, &thread, Some(&data), None);
         }
     }
 
@@ -455,7 +458,13 @@ fn main() -> Result<()> {
                                 target_pan = Vector2::ZERO;
                                 view_scale = None;
                                 view_loading = false;
-                                attach_blur_bg(&mut blur_bg, &mut rl, &thread, e.blur.as_ref());
+                                attach_blur_bg(
+                                    &mut blur_bg,
+                                    &mut rl,
+                                    &thread,
+                                    e.blur.as_ref(),
+                                    Some(id),
+                                );
                             }
                         }
                         None => open_failed = true, // entry vanished (decode failed)
@@ -483,7 +492,7 @@ fn main() -> Result<()> {
                         } => {
                             // Progressively better render of the same image.
                             show_frame(&mut rl, &thread, &mut view_tex, &rgba, width, height)?;
-                            attach_blur_bg(&mut blur_bg, &mut rl, &thread, blur.as_ref());
+                            attach_blur_bg(&mut blur_bg, &mut rl, &thread, blur.as_ref(), open_id);
                         }
                         LoaderMsg::Done {
                             rgba,
@@ -501,7 +510,7 @@ fn main() -> Result<()> {
                                 view_scale = Some((win_w / img_w).min(win_h / img_h));
                             }
                             show_frame(&mut rl, &thread, &mut view_tex, &rgba, width, height)?;
-                            attach_blur_bg(&mut blur_bg, &mut rl, &thread, blur.as_ref());
+                            attach_blur_bg(&mut blur_bg, &mut rl, &thread, blur.as_ref(), open_id);
                             view_loading = false;
                         }
                         LoaderMsg::Failed(err) => {
@@ -565,7 +574,7 @@ fn main() -> Result<()> {
                         // has it.
                         view_scale = Some((win_w / img_w).min(win_h / img_h));
                         view_loading = false;
-                        attach_blur_bg(&mut blur_bg, &mut rl, &thread, blur.as_ref());
+                        attach_blur_bg(&mut blur_bg, &mut rl, &thread, blur.as_ref(), open_id);
                     } else if queued {
                         view_from_grid = None;
                         loader = None;
@@ -747,7 +756,13 @@ fn main() -> Result<()> {
                                 // needs a scale now.
                                 view_scale = Some((win_w / img_w).min(win_h / img_h));
                                 view_loading = false;
-                                attach_blur_bg(&mut blur_bg, &mut rl, &thread, blur.as_ref());
+                                attach_blur_bg(
+                                    &mut blur_bg,
+                                    &mut rl,
+                                    &thread,
+                                    blur.as_ref(),
+                                    open_id,
+                                );
                             } else if queued {
                                 view_from_grid = None;
                                 view_tex = None;
@@ -908,6 +923,19 @@ fn main() -> Result<()> {
             } // img_w > 0.0: fit/pan math needs known dimensions
         }
 
+        // VV_BLUR_BG in grid mode: the background follows the selected
+        // entry with a slow crossfade (starts as soon as the entry's
+        // blurred copy has been decoded by the grid workers).
+        if mode == Mode::Grid {
+            if let (Some(bg), Some(g)) = (blur_bg.as_mut(), grid.as_ref()) {
+                if let Some(e) = g.entries.get(g.selected) {
+                    if let Some(data) = &e.blur {
+                        bg.transition(&mut rl, &thread, data, e.id);
+                    }
+                }
+            }
+        }
+
         // Whether the "decoding..." indicator should show this frame: only
         // once the load has taken over a second; brief loads would otherwise
         // flash the text for a few frames. Computed before begin_drawing
@@ -918,30 +946,19 @@ fn main() -> Result<()> {
         d.clear_background(Color::BLACK);
 
         if mode == Mode::Grid {
+            // VV_BLUR_BG gimmick: blurred background follows the selection
+            // (crossfading; no-op when the gimmick is off). Drawn before
+            // the grid so fades run under the thumbnails.
+            if let Some(bg) = &mut blur_bg {
+                bg.draw(&mut d, win_w, win_h);
+            }
             grid.as_ref().unwrap().draw(&mut d, win_w, win_h);
         } else {
             // VV_BLUR_BG gimmick: blurred copy of the image, scaled to
             // cover the whole window (fit on the narrower side; the other
             // axis overflows and is cropped) behind the sharp image.
-            if let Some(bg) = &blur_bg {
-                if let Some(tex) = bg.texture() {
-                    let bw = tex.width() as f32;
-                    let bh = tex.height() as f32;
-                    let s = (win_w / bw).max(win_h / bh);
-                    let src = Rectangle {
-                        x: 0.0,
-                        y: 0.0,
-                        width: bw,
-                        height: bh,
-                    };
-                    let dest = Rectangle {
-                        x: (win_w - bw * s) / 2.0,
-                        y: (win_h - bh * s) / 2.0,
-                        width: bw * s,
-                        height: bh * s,
-                    };
-                    d.draw_texture_pro(tex, src, dest, Vector2::ZERO, 0.0, bg.tint());
-                }
+            if let Some(bg) = &mut blur_bg {
+                bg.draw(&mut d, win_w, win_h);
             }
             if let Some(texture) = &view_tex {
                 let dw = img_w * view_scale.unwrap();

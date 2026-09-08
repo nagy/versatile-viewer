@@ -10,6 +10,8 @@
 //! stands out; `VV_BG_DIM` sets the background brightness as a 0..=1
 //! multiplier (default 0.6).
 
+use std::time::Instant;
+
 use raylib::{color::Color, consts::TextureFilter, prelude::*, texture::RaylibTexture2D};
 
 /// Tiny blurred RGBA8 copy of an image, ready to upload: (rgba, w, h).
@@ -22,6 +24,9 @@ const DEFAULT_LONG_SIDE: u32 = 128;
 const BLUR_SIGMA: f32 = 8.0;
 /// Background brightness when VV_BG_DIM is unset.
 const DEFAULT_DIM: f32 = 0.6;
+
+/// Crossfade duration for grid-view background changes (seconds).
+const FADE_SECS: f64 = 0.4;
 
 /// Is the gimmick enabled? Strict opt-in: exactly `VV_BLUR_BG=1`.
 pub fn enabled() -> bool {
@@ -73,7 +78,15 @@ pub fn small_blur(rgba: &[u8], width: u32, height: u32, long_side: u32) -> BlurD
 /// unloads) before the window closes.
 pub struct BlurBg {
     dim: f32,
+    /// Current background texture.
     tex: Option<Texture2D>,
+    /// Source tag of the current texture (grid entry id; None = unknown,
+    /// e.g. a single-file launch). Used to skip redundant transitions.
+    current: Option<u64>,
+    /// Previous texture, kept while a crossfade to `tex` is running.
+    old: Option<Texture2D>,
+    /// When the running crossfade started.
+    fade_start: Option<Instant>,
 }
 
 impl BlurBg {
@@ -85,12 +98,15 @@ impl BlurBg {
         Some(BlurBg {
             dim: parse_dim(std::env::var("VV_BG_DIM").ok().as_deref()),
             tex: None,
+            current: None,
+            old: None,
+            fade_start: None,
         })
     }
 
-    /// Replace (or update in place) the background texture from a tiny
-    /// blurred copy. Errors are non-fatal: the background just stays black.
-    pub fn upload(&mut self, rl: &mut RaylibHandle, thread: &RaylibThread, data: BlurData) {
+    /// Upload a tiny blurred copy as the background texture, reusing the
+    /// texture in place when dimensions match (streaming previews).
+    fn upload(&mut self, rl: &mut RaylibHandle, thread: &RaylibThread, data: BlurData) {
         let (rgba, width, height) = data;
         let same = matches!(&self.tex, Some(t) if t.width() == width as i32 && t.height() == height as i32);
         if same {
@@ -115,14 +131,121 @@ impl BlurBg {
         }
     }
 
-    pub fn texture(&self) -> Option<&Texture2D> {
-        self.tex.as_ref()
+    /// Replace (or update in place) the background texture from a tiny
+    /// blurred copy, without a fade (same image: streaming previews). Any
+    /// running crossfade is cut short. Errors are non-fatal: the background
+    /// just stays black.
+    pub fn attach(
+        &mut self,
+        rl: &mut RaylibHandle,
+        thread: &RaylibThread,
+        data: BlurData,
+        tag: Option<u64>,
+    ) {
+        self.upload(rl, thread, data);
+        if tag.is_some() {
+            self.current = tag;
+        }
     }
 
-    /// Draw tint: dimmed white (multiplies the texture color).
-    pub fn tint(&self) -> Color {
-        let c = (self.dim * 255.0) as u8;
-        Color::new(c, c, c, 255)
+    /// Swap the background to `data` with a slow crossfade. No-op while
+    /// `tag` already matches (the grid calls this every frame for the
+    /// selected entry). Without an existing background, the new texture
+    /// simply fades in from black.
+    pub fn transition(
+        &mut self,
+        rl: &mut RaylibHandle,
+        thread: &RaylibThread,
+        data: &BlurData,
+        tag: u64,
+    ) {
+        if self.current == Some(tag) {
+            return;
+        }
+        let (rgba, width, height) = data;
+        // First background ever (empty window at startup): show it
+        // instantly, no fade-in from black.
+        let first = self.tex.is_none();
+        match crate::upload_rgba(rl, thread, rgba, *width, *height) {
+            Ok(t) => {
+                let _ = t.set_texture_filter(thread, TextureFilter::TEXTURE_FILTER_BILINEAR);
+                if first {
+                    self.old = None;
+                    self.fade_start = None;
+                } else {
+                    // The current texture becomes the fade-out layer; any
+                    // older fade-out layer is dropped (max two alive).
+                    self.old = self.tex.take();
+                    self.fade_start = Some(Instant::now());
+                }
+                self.tex = Some(t);
+                self.current = Some(tag);
+            }
+            Err(err) => eprintln!("vv: blur background: {err}"),
+        }
+    }
+
+    /// Draw the background (if any) scaled to cover the window: during a
+    /// crossfade the old texture at full opacity underneath the new one
+    /// fading in. Must be called every frame so fades complete (and the
+    /// old texture gets freed).
+    pub fn draw(&mut self, d: &mut RaylibDrawHandle, win_w: f32, win_h: f32) {
+        let progress = self
+            .fade_start
+            .map(|s| (s.elapsed().as_secs_f64() / FADE_SECS).min(1.0))
+            .unwrap_or(1.0);
+        if progress >= 1.0 {
+            self.old = None;
+            self.fade_start = None;
+        }
+        let Some(tex) = &self.tex else {
+            return;
+        };
+        let rgb = (self.dim * 255.0) as u8;
+        // Old texture first, at full opacity...
+        if let Some(old) = &self.old {
+            d.draw_texture_pro(
+                old,
+                Rectangle {
+                    x: 0.0,
+                    y: 0.0,
+                    width: old.width() as f32,
+                    height: old.height() as f32,
+                },
+                cover_rect(old.width() as u32, old.height() as u32, win_w, win_h),
+                Vector2::ZERO,
+                0.0,
+                Color::new(rgb, rgb, rgb, 255),
+            );
+        }
+        // ...then the new one, fading in (from black when there is no old).
+        let t = progress * progress * (3.0 - 2.0 * progress); // smoothstep
+        d.draw_texture_pro(
+            tex,
+            Rectangle {
+                x: 0.0,
+                y: 0.0,
+                width: tex.width() as f32,
+                height: tex.height() as f32,
+            },
+            cover_rect(tex.width() as u32, tex.height() as u32, win_w, win_h),
+            Vector2::ZERO,
+            0.0,
+            Color::new(rgb, rgb, rgb, (t * 255.0) as u8),
+        );
+    }
+}
+
+/// Dest rect for a texture of w x h scaled to cover the window (fit on the
+/// narrower side, centered; the other axis overflows and is cropped).
+fn cover_rect(w: u32, h: u32, win_w: f32, win_h: f32) -> Rectangle {
+    let (fw, fh) = (w as f32, h as f32);
+    let s = (win_w / fw).max(win_h / fh);
+    Rectangle {
+        x: (win_w - fw * s) / 2.0,
+        y: (win_h - fh * s) / 2.0,
+        width: fw * s,
+        height: fh * s,
     }
 }
 
@@ -150,6 +273,19 @@ mod tests {
         let (out, w, h) = small_blur(&rgba, 1, 9, 64);
         assert!(w >= 1 && h >= 1);
         assert_eq!(out.len(), (w * h * 4) as usize);
+    }
+
+    #[test]
+    fn cover_rect_fits_narrower_side() {
+        // 2:1 texture in an 800x600 window: height limits -> 1200x600,
+        // centered (x overflows equally to both sides).
+        let r = cover_rect(64, 32, 800.0, 600.0);
+        assert_eq!((r.width, r.height), (1200.0, 600.0));
+        assert_eq!((r.x, r.y), (-200.0, 0.0));
+        // Tall texture: width limits instead.
+        let r = cover_rect(32, 64, 800.0, 600.0);
+        assert_eq!((r.width, r.height), (800.0, 1600.0));
+        assert_eq!((r.x, r.y), (0.0, -500.0));
     }
 
     #[test]
