@@ -42,7 +42,7 @@ use blurbg::BlurBg;
 use document::{MAX_TEXTURE_SIDE, open_document};
 // Decode helpers live in document.rs now; re-exported at the crate root
 // until every module addresses them there (grid/loader rewiring follows).
-pub(crate) use document::{decode_common, decode_image, downscale_rgba, fb_to_rgba, is_jxl};
+pub(crate) use document::{decode_image, downscale_rgba};
 use grid::{Grid, GridAction};
 use loader::{Loader, LoaderMsg};
 
@@ -209,6 +209,11 @@ fn put_back_view(
     *view_tex = None;
 }
 
+/// Start the streaming loader for a file path (JXL: blurry previews fast).
+fn start_entry_loader(path: &Path, preview_px: u32) -> Result<Loader> {
+    Ok(Loader::start_doc(open_document(path)?, 0, 1.0, preview_px))
+}
+
 /// Make the entry at index `idx` the open image. Three paths, shared by
 /// grid-open, prev/next navigation and the decode-landed takeover:
 /// 1. its full-res texture was kept for it (keep-set): show instantly;
@@ -289,7 +294,18 @@ fn show_entry(
             None
         } else {
             let preview_px = rl.get_screen_width().max(rl.get_screen_height()) as u32;
-            Some(Loader::start(path, preview_px))
+            match start_entry_loader(&path, preview_px) {
+                Ok(loader) => Some(loader),
+                Err(err) => {
+                    // Open failed (sniff/parse): keep the entry, dim it.
+                    eprintln!("vv: {}: {err:#}", path.display());
+                    grid.mark_failed(id, format!("{err:#}"));
+                    st.open_id = None;
+                    st.mode = Mode::Grid;
+                    st.view_loading = false;
+                    None
+                }
+            }
         };
         attach_blur_bg(&mut st.blur_bg, rl, thread, blur.as_ref(), st.open_id);
     }
