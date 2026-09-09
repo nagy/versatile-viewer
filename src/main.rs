@@ -33,19 +33,18 @@ use raylib::{
 };
 
 mod blurbg;
+mod document;
 mod grid;
 mod keyrepeat;
 mod loader;
+mod pdf;
 use blurbg::BlurBg;
+use document::{MAX_TEXTURE_SIDE, open_document};
+// Decode helpers live in document.rs now; re-exported at the crate root
+// until every module addresses them there (grid/loader rewiring follows).
+pub(crate) use document::{decode_common, decode_image, downscale_rgba, fb_to_rgba, is_jxl};
 use grid::{Grid, GridAction};
 use loader::{Loader, LoaderMsg};
-
-struct DecodedImage {
-    width: u32,
-    height: u32,
-    /// RGBA8, row-major, 4 bytes per pixel.
-    rgba: Vec<u8>,
-}
 
 /// How the image is scaled to the window. Scale is recomputed every frame,
 /// so resizing always stays correct.
@@ -115,145 +114,6 @@ impl ViewState {
         self.target_pan = Vector2::ZERO;
         self.view_scale = None;
     }
-}
-
-/// Decode a JPEG XL file with jxl-oxide (pure Rust).
-fn decode_jxl(path: &Path) -> Result<DecodedImage> {
-    let image = jxl_oxide::JxlImage::builder()
-        .open(path)
-        .map_err(|e| anyhow::anyhow!("jxl-oxide: {e}"))
-        .context("failed to open file")?;
-    let render = image
-        .render_frame(0)
-        .map_err(|e| anyhow::anyhow!("jxl-oxide: {e}"))
-        .context("failed to render frame")?;
-
-    let (rgba, width, height) = fb_to_rgba(&render.image_all_channels())?;
-    Ok(DecodedImage {
-        width,
-        height,
-        rgba,
-    })
-}
-
-/// Convert a jxl-oxide framebuffer (f32 samples, 3 or 4 interleaved channels)
-/// to RGBA8, forcing alpha = 1.0 for opaque 3-channel data.
-pub(crate) fn fb_to_rgba(fb: &jxl_oxide::FrameBuffer) -> Result<(Vec<u8>, u32, u32)> {
-    let width = fb.width() as u32;
-    let height = fb.height() as u32;
-    let channels = fb.channels();
-    let samples = fb.buf();
-    if !matches!(channels, 3 | 4) {
-        bail!("unexpected channel count from jxl-oxide: {channels}");
-    }
-
-    let mut rgba = vec![0u8; width as usize * height as usize * 4];
-    for (dst, src) in rgba.chunks_exact_mut(4).zip(samples.chunks_exact(channels)) {
-        dst[0] = to_u8(src[0]);
-        dst[1] = to_u8(src[1]);
-        dst[2] = to_u8(src[2]);
-        dst[3] = to_u8(src.get(3).copied().unwrap_or(1.0));
-    }
-    Ok((rgba, width, height))
-}
-
-const fn to_u8(v: f32) -> u8 {
-    (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
-}
-
-/// Decode common formats (PNG, JPEG, ...) with the `image` crate.
-fn decode_common(path: &Path) -> Result<DecodedImage> {
-    let rgba = image::ImageReader::open(path)?
-        .with_guessed_format()?
-        .decode()?
-        .into_rgba8();
-    let (width, height) = rgba.dimensions();
-    Ok(DecodedImage {
-        width,
-        height,
-        rgba: rgba.into_raw(),
-    })
-}
-
-/// Decide the decoder by file content, not the file name: the 2-byte magic
-/// is sniffed first (JXL codestream vs the common formats), and the .jxl
-/// extension only acts as a tiebreaker for unknown magic (JXL container
-/// files start with a box header, not the codestream magic).
-fn is_jxl(path: &Path) -> bool {
-    match file_magic(path) {
-        Some([0xff, 0x0a]) => true, // raw JXL codestream
-        Some(m) if is_common_magic(m) => false,
-        _ => path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("jxl")),
-    }
-}
-
-/// First two bytes of the file; None on a missing/short file.
-fn file_magic(path: &Path) -> Option<[u8; 2]> {
-    use std::io::Read;
-    let mut magic = [0u8; 2];
-    std::fs::File::open(path)
-        .and_then(|mut f| f.read_exact(&mut magic))
-        .ok()
-        .map(|()| magic)
-}
-
-/// Magics the image crate can decode (`with_guessed_format` sniffs the full
-/// header; this only needs to steer files away from the JXL decoder).
-// The magic table is kept flat and grouped by format on purpose; clippy's
-// nested suggestion reorders it into a byte soup.
-#[allow(clippy::unnested_or_patterns)]
-fn is_common_magic(m: [u8; 2]) -> bool {
-    let [a, b] = m;
-    matches!(
-        (a, b),
-        (0x89, b'P') // PNG
-            | (0xff, 0xd8) // JPEG
-            | (b'R', b'I') // RIFF (WebP)
-            | (b'G', b'I') // GIF
-            | (b'B', b'M') // BMP
-            | (b'I', b'I')
-            | (b'I', b'M') // TIFF, both byte orders
-            | (b'M', b'I')
-            | (b'M', b'M')
-    )
-}
-
-fn decode_image(path: &Path) -> Result<DecodedImage> {
-    if is_jxl(path) {
-        decode_jxl(path)
-    } else {
-        decode_common(path)
-    }
-    .with_context(|| format!("failed to decode {}", path.display()))
-}
-
-/// Longest texture side we upload. Desktop GL hardware ranges from 4096
-/// to 16384; this is the safe middle (raylib does not expose the real
-/// limit). Anything larger is downscaled here instead of failing the load.
-const MAX_TEXTURE_SIDE: u32 = 8192;
-
-/// Downscale an RGBA8 buffer so its long side is at most `long_side`
-/// (below the cap it is returned unchanged — never upscaled).
-pub(crate) fn downscale_rgba(
-    rgba: Vec<u8>,
-    width: u32,
-    height: u32,
-    long_side: u32,
-) -> (Vec<u8>, u32, u32) {
-    let (width, height) = (width.max(1), height.max(1));
-    let m = width.max(height);
-    if m <= long_side.max(1) {
-        return (rgba, width, height);
-    }
-    let scale = long_side.max(1) as f32 / m as f32;
-    let nw = ((width as f32 * scale).round() as u32).max(1);
-    let nh = ((height as f32 * scale).round() as u32).max(1);
-    let img: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
-        image::ImageBuffer::from_raw(width, height, rgba).expect("rgba matches dimensions");
-    let small = image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle);
-    (small.into_raw(), nw, nh)
 }
 
 /// Upload a raw RGBA8 buffer as a GPU texture.
@@ -455,12 +315,28 @@ fn main() -> Result<()> {
         bail!("no such file or directory: {}", path.display());
     };
 
-    // Single-image launch: decode before opening the window so it can be
-    // sized to the image. Directory launch: fixed default window size.
-    let single_decoded = if dir_grid.is_none() {
-        Some(decode_image(path)?)
+    // Single-file launch: open the document before the window so it can be
+    // sized to page 0. Single-page documents decode up front (window =
+    // image size); multi-page documents (PDF) render page 0 at fit scale
+    // for the window size (the page-grid launch replaces this).
+    let single_doc = if dir_grid.is_none() {
+        Some(open_document(path)?)
     } else {
         None
+    };
+    let single_decoded = match &single_doc {
+        Some(doc) => {
+            let info = doc.page_info(0)?;
+            if doc.page_count() == 1 {
+                Some(doc.render(0, 1.0)?)
+            } else {
+                let f = (1024.0 / info.width.max(1) as f32)
+                    .min(768.0 / info.height.max(1) as f32)
+                    .min(1.0);
+                Some(doc.render(0, f.max(0.01))?)
+            }
+        }
+        None => None,
     };
     // Blur-background source for a single-file launch: computed while the
     // RGBA buffer is still around (before the window/GL context exists);
@@ -1140,121 +1016,4 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use tempfile::TempDir;
-
-    use super::*;
-
-    // Compile-time check that this stays const-evaluable.
-    const _: u8 = to_u8(0.5);
-
-    #[test]
-    fn to_u8_clamps_and_rounds() {
-        assert_eq!(to_u8(0.0), 0);
-        assert_eq!(to_u8(1.0), 255);
-        assert_eq!(to_u8(-5.0), 0);
-        assert_eq!(to_u8(42.0), 255);
-        assert_eq!(to_u8(0.5), 128); // 0.5 * 255 + 0.5 = 128
-        assert_eq!(to_u8(1.0 / 255.0), 1);
-    }
-
-    #[test]
-    fn is_jxl_detects_codestream_magic() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let bare = tmp.path().join("bare");
-        // Raw codestream starts with 0xFF 0x0A — JXL even without extension.
-        std::fs::write(&bare, [0xffu8, 0x0a, 0x01, 0x02]).unwrap();
-        assert!(is_jxl(&bare));
-        // PNG magic — not a codestream, even without an extension.
-        std::fs::write(&bare, [0x89u8, b'P', 0x4e, 0x47]).unwrap();
-        assert!(!is_jxl(&bare));
-    }
-
-    #[test]
-    fn content_decides_over_extension() {
-        // Content-first dispatch: a PNG renamed to .jxl decodes as PNG, a
-        // JXL codestream renamed to .png is still JXL. Unknown magic with a
-        // .jxl suffix (e.g. a container-format file) falls back to JXL.
-        let dir = TempDir::new().unwrap();
-        let dir = dir.path();
-
-        let png = dir.join("real.png");
-        image::DynamicImage::new_rgb8(2, 3).save(&png).unwrap();
-        let renamed_jxl = dir.join("renamed.jxl");
-        std::fs::copy(&png, &renamed_jxl).unwrap();
-        assert!(!is_jxl(&renamed_jxl));
-        let decoded = decode_image(&renamed_jxl).unwrap();
-        assert_eq!((decoded.width, decoded.height), (2, 3));
-
-        let renamed_png = dir.join("renamed.png");
-        std::fs::write(&renamed_png, [0xffu8, 0x0a, 0x01, 0x02]).unwrap();
-        assert!(is_jxl(&renamed_png));
-
-        let container = dir.join("container.jxl");
-        std::fs::write(&container, [0x00, 0x00, 0x00, 0x0c, b'J', b'X', b'L', b' ']).unwrap();
-        assert!(is_jxl(&container));
-    }
-
-    #[test]
-    fn decode_common_reads_png() {
-        let dir = TempDir::new().unwrap();
-        let dir = dir.path();
-        let path = dir.join("img.png");
-        image::DynamicImage::new_rgb8(3, 2).save(&path).unwrap();
-        let decoded = decode_image(&path).unwrap();
-        assert_eq!(decoded.width, 3);
-        assert_eq!(decoded.height, 2);
-        assert_eq!(decoded.rgba.len(), 3 * 2 * 4);
-    }
-
-    #[test]
-    fn decode_image_reads_webp() {
-        // Lossless encode via image-webp, then decode back through
-        // decode_image (format sniffed from bytes, not extension).
-        let dir = TempDir::new().unwrap();
-        let dir = dir.path();
-        let path = dir.join("img.webp");
-        image::DynamicImage::new_rgb8(5, 4)
-            .save_with_format(&path, image::ImageFormat::WebP)
-            .unwrap();
-        let decoded = decode_image(&path).unwrap();
-        assert_eq!(decoded.width, 5);
-        assert_eq!(decoded.height, 4);
-        assert_eq!(decoded.rgba.len(), 5 * 4 * 4);
-    }
-
-    #[test]
-    fn decode_image_reads_grid_filter_formats() {
-        // Every format the grid filter accepts (grid.rs is_image_path) must
-        // actually decode — the filter and the image-crate features must stay
-        // in sync (see the Cargo.toml comment).
-        let dir = TempDir::new().unwrap();
-        let dir = dir.path();
-        for (ext, format) in [
-            ("bmp", image::ImageFormat::Bmp),
-            ("gif", image::ImageFormat::Gif),
-            ("tga", image::ImageFormat::Tga),
-            ("tif", image::ImageFormat::Tiff),
-        ] {
-            let path = dir.join(format!("img.{ext}"));
-            image::DynamicImage::new_rgb8(4, 2)
-                .save_with_format(&path, format)
-                .unwrap_or_else(|e| panic!("encode {ext}: {e}"));
-            let decoded = decode_image(&path).unwrap_or_else(|e| panic!("decode {ext}: {e}"));
-            assert_eq!((decoded.width, decoded.height), (4, 2), "{ext}");
-            assert_eq!(decoded.rgba.len(), 4 * 2 * 4, "{ext}");
-        }
-    }
-
-    #[test]
-    fn decode_image_fails_cleanly_on_garbage() {
-        let dir = TempDir::new().unwrap();
-        let dir = dir.path();
-        let path = dir.join("x.png");
-        std::fs::write(&path, b"garbage").unwrap();
-        assert!(decode_image(&path).is_err());
-    }
 }
