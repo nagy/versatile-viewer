@@ -23,7 +23,11 @@
 //! blur resolution — the tiny texture's long side, default 128, fewer =
 //! blurrier.
 
-use std::{env, path::Path};
+use std::{
+    env,
+    path::Path,
+    sync::mpsc::{Receiver, channel},
+};
 
 use anyhow::{Context, Result, bail};
 use raylib::{
@@ -39,7 +43,7 @@ mod keyrepeat;
 mod loader;
 mod pdf;
 use blurbg::BlurBg;
-use document::{MAX_TEXTURE_SIDE, PageInfo, downscale_rgba, open_document};
+use document::{DecodedImage, MAX_TEXTURE_SIDE, PageInfo, downscale_rgba, open_document};
 use grid::{EntrySource, Grid, GridAction};
 use loader::{Loader, LoaderMsg};
 
@@ -70,6 +74,10 @@ enum Mode {
     Image,
 }
 
+/// Result of one in-flight refine render, matched to the live view by
+/// (entry id, page, scale).
+type RefineResult = (u64, usize, f32, Result<DecodedImage, String>);
+
 /// Image-view state: what is shown and how it is framed.
 struct ViewState {
     mode: Mode,
@@ -96,6 +104,14 @@ struct ViewState {
     view_scale: Option<f32>,
     /// Streaming loader for the open image; drop cancels the worker.
     loader: Option<Loader>,
+    /// Texture pixels per natural unit (points for PDF pages, pixels for
+    /// images) of the currently shown texture. Images render once at native
+    /// size (1.0); document pages re-render at the settled zoom (refine).
+    view_render_scale: f32,
+    /// In-flight refine render: (entry id, page, scale, result). The result
+    /// is accepted only if it still matches the live view (same entry, page
+    /// and zoom) — the user may have zoomed or navigated away meanwhile.
+    refine: Option<Receiver<RefineResult>>,
     /// `VV_BLUR_BG` background (None when the gimmick is off). Declared after
     /// `rl` (via `ViewState`) so it drops and unloads before the window.
     blur_bg: Option<BlurBg>,
@@ -266,6 +282,8 @@ fn show_entry(
     st.open_id = Some(id);
     st.mode = Mode::Image;
     st.reset_view();
+    st.view_render_scale = 1.0;
+    st.refine = None;
     if let Some(tex) = tex {
         grid.entries[idx].viewing = true;
         st.view_from_grid = Some(id);
@@ -431,6 +449,8 @@ fn main() -> Result<()> {
         target_pan: Vector2::ZERO,
         view_scale: None,
         loader: None,
+        view_render_scale: 1.0,
+        refine: None,
         blur_bg: BlurBg::from_env(),
     };
     // A single-file multi-page document (PDF) launches into its page grid;
@@ -576,6 +596,10 @@ fn main() -> Result<()> {
                             height,
                             blur,
                         } => {
+                            // Texture px per natural unit (points for PDFs).
+                            if st.img_w > 0.0 && width > 0 {
+                                st.view_render_scale = width as f32 / st.img_w;
+                            }
                             // Progressively better render of the same image.
                             show_frame(&mut rl, &thread, &mut st.view_tex, &rgba, width, height)?;
                             attach_blur_bg(
@@ -609,6 +633,9 @@ fn main() -> Result<()> {
                                 blur.as_ref(),
                                 st.open_id,
                             );
+                            if st.img_w > 0.0 && width > 0 {
+                                st.view_render_scale = width as f32 / st.img_w;
+                            }
                             st.view_loading = false;
                         }
                         LoaderMsg::Failed(err) => {
@@ -628,6 +655,8 @@ fn main() -> Result<()> {
                         .mark_failed(id, "decoding failed".to_string());
                 }
                 st.view_from_grid = None;
+                st.refine = None;
+                st.view_render_scale = 1.0;
                 st.mode = Mode::Grid;
                 st.view_tex = None;
                 st.view_loading = false;
@@ -803,6 +832,8 @@ fn main() -> Result<()> {
                 st.loader = None; // cancels a still-running stream
                 st.view_loading = false;
                 st.view_loading_since = 0.0;
+                st.refine = None;
+                st.view_render_scale = 1.0;
             }
 
             // Prev/next while viewing (only with a grid to navigate). A
@@ -984,6 +1015,70 @@ fn main() -> Result<()> {
                 if (st.target_pan.y - st.pan.y).abs() < 0.25 {
                     st.pan.y = st.target_pan.y;
                 }
+
+                // Document pages (PDF): once the zoom animation settles and
+                // the settled scale differs enough from the scale the current
+                // texture was rendered at, re-render the page at that scale.
+                // Text stays sharp at every resting zoom level (fresh
+                // rasterization at screen resolution — same trick zathura/
+                // mupdf use). While the render runs, the old texture keeps
+                // showing (slightly soft, never blank).
+                let view_doc = st.open_id.and_then(|id| {
+                    grid.as_ref().and_then(|g| {
+                        g.index_of(id).and_then(|i| match &g.entries[i].source {
+                            EntrySource::DocPage { doc, page } => Some((doc.clone(), *page)),
+                            EntrySource::File(_) => None,
+                        })
+                    })
+                });
+                if let Some((doc, page)) = view_doc {
+                    let settled = st
+                        .view_scale
+                        .is_some_and(|s| (s - target_scale).abs() <= target_scale * 0.001);
+                    let scale = st.view_scale.unwrap_or(1.0);
+                    let rel_diff =
+                        (scale - st.view_render_scale).abs() / st.view_render_scale.max(1e-3);
+                    if settled && st.refine.is_none() && rel_diff > 0.15 {
+                        let (tx, rx) = channel();
+                        let doc = doc.clone();
+                        let id = st.open_id.unwrap_or(u64::MAX);
+                        let rs = scale.clamp(0.05, 8.0);
+                        rayon::spawn(move || {
+                            let res = doc.render(page, rs).map_err(|e| format!("{e:#}"));
+                            // Receiver gone (view left): result discarded.
+                            let _ = tx.send((id, page, rs, res));
+                        });
+                        st.refine = Some(rx);
+                    }
+                }
+                // Poll a finished refine render; accept it only if it still
+                // matches what is on screen (same entry, page and zoom).
+                if let Some(rx) = &st.refine
+                    && let Ok((id, page, rs, res)) = rx.try_recv()
+                {
+                    st.refine = None;
+                    let same_page = st.open_id == Some(id)
+                        && grid.as_ref().and_then(|g| {
+                            g.index_of(id).map(|i| match &g.entries[i].source {
+                                EntrySource::DocPage { page: p, .. } => *p == page,
+                                EntrySource::File(_) => false,
+                            })
+                        }) == Some(true);
+                    if same_page
+                        && st.view_scale.is_some_and(|s| (s - rs).abs() <= rs * 0.2)
+                        && let Ok(d) = res
+                    {
+                        show_frame(
+                            &mut rl,
+                            &thread,
+                            &mut st.view_tex,
+                            &d.rgba,
+                            d.width,
+                            d.height,
+                        )?;
+                        st.view_render_scale = rs;
+                    }
+                }
             } // st.img_w > 0.0: fit/pan math needs known dimensions
         }
 
@@ -1026,11 +1121,20 @@ fn main() -> Result<()> {
                 let dw = st.img_w * st.view_scale.unwrap();
                 let dh = st.img_h * st.view_scale.unwrap();
 
+                // Source rect in TEXTURE pixels, not natural units: PDF
+                // pages re-render at the settled zoom scale, so a refined
+                // texture holds points * scale pixels while img_w/img_h
+                // stay in points (the fit math works in natural units).
+                // Sampling img_w here would crop the top-left fraction of
+                // the texture and stretch it over the full destination — a
+                // crop+blowup that reads as "image zoom AND pdf zoom applied
+                // at once". Plain images never notice: texture pixels equal
+                // natural pixels there.
                 let src = Rectangle {
                     x: 0.0,
                     y: 0.0,
-                    width: st.img_w,
-                    height: st.img_h,
+                    width: texture.width() as f32,
+                    height: texture.height() as f32,
                 };
                 let dest = Rectangle {
                     x: (win_w - dw) / 2.0 + st.pan.x,

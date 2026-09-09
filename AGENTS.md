@@ -77,4 +77,18 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
    cell, clicking the selected cell opens it; left-drag pans and wheel
    zooms (25% steps, center-anchored) in image view. Dotfiles are hidden;
    formats the grid lists must have matching image-crate features.
-9. Video playback (mpv inspiration; backend TBD).
+9. [x] PDF viewing, read-only, no search/TOC/annotation UI:
+   - `document.rs`: `Document` trait (page_count/page_info/render) is the
+     source abstraction — image files open as one-page documents, PDFs as
+     N-page documents; `open_document` sniffs JXL codestream / `%PDF-`
+     magic / `image`-crate formats.
+   - `pdf.rs`: hayro (pure Rust, no C) rasterizes pages; panics are caught,
+     pixel budgets are clamped; the hayro dependency stays inside pdf.rs so
+     a pdfium fallback swap touches one file.
+   - PDFs in the directory grid show one tile (page-1 thumb); Enter opens a
+     page-overview grid (aspect-fit thumbs, ESC pops back); single-file
+     launch opens the page grid directly.
+   - Page view: n/p/Space navigate pages, g/G first/last; zoom re-renders
+     the page at the settled scale (zathura/mupdf trick — sharp text at
+     every resting zoom, preview-first like JXL progressive).
+10. Video playback (mpv inspiration; backend TBD).
