@@ -22,6 +22,9 @@ image = { version = "0.25", default-features = false, features = [
   "webp",
 ] }
 raylib = "6"
+# Blocking HTTP client for OSM tile downloads (rustls TLS, no openssl).
+# Run on its own worker threads; no tokio runtime in this raylib app.
+ureq = "2.12"
 # Work pool for parallel background decodes (grid prefetch); jxl-oxide also
 # uses rayon internally for single-image decode (its default feature).
 rayon = "1"
