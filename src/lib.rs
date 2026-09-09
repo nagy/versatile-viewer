@@ -22,9 +22,11 @@
 //! the pure helpers honest.
 
 pub mod blurbg;
+pub mod document;
 pub mod grid;
 pub mod keyrepeat;
 pub mod loader;
+pub mod pdf;
 #[cfg(target_os = "linux")]
 pub mod wmclass;
 
@@ -42,7 +44,7 @@ pub struct DecodedImage {
 }
 
 /// Decode a JPEG XL file with jxl-oxide (pure Rust).
-fn decode_jxl(path: &Path) -> Result<DecodedImage> {
+pub(crate) fn decode_jxl(path: &Path) -> Result<DecodedImage> {
     let image = jxl_oxide::JxlImage::builder()
         .open(path)
         .map_err(|e| anyhow::anyhow!("jxl-oxide: {e}"))
@@ -95,7 +97,7 @@ const fn to_u8(v: f32) -> u8 {
 }
 
 /// Decode common formats (PNG, JPEG, ...) with the `image` crate.
-fn decode_common(path: &Path) -> Result<DecodedImage> {
+pub(crate) fn decode_common(path: &Path) -> Result<DecodedImage> {
     let rgba = image::ImageReader::open(path)?
         .with_guessed_format()?
         .decode()?
@@ -113,7 +115,7 @@ fn decode_common(path: &Path) -> Result<DecodedImage> {
 /// The 2-byte magic is sniffed first (JXL codestream vs the common formats),
 /// and the .jxl extension only acts as a tiebreaker for unknown magic (JXL
 /// container files start with a box header, not the codestream magic).
-fn is_jxl(path: &Path) -> bool {
+pub(crate) fn is_jxl(path: &Path) -> bool {
     match file_magic(path) {
         Some([0xff, 0x0a]) => true, // raw JXL codestream
         Some(m) if is_common_magic(m) => false,
@@ -172,7 +174,7 @@ pub fn decode_image(path: &Path) -> Result<DecodedImage> {
 /// Longest texture side we upload. Desktop GL hardware ranges from 4096
 /// to 16384; this is the safe middle (raylib does not expose the real
 /// limit). Anything larger is downscaled here instead of failing the load.
-const MAX_TEXTURE_SIDE: u32 = 8192;
+pub(crate) const MAX_TEXTURE_SIDE: u32 = 8192;
 
 /// Downscale an RGBA8 buffer so its long side is at most `long_side`.
 ///
