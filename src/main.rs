@@ -39,7 +39,7 @@ use raylib::{
 use versatile_viewer::wmclass;
 use versatile_viewer::{
     blurbg::{self, BlurBg},
-    decode_image,
+    document::open_document,
     grid::{Grid, GridAction},
     keyrepeat,
     loader::{Loader, LoaderMsg},
@@ -367,12 +367,28 @@ fn main() -> Result<()> {
         bail!("no such file or directory: {}", path.display());
     };
 
-    // Single-image launch: decode before opening the window so it can be
-    // sized to the image. Directory launch: fixed default window size.
-    let single_decoded = if dir_grid.is_none() {
-        Some(decode_image(path)?)
+    // Single-file launch: open the document before the window so it can be
+    // sized to page 0. Single-page documents decode up front (window =
+    // image size); multi-page documents (PDF) render page 0 at fit scale
+    // for the window size (the page-grid launch replaces this).
+    let single_doc = if dir_grid.is_none() {
+        Some(open_document(path)?)
     } else {
         None
+    };
+    let single_decoded = match &single_doc {
+        Some(doc) => {
+            let info = doc.page_info(0)?;
+            if doc.page_count() == 1 {
+                Some(doc.render(0, 1.0)?)
+            } else {
+                let f = (1024.0 / info.width.max(1) as f32)
+                    .min(768.0 / info.height.max(1) as f32)
+                    .min(1.0);
+                Some(doc.render(0, f.max(0.01))?)
+            }
+        }
+        None => None,
     };
     // Blur-background source for a single-file launch: computed while the
     // RGBA buffer is still around (before the window/GL context exists);
