@@ -39,11 +39,14 @@ const GRID_MIN_SIDE: f32 = 32.0;
 /// shared rayon pool; jxl-oxide parallelizes each decode further inside).
 const MAX_INFLIGHT: usize = 6;
 
-/// Long side of the square thumbnail texture stored per grid entry. The
-/// full-resolution decode is downscaled to this on the decode worker and
-/// the full-size texture kept only for a small keep-set (the selection or
-/// open entry plus its prefetched neighbors), so VRAM stays bounded on
-/// large directories.
+/// Long side of the thumbnail texture stored per grid entry: the whole
+/// image, aspect preserved (the square crop for grid cells happens at
+/// draw time). The full-resolution decode is downscaled to this on the
+/// decode worker and the full-size texture kept only for a small keep-set
+/// (the selection or open entry plus its prefetched neighbors), so VRAM
+/// stays bounded on large directories. The image view also shows the
+/// thumb as a full-frame placeholder while a decode catches up, so it
+/// must cover the whole image, not just its center square.
 const THUMB_LONG_SIDE: u32 = 1024;
 
 /// A finished background decode, matched to an entry by its unique id
@@ -56,12 +59,13 @@ struct DecodeResult {
     res: anyhow::Result<DecodeOk>,
 }
 
-/// Successful decode payload: the square thumbnail RGBA (long side
-/// `THUMB_LONG_SIDE`) plus the untouched full-resolution RGBA. The main
-/// thread uploads the thumb for every entry but uploads the full texture
-/// only for keep-set entries (selection/open + prefetched neighbors),
-/// dropping the rest. The buffers live only until the next frame drains
-/// them, bounded by `MAX_INFLIGHT`.
+/// Successful decode payload: the thumbnail RGBA (whole image, aspect
+/// preserved, long side `THUMB_LONG_SIDE`) plus the untouched
+/// full-resolution RGBA. The main thread uploads the thumb for every
+/// entry but uploads the full texture only for keep-set entries
+/// (selection/open + prefetched neighbors), dropping the rest. The
+/// buffers live only until the next frame drains them, bounded by
+/// `MAX_INFLIGHT`.
 type DecodeOk = (Vec<u8>, u32, u32, Option<BlurData>, (Vec<u8>, u32, u32));
 
 /// Grid layout: (`cols`, `cell_w`, `cell_h`, `side`, `content_h`).
@@ -77,9 +81,11 @@ pub struct GridEntry {
     /// Full-resolution image dimensions (as decoded; not the thumb's).
     pub width: u32,
     pub height: u32,
-    /// Square thumbnail texture (long side `THUMB_LONG_SIDE`) — what the grid
-    /// cell draws. Full-resolution textures live in `full` only for a small
-    /// keep-set, so VRAM stays bounded on large directories.
+    /// Thumbnail texture (whole image, aspect preserved, long side
+    /// `THUMB_LONG_SIDE`) — what the grid cell draws (center-cropped at
+    /// draw time) and what the image view shows as a placeholder while a
+    /// decode catches up. Full-resolution textures live in `full` only
+    /// for a small keep-set, so VRAM stays bounded on large directories.
     pub texture: Option<Texture2D>,
     /// Full-resolution texture; kept only for the selection/open entry and
     /// its prefetched neighbors (see `load_pending`), so opening them is
@@ -248,9 +254,25 @@ impl Grid {
                         }
                     }
                 }
-                Ok(_) => {
-                    // texture already loaded (opened synchronously)
+                Ok((_, _, _, _, (full, fw, fh))) => {
+                    // Re-decode of a thumb-only entry (keep-set refill):
+                    // the thumb already exists, so only the full-res
+                    // texture is wanted — and only if the entry is still
+                    // in the keep set (it may have been navigated away
+                    // from meanwhile).
                     self.entries[i].queued = false;
+                    if keep.contains(&res.id)
+                        && let Some(e) = self.entries.get_mut(i)
+                        && e.full.is_none()
+                    {
+                        match crate::upload_rgba(rl, thread, &full, fw, fh) {
+                            Ok(ft) => e.full = Some(ft),
+                            Err(err) => {
+                                eprintln!("vv: {}: {err:#}", e.path.display());
+                                e.failed = Some(format!("{err:#}"));
+                            }
+                        }
+                    }
                 }
                 Err(err) => {
                     eprintln!(
@@ -294,7 +316,15 @@ impl Grid {
                 break;
             }
             let e = &mut self.entries[i];
-            if e.texture.is_some() || e.queued || e.viewing || e.failed.is_some() {
+            if e.queued || e.viewing || e.failed.is_some() {
+                continue;
+            }
+            // Decode when there is no thumb yet. Re-decode a thumb-only
+            // entry when it is in the keep set but its full-res texture is
+            // missing (its decode drained while outside the keep set, so
+            // the full texture was dropped then). Thumb-only entries
+            // outside the keep set are never re-decoded.
+            if e.texture.is_some() && !(keep.contains(&e.id) && e.full.is_none()) {
                 continue;
             }
             e.queued = true;
@@ -306,10 +336,11 @@ impl Grid {
             let blur_px = self.blur_px;
             rayon::spawn(move || {
                 let res = crate::decode_image(&path).map(|d| {
-                    let thumb = make_thumb(&d.rgba, d.width, d.height);
                     let blur = blur_enabled
                         .then(|| blurbg::small_blur(&d.rgba, d.width, d.height, blur_px));
-                    (thumb.0, thumb.1, thumb.2, blur, (d.rgba, d.width, d.height))
+                    let (thumb, tw, th) =
+                        crate::downscale_rgba(d.rgba.clone(), d.width, d.height, THUMB_LONG_SIDE);
+                    (thumb, tw, th, blur, (d.rgba, d.width, d.height))
                 });
                 // Receiver gone (grid dropped): result is discarded and the
                 // job simply ends.
@@ -591,13 +622,17 @@ impl Grid {
                 height: side,
             };
             if let Some(tex) = &e.texture {
-                // The thumb texture already is the center-cropped square,
-                // so draw the whole texture into the cell.
+                // The thumb texture keeps the image's aspect ratio; the
+                // square cell shows its center crop (draw-time crop, so a
+                // resize never needs a re-decode).
+                let tw = tex.width() as f32;
+                let th = tex.height() as f32;
+                let side = tw.min(th);
                 let src = Rectangle {
-                    x: 0.0,
-                    y: 0.0,
-                    width: tex.width() as f32,
-                    height: tex.height() as f32,
+                    x: (tw - side) / 2.0,
+                    y: (th - side) / 2.0,
+                    width: side,
+                    height: side,
                 };
                 d.draw_texture_pro(tex, src, thumb, Vector2::ZERO, 0.0, Color::WHITE);
             } else if e.failed.is_some() {
@@ -632,23 +667,6 @@ fn is_image_path(path: &Path) -> bool {
             "jpg" | "jpeg" | "png" | "jxl" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "tga"
         )
     })
-}
-
-/// Square center-crop thumbnail of an RGBA8 image, long side
-/// `THUMB_LONG_SIDE` (small images are never upscaled). Same crop as the
-/// old GPU path: full texture center square -> square side `s` -> resize.
-fn make_thumb(rgba: &[u8], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
-    let (width, height) = (width.max(1), height.max(1));
-    let s = width.min(height);
-    let img: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
-        image::ImageBuffer::from_raw(width, height, rgba.to_vec())
-            .expect("rgba buffer matches dimensions");
-    let cropped =
-        image::imageops::crop_imm(&img, (width - s) / 2, (height - s) / 2, s, s).to_image();
-    let side = s.clamp(1, THUMB_LONG_SIDE);
-    let thumb =
-        image::imageops::resize(&cropped, side, side, image::imageops::FilterType::Triangle);
-    (thumb.into_raw(), side, side)
 }
 
 /// Largest exact-fill square thumbnail side for `n` entries in an
@@ -749,33 +767,6 @@ mod tests {
         assert_eq!(grid.entries.len(), 1, "failed entry stays in the grid");
         assert_eq!(grid.entries[0].failed.as_deref(), Some("boom"));
         assert!(!grid.entries[0].queued);
-    }
-
-    #[test]
-    fn make_thumb_center_crops_to_square() {
-        // 800x200 in: center-crop to 200x200; below the 1024 cap, so it
-        // stays 200x200 (no upscale).
-        let rgba = vec![128u8; 800 * 200 * 4];
-        let (out, w, h) = make_thumb(&rgba, 800, 200);
-        assert_eq!((w, h), (200, 200));
-        assert_eq!(out.len(), (w * h * 4) as usize);
-        // Portrait input crops the same way.
-        let rgba = vec![0u8; 100 * 400 * 4];
-        let (out, w, h) = make_thumb(&rgba, 100, 400);
-        assert_eq!((w, h), (100, 100));
-        assert_eq!(out.len(), (w * h * 4) as usize);
-        // Big images are capped at THUMB_LONG_SIDE on the long side.
-        let rgba = vec![0u8; 4000 * 3000 * 4];
-        let (_, w, h) = make_thumb(&rgba, 4000, 3000);
-        assert_eq!((w, h), (1024, 1024));
-        // Small images are never upscaled.
-        let rgba = vec![0u8; 8 * 8 * 4];
-        let (_, w, h) = make_thumb(&rgba, 8, 8);
-        assert_eq!((w, h), (8, 8));
-        // Degenerate input stays sane.
-        let (out, w, h) = make_thumb(&[0u8; 4], 1, 1);
-        assert_eq!((w, h), (1, 1));
-        assert_eq!(out.len(), 4);
     }
 
     #[test]

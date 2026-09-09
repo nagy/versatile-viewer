@@ -57,7 +57,9 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
 8. [x] Directory browsing: thumbnail grid fills the window (square
    center-crop thumbs, dynamic layout, white selection border, background
    decodes on the rayon pool — several in parallel); Enter/ESC open,
-   Enter/ESC return. Entries store a 1024px square thumb texture; the
+   Enter/ESC return. Entries store a 1024px full-aspect thumb texture
+   (grid cells center-crop it at draw time; the image view shows it
+   full-frame as a placeholder while a decode catches up); the
    full-res texture is kept only for the selection/open entry plus its
    prefetched neighbors (the "keep set"), so Enter opens instantly there
    (no re-decode) and falls back to the streaming loader otherwise; while

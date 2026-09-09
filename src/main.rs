@@ -356,6 +356,10 @@ fn put_back_view(
 ///    decode-landed takeover in a later frame;
 /// 3. otherwise: start the streaming loader (JXL: blurry preview fast).
 ///
+/// On paths 2 and 3 the draw loop shows the entry's thumb (whole image,
+/// aspect preserved) as a placeholder, so n/p navigation never flashes
+/// black while a decode catches up.
+///
 /// With `set_scale_now`, the initial fit scale is set immediately because
 /// the caller's frame skips the per-frame scale math (it ran earlier).
 fn show_entry(
@@ -367,7 +371,7 @@ fn show_entry(
     win: (f32, f32),
     set_scale_now: bool,
 ) {
-    let (id, tex, w, h, path, queued, blur) = {
+    let (id, tex, w, h, path, queued, thumb, blur) = {
         let e = &mut grid.entries[idx];
         (
             e.id,
@@ -376,6 +380,7 @@ fn show_entry(
             e.height,
             e.path.clone(),
             e.queued,
+            e.texture.is_some(),
             e.blur.clone(),
         )
     };
@@ -400,14 +405,33 @@ fn show_entry(
         st.view_tex = None;
         st.view_loading = true;
         st.view_loading_since = rl.get_time();
-        st.img_w = 0.0; // dimensions arrive with the header/texture
-        st.img_h = 0.0;
-        st.loader = if queued {
-            None // a grid decode is in flight; wait for it
+        // Whenever the entry's thumb exists, the decode that produced it
+        // also recorded the full dimensions — set them now so the draw
+        // loop can show the thumb as a placeholder at the final transform
+        // (instead of a black frame) while the full-res decode catches up.
+        if w > 0 {
+            st.img_w = w as f32;
+            st.img_h = h as f32;
+            if set_scale_now {
+                let (win_w, win_h) = win;
+                st.view_scale = Some((win_w / st.img_w).min(win_h / st.img_h));
+            }
+        } else {
+            st.img_w = 0.0; // dimensions arrive with the header/texture
+            st.img_h = 0.0;
+        }
+        st.loader = if queued || thumb {
+            // A grid decode for this entry is in flight, or the entry has
+            // a thumb and the missing full-res decode was (or will be)
+            // dispatched by the keep-set refill: wait for the
+            // decode-landed takeover instead of decoding the file twice
+            // in a streaming worker.
+            None
         } else {
             let preview_px = rl.get_screen_width().max(rl.get_screen_height()) as u32;
             Some(Loader::start(path, preview_px))
         };
+        attach_blur_bg(&mut st.blur_bg, rl, thread, blur.as_ref(), st.open_id);
     }
 }
 
@@ -602,23 +626,17 @@ fn main() -> Result<()> {
                     .and_then(|g| g.entries.iter().position(|e| e.id == id).map(|i| (g, i)))
                 {
                     Some((g, i)) => {
-                        let e = &g.entries[i];
-                        if e.full.is_some() {
+                        if g.entries[i].full.is_some() {
                             // Decode landed: its full-res texture was kept
-                            // for the open entry (keep-set) — show_entry
+                            // for the open entry (keep set) — show_entry
                             // takes it over.
                             show_entry(&mut st, g, i, &mut rl, &thread, (win_w, win_h), false);
-                        } else if !e.queued && e.texture.is_some() {
-                            // Decode finished but its full-res texture was
-                            // evicted meanwhile (we left the keep set):
-                            // restart via the streaming loader.
-                            st.view_loading = true;
-                            st.view_loading_since = rl.get_time();
-                            let preview_px =
-                                rl.get_screen_width().max(rl.get_screen_height()) as u32;
-                            st.loader = Some(Loader::start(e.path.clone(), preview_px));
                         }
-                        // else: decode still in flight — wait.
+                        // else: the decode is still in flight or awaiting
+                        // dispatch (thumb-only keep-set entry; the open
+                        // entry is always in the keep set, so it will be
+                        // dispatched) — the thumb placeholder covers the
+                        // wait and the decode-landed takeover swaps it in.
                     }
                     None => open_failed = true, // entry vanished (decode failed)
                 }
@@ -1077,6 +1095,35 @@ fn main() -> Result<()> {
                     height: dh,
                 };
                 d.draw_texture_pro(texture, src, dest, Vector2::ZERO, 0.0, Color::WHITE);
+            } else if st.img_w > 0.0
+                && let Some(g) = grid.as_ref()
+                && let Some(id) = st.open_id
+                && let Some(i) = g.index_of(id)
+                && let Some(tex) = g.entries.get(i).and_then(|e| e.texture.as_ref())
+            {
+                // No full-res frame yet (decode in flight): show the
+                // entry's thumb instead of flashing black. The thumb is
+                // the whole image downscaled with the aspect preserved,
+                // so it maps 1:1 onto the image rect and the later swap
+                // to the full-res texture is pixel-aligned.
+                let scale = st
+                    .view_scale
+                    .unwrap_or((win_w / st.img_w).min(win_h / st.img_h));
+                let dw = st.img_w * scale;
+                let dh = st.img_h * scale;
+                let src = Rectangle {
+                    x: 0.0,
+                    y: 0.0,
+                    width: tex.width() as f32,
+                    height: tex.height() as f32,
+                };
+                let dest = Rectangle {
+                    x: (win_w - dw) / 2.0 + st.pan.x,
+                    y: (win_h - dh) / 2.0 + st.pan.y,
+                    width: dw,
+                    height: dh,
+                };
+                d.draw_texture_pro(tex, src, dest, Vector2::ZERO, 0.0, Color::WHITE);
             }
             // Threshold check happens above, before begin_drawing.
             if show_decoding {
