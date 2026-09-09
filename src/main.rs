@@ -39,11 +39,8 @@ mod keyrepeat;
 mod loader;
 mod pdf;
 use blurbg::BlurBg;
-use document::{MAX_TEXTURE_SIDE, open_document};
-// Decode helpers live in document.rs now; re-exported at the crate root
-// until every module addresses them there (grid/loader rewiring follows).
-pub(crate) use document::{decode_image, downscale_rgba};
-use grid::{Grid, GridAction};
+use document::{MAX_TEXTURE_SIDE, PageInfo, downscale_rgba, open_document};
+use grid::{EntrySource, Grid, GridAction};
 use loader::{Loader, LoaderMsg};
 
 /// How the image is scaled to the window. Scale is recomputed every frame,
@@ -209,9 +206,26 @@ fn put_back_view(
     *view_tex = None;
 }
 
-/// Start the streaming loader for a file path (JXL: blurry previews fast).
-fn start_entry_loader(path: &Path, preview_px: u32) -> Result<Loader> {
-    Ok(Loader::start_doc(open_document(path)?, 0, 1.0, preview_px))
+/// Fit-all scale for a page of natural size `info` inside a window,
+/// clamped so renders neither vanish nor explode (see pdf.rs caps).
+fn fit_scale(info: PageInfo, win_w: f32, win_h: f32) -> f32 {
+    (win_w / info.width as f32)
+        .min(win_h / info.height as f32)
+        .clamp(0.01, 8.0)
+}
+
+/// Start the streaming loader for a grid entry source. Image files open as
+/// one-page documents (render at native size); document pages render at the
+/// fit scale (points: 1 pt = 1 px at scale 1.0, so the fit ratio doubles as
+/// the render scale).
+fn start_entry_loader(source: &EntrySource, preview_px: u32, win: (f32, f32)) -> Result<Loader> {
+    match source {
+        EntrySource::File(path) => Ok(Loader::start_doc(open_document(path)?, 0, 1.0, preview_px)),
+        EntrySource::DocPage { doc, page } => {
+            let fit = fit_scale(doc.page_info(*page)?, win.0, win.1);
+            Ok(Loader::start_doc(doc.clone(), *page, fit, preview_px))
+        }
+    }
 }
 
 /// Make the entry at index `idx` the open image. Three paths, shared by
@@ -236,14 +250,14 @@ fn show_entry(
     win: (f32, f32),
     set_scale_now: bool,
 ) {
-    let (id, tex, w, h, path, queued, thumb, blur) = {
+    let (id, tex, w, h, source, queued, thumb, blur) = {
         let e = &mut grid.entries[idx];
         (
             e.id,
             e.full.take(),
             e.width,
             e.height,
-            e.path.clone(),
+            e.source.clone(),
             e.queued,
             e.texture.is_some(),
             e.blur.clone(),
@@ -294,11 +308,11 @@ fn show_entry(
             None
         } else {
             let preview_px = rl.get_screen_width().max(rl.get_screen_height()) as u32;
-            match start_entry_loader(&path, preview_px) {
+            match start_entry_loader(&source, preview_px, win) {
                 Ok(loader) => Some(loader),
                 Err(err) => {
                     // Open failed (sniff/parse): keep the entry, dim it.
-                    eprintln!("vv: {}: {err:#}", path.display());
+                    eprintln!("vv: {err:#}");
                     grid.mark_failed(id, format!("{err:#}"));
                     st.open_id = None;
                     st.mode = Mode::Grid;
@@ -333,26 +347,30 @@ fn main() -> Result<()> {
 
     // Single-file launch: open the document before the window so it can be
     // sized to page 0. Single-page documents decode up front (window =
-    // image size); multi-page documents (PDF) render page 0 at fit scale
-    // for the window size (the page-grid launch replaces this).
+    // image size); multi-page documents (PDF) size the window fitted to
+    // page 0 and launch into the page grid. Directory launch: fixed size.
     let single_doc = if dir_grid.is_none() {
         Some(open_document(path)?)
     } else {
         None
     };
     let single_decoded = match &single_doc {
-        Some(doc) => {
+        Some(doc) if doc.page_count() == 1 => Some(doc.render(0, 1.0)?),
+        _ => None,
+    };
+    let (win0_w, win0_h) = match (&single_decoded, &single_doc) {
+        (Some(d), _) => (d.width as i32, d.height as i32),
+        (None, Some(doc)) => {
             let info = doc.page_info(0)?;
-            if doc.page_count() == 1 {
-                Some(doc.render(0, 1.0)?)
-            } else {
-                let f = (1024.0 / info.width.max(1) as f32)
-                    .min(768.0 / info.height.max(1) as f32)
-                    .min(1.0);
-                Some(doc.render(0, f.max(0.01))?)
-            }
+            // Fit page 0 into ~1024x768 (never upscale past 1 pt = 2 px).
+            let f = (1024.0 / info.width.max(1) as f32)
+                .min(768.0 / info.height.max(1) as f32)
+                .min(2.0);
+            let w = (info.width as f32 * f).round() as i32;
+            let h = (info.height as f32 * f).round() as i32;
+            (w.max(320), h.max(240))
         }
-        None => None,
+        _ => (1024, 768),
     };
     // Blur-background source for a single-file launch: computed while the
     // RGBA buffer is still around (before the window/GL context exists);
@@ -368,10 +386,6 @@ fn main() -> Result<()> {
     } else {
         None
     };
-    let (win0_w, win0_h) = single_decoded
-        .as_ref()
-        .map_or((1024, 768), |d| (d.width as i32, d.height as i32));
-
     let (mut rl, thread) = raylib::init()
         .size(win0_w, win0_h)
         .title(&format!(
@@ -394,6 +408,9 @@ fn main() -> Result<()> {
     // being declared after `rl` it is dropped (and unloaded) BEFORE the
     // window closes — both on normal exit and on panic unwinding.
     let mut grid = dir_grid;
+    // Active page grid stack: `home_grid` holds the directory grid while a
+    // document's page-overview grid is open on top of it (one level deep).
+    let mut home_grid: Option<Grid> = None;
     // Image-view state: what is shown and how it is framed. Its Loader field
     // drops (and cancels the worker) before the window closes, like `grid`.
     let mut st = ViewState {
@@ -416,6 +433,13 @@ fn main() -> Result<()> {
         loader: None,
         blur_bg: BlurBg::from_env(),
     };
+    // A single-file multi-page document (PDF) launches into its page grid;
+    // single-file images launch into the image view.
+    if let Some(doc) = single_doc
+        && doc.page_count() > 1
+    {
+        grid = Some(Grid::from_document(doc));
+    }
     if let Some(decoded) = single_decoded {
         st.view_tex = Some(upload_rgba(
             &mut rl,
@@ -616,6 +640,27 @@ fn main() -> Result<()> {
             // the grid is the home view).
             match grid.as_mut().unwrap().handle_input(&mut rl, win_w, win_h) {
                 GridAction::Open(i) => {
+                    // PDF entries open a page-overview grid (one entry per
+                    // page, decoded on the same rayon pool) instead of the
+                    // image view; ESC pops back to the directory grid.
+                    if let EntrySource::File(p) = &grid.as_ref().unwrap().entries[i].source
+                        && crate::document::is_pdf(p)
+                    {
+                        match open_document(p) {
+                            Ok(doc) if doc.page_count() > 1 => {
+                                home_grid = grid.take();
+                                grid = Some(Grid::from_document(doc));
+                                continue;
+                            }
+                            Ok(_) => {} // single-page PDF: open like an image
+                            Err(err) => {
+                                eprintln!("vv: {err:#}");
+                                let id = grid.as_ref().unwrap().entries[i].id;
+                                grid.as_mut().unwrap().mark_failed(id, format!("{err:#}"));
+                                continue;
+                            }
+                        }
+                    }
                     if debug {
                         eprintln!("vv: enter pressed -> open idx {i}");
                     }
@@ -628,6 +673,13 @@ fn main() -> Result<()> {
                         (win_w, win_h),
                         true,
                     );
+                }
+                GridAction::Back => {
+                    // ESC on a page-overview grid: pop it (its textures drop
+                    // with it) and restore the directory grid.
+                    if let Some(home) = home_grid.take() {
+                        grid = Some(home);
+                    }
                 }
                 GridAction::Quit => quit = true,
                 GridAction::None => {}

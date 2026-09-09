@@ -77,7 +77,7 @@ pub fn open_document(path: &Path) -> Result<Arc<dyn Document>> {
     // Not PDF: let the `image` crate sniff it. (Sniffing here doubles as a
     // validity check; render() would report the error otherwise.)
     image::ImageReader::open(path)
-        .and_then(|r| r.with_guessed_format())
+        .and_then(image::ImageReader::with_guessed_format)
         .and_then(|r| {
             r.format().ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::InvalidData, "unknown image format")

@@ -21,13 +21,29 @@ use std::{
     cell::RefCell,
     collections::HashSet,
     path::{Path, PathBuf},
-    sync::mpsc::{Receiver, Sender, channel},
+    sync::{
+        Arc,
+        mpsc::{Receiver, Sender, channel},
+    },
 };
 
 use anyhow::{Context, Result};
 use raylib::{color::Color, prelude::*};
 
-use crate::blurbg::{self, BlurData};
+use crate::{
+    blurbg::{self, BlurData},
+    document::{Document, downscale_rgba, open_document},
+};
+
+/// What a grid cell shows: an image/PDF file (directory grid) or one page of
+/// an open document (page grid).
+#[derive(Clone)]
+pub enum EntrySource {
+    /// A file on disk. Decoded lazily: `open_document` at decode time.
+    File(PathBuf),
+    /// Page `page` of an already-open document (page grid).
+    DocPage { doc: Arc<dyn Document>, page: usize },
+}
 
 const MARGIN: f32 = 8.0;
 const GAP: f32 = 8.0;
@@ -73,11 +89,12 @@ type Layout = (usize, f32, f32, f32, f32);
 /// Cache key: entry count + bit patterns of window size and zoom.
 type LayoutKey = (usize, u32, u32, u32);
 
-/// One grid cell: the image file plus its uploaded full-resolution texture
-/// (thumbs are drawn by cropping a center square, so a resize never needs a
+/// One grid cell: a source (file or document page) plus its uploaded
+/// full-resolution texture (image thumbs are drawn by cropping a center
+/// square; document pages are drawn aspect-fit, so a resize never needs a
 /// re-decode; the GPU scales it down every frame).
 pub struct GridEntry {
-    pub path: PathBuf,
+    pub source: EntrySource,
     /// Full-resolution image dimensions (as decoded; not the thumb's).
     pub width: u32,
     pub height: u32,
@@ -112,12 +129,17 @@ pub enum GridAction {
     None,
     /// Open the grid entry at this index in image mode.
     Open(usize),
+    /// Leave this grid (ESC on a page grid; back to the previous grid).
+    Back,
     Quit,
 }
 
 pub struct Grid {
     pub entries: Vec<GridEntry>,
     pub selected: usize,
+    /// True for the directory grid (the home view; ESC does nothing there),
+    /// false for page grids pushed on top of it (ESC goes back).
+    pub root: bool,
     result_tx: Sender<DecodeResult>,
     result_rx: Receiver<DecodeResult>,
     inflight: usize,
@@ -162,7 +184,7 @@ impl Grid {
                 .into_iter()
                 .enumerate()
                 .map(|(i, path)| GridEntry {
-                    path,
+                    source: EntrySource::File(path),
                     width: 0,
                     height: 0,
                     texture: None,
@@ -175,6 +197,7 @@ impl Grid {
                 })
                 .collect(),
             selected: 0,
+            root: true,
             result_tx: res_tx,
             result_rx: res_rx,
             inflight: 0,
@@ -187,11 +210,70 @@ impl Grid {
         })
     }
 
+    /// Build a page-overview grid for an open document: one entry per page.
+    /// Entries start texture-less; decoding dispatches like any other grid
+    /// (rayon pool, priority = selection neighbors). ESC pops back out.
+    // Takes the Arc by value for API symmetry with from_dir (and because
+    // the entries clone it anyway); the original is dropped at the end.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn from_document(doc: Arc<dyn Document>) -> Grid {
+        let entries = (0..doc.page_count())
+            .map(|page| {
+                // Natural size known up front (PDF points); failures fall
+                // back to 0x0 and the decode job reports the real error.
+                let (width, height) = doc.page_info(page).map_or((0, 0), |i| (i.width, i.height));
+                GridEntry {
+                    source: EntrySource::DocPage {
+                        doc: doc.clone(),
+                        page,
+                    },
+                    width,
+                    height,
+                    texture: None,
+                    full: None,
+                    id: page as u64,
+                    queued: false,
+                    failed: None,
+                    viewing: false,
+                    blur: None,
+                }
+            })
+            .collect();
+        let (res_tx, res_rx) = channel::<DecodeResult>();
+        Grid {
+            entries,
+            selected: 0,
+            root: false,
+            result_tx: res_tx,
+            result_rx: res_rx,
+            inflight: 0,
+            layout_cache: RefCell::new(None),
+            rep_dir: Default::default(),
+            zoom: 1.0,
+            scroll: 0.0,
+            blur_enabled: blurbg::enabled(),
+            blur_px: blurbg::blur_px(),
+        }
+    }
+
+    /// Human-readable label for log lines: file path or "page N of M".
+    fn label(&self, i: usize) -> String {
+        match &self.entries[i].source {
+            EntrySource::File(p) => p.display().to_string(),
+            EntrySource::DocPage { page, .. } => {
+                format!("page {} of {}", page + 1, self.entries.len())
+            }
+        }
+    }
+
     /// Drain finished background decodes (uploading textures, which needs
     /// the main thread) and hand out new jobs: `priority` indices first
     /// (neighbors of what is on screen), then a wraparound scan from
     /// `scan_start`. Runs every frame; never blocks. Entries whose texture
     /// is currently held by the image view are skipped.
+    // One frame's dispatch pipeline is intentionally linear (apply
+    // finished decodes, evict, dispatch); see main() too.
+    #[allow(clippy::too_many_lines)]
     pub fn load_pending(
         &mut self,
         rl: &mut RaylibHandle,
@@ -240,14 +322,14 @@ impl Grid {
                                         // opening falls back to streaming.
                                         eprintln!(
                                             "vv: {}: {err:#} (full-res texture skipped)",
-                                            e.path.display()
+                                            self.label(i)
                                         );
                                     }
                                 }
                             }
                         }
                         Err(err) => {
-                            eprintln!("vv: {}: {err:#}", self.entries[i].path.display());
+                            eprintln!("vv: {}: {err:#}", self.label(i));
                             let e = &mut self.entries[i];
                             e.queued = false;
                             e.failed = Some(format!("{err:#}"));
@@ -265,20 +347,21 @@ impl Grid {
                         && let Some(e) = self.entries.get_mut(i)
                         && e.full.is_none()
                     {
+                        let label = match &e.source {
+                            EntrySource::File(p) => p.display().to_string(),
+                            EntrySource::DocPage { page, .. } => format!("page {}", page + 1),
+                        };
                         match crate::upload_rgba(rl, thread, &full, fw, fh) {
                             Ok(ft) => e.full = Some(ft),
                             Err(err) => {
-                                eprintln!("vv: {}: {err:#}", e.path.display());
+                                eprintln!("vv: {label}: {err:#}");
                                 e.failed = Some(format!("{err:#}"));
                             }
                         }
                     }
                 }
                 Err(err) => {
-                    eprintln!(
-                        "vv: {}: decode failed: {err}",
-                        self.entries[i].path.display()
-                    );
+                    eprintln!("vv: {}: decode failed: {err}", self.label(i));
                     let e = &mut self.entries[i];
                     e.queued = false;
                     e.failed = Some(format!("decode failed: {err}"));
@@ -330,16 +413,24 @@ impl Grid {
             e.queued = true;
             self.inflight += 1;
             let id = e.id;
-            let path = e.path.clone();
+            let source = e.source.clone();
             let tx = self.result_tx.clone();
             let blur_enabled = self.blur_enabled;
             let blur_px = self.blur_px;
             rayon::spawn(move || {
-                let res = crate::decode_image(&path).map(|d| {
+                // Image files: open (sniff) + render page 0 at native size —
+                // a PDF in the directory grid decodes to its page-1 thumb.
+                // Document pages: render at 1.0 = natural size (PDF points,
+                // plenty for thumbnails; the GPU downscales per frame).
+                let res = match &source {
+                    EntrySource::File(path) => open_document(path).and_then(|d| d.render(0, 1.0)),
+                    EntrySource::DocPage { doc, page } => doc.render(*page, 1.0),
+                }
+                .map(|d| {
                     let blur = blur_enabled
                         .then(|| blurbg::small_blur(&d.rgba, d.width, d.height, blur_px));
                     let (thumb, tw, th) =
-                        crate::downscale_rgba(d.rgba.clone(), d.width, d.height, THUMB_LONG_SIDE);
+                        downscale_rgba(d.rgba.clone(), d.width, d.height, THUMB_LONG_SIDE);
                     (thumb, tw, th, blur, (d.rgba, d.width, d.height))
                 });
                 // Receiver gone (grid dropped): result is discarded and the
@@ -442,6 +533,7 @@ impl Grid {
         // queue every press event during the poll, so nothing is lost.
         let mut enter = false;
         let mut quit = false;
+        let mut back = false;
         let mut left = false;
         let mut right = false;
         let mut up = false;
@@ -454,6 +546,9 @@ impl Grid {
             match k {
                 KeyboardKey::KEY_ENTER | KeyboardKey::KEY_KP_ENTER => enter = true,
                 KeyboardKey::KEY_Q => quit = true,
+                // ESC: on a page grid, leave it (back to the directory
+                // grid). On the root grid ESC is inert — it never quits.
+                KeyboardKey::KEY_ESCAPE => back = true,
                 KeyboardKey::KEY_H | KeyboardKey::KEY_LEFT => left = true,
                 KeyboardKey::KEY_L | KeyboardKey::KEY_RIGHT => right = true,
                 KeyboardKey::KEY_K | KeyboardKey::KEY_UP => up = true,
@@ -557,6 +652,9 @@ impl Grid {
         if self.selected != old_sel || follow {
             self.ensure_visible(win_w, win_h);
         }
+        if back && !self.root {
+            return GridAction::Back;
+        }
         if enter {
             return GridAction::Open(self.selected);
         }
@@ -615,24 +713,51 @@ impl Grid {
             if cy + ch < 0.0 || cy > win_h {
                 continue;
             }
-            let thumb = Rectangle {
-                x: cx + (cw - side) / 2.0,
-                y: cy + (ch - side) / 2.0,
-                width: side,
-                height: side,
-            };
-            if let Some(tex) = &e.texture {
-                // The thumb texture keeps the image's aspect ratio; the
-                // square cell shows its center crop (draw-time crop, so a
-                // resize never needs a re-decode).
-                let tw = tex.width() as f32;
-                let th = tex.height() as f32;
-                let side = tw.min(th);
-                let src = Rectangle {
-                    x: (tw - side) / 2.0,
-                    y: (th - side) / 2.0,
+            // Thumbnails: image files crop a center square out of the
+            // full-aspect texture (GPU scales it down); document pages
+            // aspect-fit the whole page into the cell — cropping a text
+            // page would cut content away, and the point dimensions give
+            // the right shape.
+            let thumb = if let EntrySource::DocPage { .. } = &e.source {
+                let (ew, eh) = (e.width.max(1) as f32, e.height.max(1) as f32);
+                let s = (side / ew).min(side / eh);
+                let (fw, fh) = (ew * s, eh * s);
+                Rectangle {
+                    x: cx + (cw - fw) / 2.0,
+                    y: cy + (ch - fh) / 2.0,
+                    width: fw,
+                    height: fh,
+                }
+            } else {
+                Rectangle {
+                    x: cx + (cw - side) / 2.0,
+                    y: cy + (ch - side) / 2.0,
                     width: side,
                     height: side,
+                }
+            };
+            if let Some(tex) = &e.texture {
+                // Image files: the thumb texture keeps the image's aspect
+                // ratio and the square cell shows its center crop (draw-time
+                // crop, so a resize never needs a re-decode). Document pages:
+                // the whole texture draws aspect-fit into the cell.
+                let src = if let EntrySource::DocPage { .. } = &e.source {
+                    Rectangle {
+                        x: 0.0,
+                        y: 0.0,
+                        width: tex.width() as f32,
+                        height: tex.height() as f32,
+                    }
+                } else {
+                    let tw = tex.width() as f32;
+                    let th = tex.height() as f32;
+                    let side = tw.min(th);
+                    Rectangle {
+                        x: (tw - side) / 2.0,
+                        y: (th - side) / 2.0,
+                        width: side,
+                        height: side,
+                    }
                 };
                 d.draw_texture_pro(tex, src, thumb, Vector2::ZERO, 0.0, Color::WHITE);
             } else if e.failed.is_some() {
@@ -659,12 +784,23 @@ impl Grid {
     }
 }
 
-/// Is this path likely an image we can decode? (Grid directory filter.)
+/// Is this path likely something we can decode? (Grid directory filter.)
+/// PDFs included: they open a page-overview grid instead of an image view.
 fn is_image_path(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
         matches!(
             e.to_ascii_lowercase().as_str(),
-            "jpg" | "jpeg" | "png" | "jxl" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "tga"
+            "jpg"
+                | "jpeg"
+                | "png"
+                | "jxl"
+                | "gif"
+                | "webp"
+                | "bmp"
+                | "tif"
+                | "tiff"
+                | "tga"
+                | "pdf"
         )
     })
 }
@@ -885,8 +1021,40 @@ mod tests {
         let names: Vec<String> = grid
             .entries
             .iter()
-            .map(|e| e.path.file_name().unwrap().to_string_lossy().to_string())
+            .map(|e| match &e.source {
+                EntrySource::File(p) => p.file_name().unwrap().to_string_lossy().to_string(),
+                EntrySource::DocPage { .. } => unreachable!("dir grid only lists files"),
+            })
             .collect();
         assert_eq!(names, vec!["b.png", "c.png"]);
+    }
+
+    #[test]
+    fn from_document_builds_one_entry_per_page() {
+        // Multi-page document: one entry per page with point dimensions,
+        // non-root (ESC pops), textures decoded lazily like any other grid.
+        let doc =
+            crate::pdf::PdfDocument::from_data(crate::pdf::tests::MINIMAL_PDF.to_vec()).unwrap();
+        let grid = Grid::from_document(Arc::new(doc) as Arc<dyn Document>);
+        assert_eq!(grid.entries.len(), 1);
+        assert!(!grid.root);
+        assert_eq!(grid.entries[0].width, 612);
+        assert_eq!(grid.entries[0].height, 792);
+        assert!(matches!(
+            &grid.entries[0].source,
+            EntrySource::DocPage { page: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn pdf_extension_is_listed_and_decodes() {
+        // PDFs are in the grid filter; the decode path (open_document) must
+        // actually render them (page-1 thumb, letter page in points).
+        assert!(is_image_path(Path::new("doc.pdf")));
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("doc.pdf");
+        std::fs::write(&path, crate::pdf::tests::MINIMAL_PDF).unwrap();
+        let decoded = open_document(&path).unwrap().render(0, 1.0).unwrap();
+        assert_eq!((decoded.width, decoded.height), (612, 792));
     }
 }

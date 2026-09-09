@@ -16,6 +16,17 @@
 //! Every render runs inside `catch_unwind` and degrades to a decode failure
 //! message; the viewer never crashes on a bad file.
 
+// Pixel/point math mixes f32 (raylib units, page points) and f64 (the
+// clamped scale computation); the casts are deliberate and every value is
+// far below precision limits, so the pedantic cast lints are noise here.
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
+
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -42,8 +53,9 @@ pub struct PdfDocument {
 impl PdfDocument {
     /// Parse and validate the PDF file at `path`.
     pub fn open(path: &Path) -> Result<PdfDocument> {
-        let data = std::fs::read(path).with_context(|| format!("failed to read {path:?}"))?;
-        Self::from_data(data).with_context(|| format!("failed to parse PDF {path:?}"))
+        let data =
+            std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+        Self::from_data(data).with_context(|| format!("failed to parse PDF {}", path.display()))
     }
 
     pub(crate) fn from_data(data: Vec<u8>) -> Result<PdfDocument> {
@@ -56,7 +68,7 @@ impl PdfDocument {
         let dims = pdf
             .pages()
             .iter()
-            .map(|p| p.render_dimensions())
+            .map(hayro::hayro_syntax::page::Page::render_dimensions)
             .collect::<Vec<_>>();
         if dims.is_empty() {
             bail!("PDF has no pages");

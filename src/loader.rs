@@ -44,7 +44,7 @@ const CHUNK: usize = 256 * 1024;
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(100);
 /// Target for the cheap preview render's longest side, in pixels.
 const PREVIEW_TARGET: f32 = 600.0;
-/// VV_SLOW_STREAM=1: dribble chunks of this size with a pause between them
+/// `VV_SLOW_STREAM`=1: dribble chunks of this size with a pause between them
 /// until the first preview renders (or `SLOW_DRIBBLE_MAX` bytes have been
 /// dribbled), then continue normally — makes progressive decoding visible
 /// to the eye in debug runs.
@@ -77,6 +77,15 @@ pub enum LoaderMsg {
     Failed(String),
 }
 
+/// Worker settings captured once at `Loader` creation: blur-background
+/// computation and the preview buffer cap.
+struct StreamCfg {
+    blur_enabled: bool,
+    blur_px: u32,
+    /// Long-side cap for preview buffers (the screen never shows more).
+    preview_px: u32,
+}
+
 /// Handle for one in-flight page load. Drop to cancel.
 pub struct Loader {
     cancel: Arc<AtomicBool>,
@@ -94,19 +103,13 @@ impl Loader {
         let worker_cancel = cancel.clone();
         // Detached on purpose: the main thread never joins; the worker ends
         // on cancellation or when sends start failing (receiver dropped).
-        let blur_enabled = blurbg::enabled();
-        let blur_px = blurbg::blur_px();
+        let cfg = StreamCfg {
+            blur_enabled: blurbg::enabled(),
+            blur_px: blurbg::blur_px(),
+            preview_px,
+        };
         std::thread::spawn(move || {
-            if let Err(err) = stream_doc(
-                &doc,
-                page,
-                scale,
-                &worker_cancel,
-                &tx,
-                blur_enabled,
-                blur_px,
-                preview_px,
-            ) {
+            if let Err(err) = stream_doc(&doc, page, scale, &worker_cancel, &tx, &cfg) {
                 let _ = tx.send(LoaderMsg::Failed(format!("{err:#}")));
             }
         });
@@ -132,16 +135,14 @@ fn stream_doc(
     scale: f32,
     cancel: &AtomicBool,
     tx: &Sender<LoaderMsg>,
-    blur_enabled: bool,
-    blur_px: u32,
-    preview_px: u32,
+    cfg: &StreamCfg,
 ) -> Result<()> {
     if page == 0
         && let Some(path) = doc.stream_path()
     {
         // JPEG XL: progressive byte-stream decode with blurry previews (the
         // header message is sent when jxl-oxide parses the frame header).
-        return stream_jxl(path, cancel, tx, blur_enabled, blur_px, preview_px);
+        return stream_jxl(path, cancel, tx, cfg);
     }
 
     // Dimensions first, so the view can fit and lay out before pixels land.
@@ -157,12 +158,13 @@ fn stream_doc(
         let long = info.width.max(info.height).max(1) as f32;
         let ps = scale
             .min(PREVIEW_TARGET / long)
-            .min(preview_px.max(1) as f32 / long);
+            .min(cfg.preview_px.max(1) as f32 / long);
         if ps < scale
             && let Ok(preview) = doc.render(page, ps)
         {
-            let blur = blur_enabled
-                .then(|| blurbg::small_blur(&preview.rgba, preview.width, preview.height, blur_px));
+            let blur = cfg.blur_enabled.then(|| {
+                blurbg::small_blur(&preview.rgba, preview.width, preview.height, cfg.blur_px)
+            });
             let _ = tx.send(LoaderMsg::Preview {
                 rgba: preview.rgba,
                 width: preview.width,
@@ -173,8 +175,9 @@ fn stream_doc(
     }
 
     let decoded = doc.render(page, scale)?;
-    let blur = blur_enabled
-        .then(|| blurbg::small_blur(&decoded.rgba, decoded.width, decoded.height, blur_px));
+    let blur = cfg
+        .blur_enabled
+        .then(|| blurbg::small_blur(&decoded.rgba, decoded.width, decoded.height, cfg.blur_px));
     let _ = tx.send(LoaderMsg::Done {
         rgba: decoded.rgba,
         width: decoded.width,
@@ -190,11 +193,10 @@ fn stream_jxl(
     path: &Path,
     cancel: &AtomicBool,
     tx: &Sender<LoaderMsg>,
-    blur_enabled: bool,
-    blur_px: u32,
-    preview_px: u32,
+    cfg: &StreamCfg,
 ) -> Result<()> {
-    let mut file = std::fs::File::open(path).with_context(|| format!("failed to open {path:?}"))?;
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let slow = std::env::var_os("VV_SLOW_STREAM").is_some();
     let mut buf = vec![0u8; CHUNK];
     // `try_init` consumes the uninit image; keep it in an Option so the
@@ -255,9 +257,10 @@ fn stream_jxl(
                     // Previews never need full resolution (the screen is
                     // smaller); cap the long side so a 50 MP image does not
                     // allocate ~200 MB of RGBA per preview.
-                    let (rgba, width, height) = downscale_rgba(rgba, width, height, preview_px);
-                    let blur =
-                        blur_enabled.then(|| blurbg::small_blur(&rgba, width, height, blur_px));
+                    let (rgba, width, height) = downscale_rgba(rgba, width, height, cfg.preview_px);
+                    let blur = cfg
+                        .blur_enabled
+                        .then(|| blurbg::small_blur(&rgba, width, height, cfg.blur_px));
                     let _ = tx.send(LoaderMsg::Preview {
                         rgba,
                         width,
@@ -288,7 +291,9 @@ fn stream_jxl(
         .map_err(jxl_err)
         .with_context(|| format!("failed to render {}", path.display()))?;
     let (rgba, width, height) = fb_to_rgba(&render.image_all_channels())?;
-    let blur = blur_enabled.then(|| blurbg::small_blur(&rgba, width, height, blur_px));
+    let blur = cfg
+        .blur_enabled
+        .then(|| blurbg::small_blur(&rgba, width, height, cfg.blur_px));
     let _ = tx.send(LoaderMsg::Done {
         rgba,
         width,
