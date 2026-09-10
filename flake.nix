@@ -61,6 +61,15 @@
               "-isystem"
               "${pkgs.stdenv.cc.libc_dev}/include"
             ];
+            # Typst font directories (see src/typst.rs). The build bakes these
+            # store paths into the binary via option_env! (no /usr/share/fonts
+            # on nix; no fonts embedded either); the dev shell and the test
+            # run get the same paths as a runtime env var.
+            VV_NIX_FONT_PATHS = lib.makeSearchPath "share/fonts" [
+              pkgs.libertinus
+              pkgs.newcomputermodern
+              pkgs.dejavu_fonts
+            ];
           };
 
           # rpath link-args so the binary finds the system libs at runtime.
