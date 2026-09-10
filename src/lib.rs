@@ -27,6 +27,7 @@ pub mod grid;
 pub mod keyrepeat;
 pub mod loader;
 pub mod pdf;
+pub mod typst;
 #[cfg(target_os = "linux")]
 pub mod wmclass;
 
