@@ -22,9 +22,9 @@ pub struct DecodedImage {
 }
 
 /// Static dimensions of one page, in its natural units:
-/// pixels for image documents, PostScript points (1/72 inch) for PDFs.
-/// [`Document::render`] scale 1.0 maps these 1:1 to pixels.
-#[derive(Clone, Copy)]
+/// pixels for image documents, PostScript points (1/72 inch) for PDFs and
+/// Typst pages. [`Document::render`] scale 1.0 maps these 1:1 to pixels.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PageInfo {
     pub width: u32,
     pub height: u32,
@@ -74,6 +74,10 @@ pub fn open_document(path: &Path) -> Result<Arc<dyn Document>> {
     if is_pdf(path) {
         return Ok(Arc::new(crate::pdf::PdfDocument::open(path)?));
     }
+    // Typst: extension decides (.typ is plain UTF-8 text, no magic to sniff).
+    if is_typst(path) {
+        return Ok(Arc::new(crate::typst::TypstDocument::open(path)?));
+    }
     // Not PDF: let the `image` crate sniff it. (Sniffing here doubles as a
     // validity check; render() would report the error otherwise.)
     image::ImageReader::open(path)
@@ -91,6 +95,19 @@ pub fn open_document(path: &Path) -> Result<Arc<dyn Document>> {
 /// extension, so misnamed files still route correctly.
 pub fn is_pdf(path: &Path) -> bool {
     file_magic_at_least(path, 5) == Some(b"%PDF-".into())
+}
+
+/// Is this a Typst source file? Pure extension check: `.typ` is plain
+/// UTF-8 with no magic bytes to sniff (any prefix could be a real document).
+pub fn is_typst(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("typ"))
+}
+
+/// Formats that open as a page-overview grid rather than a plain image
+/// (multi-page layouts): PDFs by content, Typst by extension.
+pub fn has_page_grid(path: &Path) -> bool {
+    is_pdf(path) || is_typst(path)
 }
 
 /// A plain image file (JPEG XL, PNG, JPEG, WebP, ...) — always one page.

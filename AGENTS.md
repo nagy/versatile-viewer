@@ -91,4 +91,13 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
    - Page view: n/p/Space navigate pages, g/G first/last; zoom re-renders
      the page at the settled scale (zathura/mupdf trick — sharp text at
      every resting zoom, preview-first like JXL progressive).
-10. Video playback (mpv inspiration; backend TBD).
+10. [ ] Typst rendering (experimental `typst` branch): opening a `.typ`
+   compiles it (typst/typst-render, pure Rust; file's directory is the
+   project root, `#include`/`#image` resolve) and shows the pages exactly
+   like a PDF (page grid, zoom re-render, previews). Fonts are NOT
+   embedded: `VV_TYPST_FONT_PATHS`/`TYPST_FONT_PATHS` (colon-separated
+   dirs), the nix build bakes its font store paths in (`VV_NIX_FONT_PATHS`),
+   non-nix systems fall back to the fontdb system scan. Compile errors
+   render as failed grid cells (`file:line:col: error: ...`); `.typ` has no
+   magic bytes, so routing is by extension; Typst packages are unsupported.
+11. Video playback (mpv inspiration; backend TBD).

@@ -785,7 +785,8 @@ impl Grid {
 }
 
 /// Is this path likely something we can decode? (Grid directory filter.)
-/// PDFs included: they open a page-overview grid instead of an image view.
+/// PDFs and Typst sources included: they open a page-overview grid instead
+/// of an image view.
 fn is_image_path(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
         matches!(
@@ -801,6 +802,7 @@ fn is_image_path(path: &Path) -> bool {
                 | "tiff"
                 | "tga"
                 | "pdf"
+                | "typ"
         )
     })
 }

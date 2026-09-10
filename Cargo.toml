@@ -30,6 +30,16 @@ rayon = "1"
 # (document.rs), so a pdfium fallback swap touches one file. Default
 # features: embedded standard-14 fonts + cmaps (~240 KB).
 hayro = "0.7"
+# Typst compile -> render pipeline (pure Rust). Confined to typst.rs.
+typst = "0.15"
+typst-layout = "0.15"
+typst-render = "0.15"
+# Font discovery (fontdb system scan + explicit paths). No embedded fonts:
+# fonts come from VV_TYPST_FONT_PATHS / TYPST_FONT_PATHS / system dirs, and
+# the nix build bakes its font store path in at compile time.
+typst-kit = { version = "0.15", default-features = false, features = [
+  "scan-fonts",
+] }
 
 [[bin]]
 name = "vv"

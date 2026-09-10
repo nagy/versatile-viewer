@@ -42,6 +42,7 @@ mod grid;
 mod keyrepeat;
 mod loader;
 mod pdf;
+mod typst;
 use blurbg::BlurBg;
 use document::{DecodedImage, MAX_TEXTURE_SIDE, PageInfo, downscale_rgba, open_document};
 use grid::{EntrySource, Grid, GridAction};
@@ -453,12 +454,14 @@ fn main() -> Result<()> {
         refine: None,
         blur_bg: BlurBg::from_env(),
     };
-    // A single-file multi-page document (PDF) launches into its page grid;
-    // single-file images launch into the image view.
+    // A single-file multi-page document (PDF, .typ) launches into its page
+    // grid; single-file images launch into the image view. `st.mode` was
+    // decided above from the (then absent) grid — fix it here.
     if let Some(doc) = single_doc
         && doc.page_count() > 1
     {
         grid = Some(Grid::from_document(doc));
+        st.mode = Mode::Grid;
     }
     if let Some(decoded) = single_decoded {
         st.view_tex = Some(upload_rgba(
@@ -669,11 +672,12 @@ fn main() -> Result<()> {
             // the grid is the home view).
             match grid.as_mut().unwrap().handle_input(&mut rl, win_w, win_h) {
                 GridAction::Open(i) => {
-                    // PDF entries open a page-overview grid (one entry per
-                    // page, decoded on the same rayon pool) instead of the
-                    // image view; ESC pops back to the directory grid.
+                    // Multi-page documents (PDFs and .typ files) open a
+                    // page-overview grid (one entry per page, decoded on the
+                    // same rayon pool) instead of the image view; ESC pops
+                    // back to the directory grid.
                     if let EntrySource::File(p) = &grid.as_ref().unwrap().entries[i].source
-                        && crate::document::is_pdf(p)
+                        && crate::document::has_page_grid(p)
                     {
                         match open_document(p) {
                             Ok(doc) if doc.page_count() > 1 => {
