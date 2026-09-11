@@ -551,11 +551,27 @@ impl Grid {
         }
         let old_sel = self.selected;
         let mut sel = self.selected;
-        if left && !sel.is_multiple_of(cols) {
-            sel -= 1;
+        // h/l wrap between rows: l on a row's rightmost element moves to the
+        // next row's first element, h on the leftmost moves back to the end of
+        // the previous row (never past the first/last element).
+        if left {
+            if sel.is_multiple_of(cols) {
+                if sel > 0 {
+                    sel -= 1; // first element of a row -> last of the previous
+                }
+            } else {
+                sel -= 1;
+            }
         }
-        if right && sel % cols != cols - 1 && sel + 1 < n {
-            sel += 1;
+        if right {
+            if sel % cols == cols - 1 {
+                let next = sel + (cols - sel % cols); // first element of the next row
+                if next < n {
+                    sel = next;
+                }
+            } else if sel + 1 < n {
+                sel += 1;
+            }
         }
         if up && sel >= cols {
             sel -= cols;

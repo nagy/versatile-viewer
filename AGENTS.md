@@ -69,7 +69,10 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
    neighbors, and prev/next while viewing. Opening an image fit-all
    (Shift+W behavior). Space/Backspace or n/p switch prev/next in image
    view (nsxiv-style; arrows and h/j/k/l stay panning); nav keys and grid
-   h/j/k/l auto-repeat while held, at the X server's rate (xset r rate).
+   h/j/k/l auto-repeat while held, at the X server's rate (xset r rate);
+   h/l wrap between rows (l on a row's last element moves to the next
+   row's first element, h on the leftmost moves to the previous row's
+   end).
    g/G jump to the first/last image (grid selection and image view).
    +/- zoom the grid thumbs (25% steps; default zoom fills the window
    exactly, zoom-out refits with smaller thumbs, zoom-in overflows and
