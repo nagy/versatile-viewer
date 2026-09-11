@@ -136,23 +136,32 @@ fn decode_jxl(path: &Path) -> Result<DecodedImage> {
     })
 }
 
-/// Convert a jxl-oxide framebuffer (f32 samples, 3 or 4 interleaved channels)
-/// to RGBA8, forcing alpha = 1.0 for opaque 3-channel data.
+/// Convert a jxl-oxide framebuffer (f32 samples, 1–4 interleaved channels)
+/// to RGBA8.
+///
+/// Grayscale (1 channel) is replicated into R/G/B; gray+alpha (2 channels)
+/// additionally takes alpha from channel 1. RGB (3 channels) gets alpha = 1,
+/// RGBA (4 channels) is taken as-is.
 pub(crate) fn fb_to_rgba(fb: &jxl_oxide::FrameBuffer) -> Result<(Vec<u8>, u32, u32)> {
     let width = fb.width() as u32;
     let height = fb.height() as u32;
     let channels = fb.channels();
     let samples = fb.buf();
-    if !matches!(channels, 3 | 4) {
+    if !matches!(channels, 1..=4) {
         bail!("unexpected channel count from jxl-oxide: {channels}");
     }
 
     let mut rgba = vec![0u8; width as usize * height as usize * 4];
     for (dst, src) in rgba.chunks_exact_mut(4).zip(samples.chunks_exact(channels)) {
-        dst[0] = to_u8(src[0]);
-        dst[1] = to_u8(src[1]);
-        dst[2] = to_u8(src[2]);
-        dst[3] = to_u8(src.get(3).copied().unwrap_or(1.0));
+        let g = to_u8(src[0]);
+        dst[0] = g;
+        dst[1] = if channels >= 3 { to_u8(src[1]) } else { g };
+        dst[2] = if channels >= 3 { to_u8(src[2]) } else { g };
+        dst[3] = if channels == 2 || channels == 4 {
+            to_u8(src[channels - 1])
+        } else {
+            255
+        };
     }
     Ok((rgba, width, height))
 }
@@ -1196,6 +1205,26 @@ mod tests {
         let container = dir.join("container.jxl");
         std::fs::write(&container, [0x00, 0x00, 0x00, 0x0c, b'J', b'X', b'L', b' ']).unwrap();
         assert!(is_jxl(&container));
+    }
+
+    #[test]
+    fn fb_to_rgba_replicates_grayscale() {
+        // 1 channel (grayscale): gray sample goes to R, G and B; alpha = 255.
+        let mut fb = jxl_oxide::FrameBuffer::new(2, 1, 1);
+        fb.buf_mut()[..2].copy_from_slice(&[0.0, 0.5]);
+        let (rgba, w, h) = fb_to_rgba(&fb).unwrap();
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(rgba, [0, 0, 0, 255, 128, 128, 128, 255]);
+    }
+
+    #[test]
+    fn fb_to_rgba_gray_alpha_takes_alpha() {
+        // 2 channels (gray + alpha): gray replicated, alpha from channel 1.
+        let mut fb = jxl_oxide::FrameBuffer::new(1, 1, 2);
+        fb.buf_mut()[..2].copy_from_slice(&[1.0, 0.5]);
+        let (rgba, w, h) = fb_to_rgba(&fb).unwrap();
+        assert_eq!((w, h), (1, 1));
+        assert_eq!(rgba, [255, 255, 255, 128]);
     }
 
     #[test]
