@@ -13,9 +13,11 @@
 //! parallel); the main thread only drains finished decodes and uploads
 //! textures (which needs the GL context). Jobs are dispatched
 //! priority-first: the neighbors of whatever is on screen (grid selection,
-//! or the open image in image view) decode before the rest. This keeps
-//! frame times short, so key taps are never swallowed by decode stalls, and
-//! makes the neighbors ready to open instantly.
+//! or the open image in image view) decode before the rest; while the open
+//! image is still decoding in image view, everything else is paused, so it
+//! gets all the cores. This keeps frame times short, so key taps are never
+//! swallowed by decode stalls, and makes the neighbors ready to open
+//! instantly.
 
 use std::{
     cell::RefCell,
@@ -201,14 +203,18 @@ impl Grid {
     /// Drain finished background decodes (uploading textures, which needs
     /// the main thread) and hand out new jobs: `priority` indices first
     /// (neighbors of what is on screen), then a wraparound scan from
-    /// `scan_start`. Runs every frame; never blocks. Entries whose texture
-    /// is currently held by the image view are skipped.
+    /// `scan_start`. With `scan` false only `priority` entries are
+    /// dispatched and the rest of the queue is paused — the image view
+    /// sets this while the open image is still decoding, so the visible
+    /// image gets all the cores. Runs every frame; never blocks. Entries
+    /// whose texture is currently held by the image view are skipped.
     pub fn load_pending(
         &mut self,
         rl: &mut RaylibHandle,
         thread: &RaylibThread,
         priority: &[usize],
         scan_start: usize,
+        scan: bool,
     ) {
         // Ids that should hold a full-resolution texture: the entry the
         // scan starts at (the selection or the open image) plus the
@@ -317,11 +323,13 @@ impl Grid {
         // extra dedup bookkeeping is needed — O(1) per entry.
         let n = self.entries.len();
         let start = scan_start.min(n);
-        let order = priority
-            .iter()
-            .copied()
-            .filter(|&i| i < n)
-            .chain((start..n).chain(0..start));
+        let order = priority.iter().copied().filter(|&i| i < n).chain(
+            scan.then(|| (start..n).chain(0..start))
+                .into_iter()
+                .flatten(),
+        );
+
+        // Full decodes.
         for i in order {
             if self.inflight >= max_inflight() {
                 break;

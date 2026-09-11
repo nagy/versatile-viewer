@@ -593,9 +593,12 @@ fn main() -> Result<()> {
 
         // Prefetch priority: in grid mode the selected entry's neighbors
         // (left/right/up/down); in image mode the previous/next entries.
+        // While the image view still waits for its own decode, only the
+        // open entry may decode and the rest of the queue is paused, so
+        // the visible image gets all the cores.
         // load_pending drains finished decodes (texture uploads happen here,
         // on the main thread) and dispatches new ones to the rayon pool.
-        let (priority, scan_start) = if st.mode == Mode::Image {
+        let (priority, scan_start, scan) = if st.mode == Mode::Image {
             match st
                 .open_id
                 .and_then(|id| grid.as_ref().and_then(|g| g.index_of(id)))
@@ -603,23 +606,31 @@ fn main() -> Result<()> {
                 Some(i) => {
                     let n = grid.as_ref().unwrap().entries.len();
                     let mut v = Vec::new();
-                    if i > 0 {
-                        v.push(i - 1);
+                    if st.view_loading {
+                        v.push(i);
+                    } else {
+                        if i > 0 {
+                            v.push(i - 1);
+                        }
+                        if i + 1 < n {
+                            v.push(i + 1);
+                        }
                     }
-                    if i + 1 < n {
-                        v.push(i + 1);
-                    }
-                    (v, i)
+                    (v, i, !st.view_loading)
                 }
-                None => (Vec::new(), 0),
+                None => (Vec::new(), 0, true),
             }
         } else if let Some(g) = grid.as_ref() {
-            (g.prefetch_neighbors(g.selected, win_w, win_h), g.selected)
+            (
+                g.prefetch_neighbors(g.selected, win_w, win_h),
+                g.selected,
+                true,
+            )
         } else {
-            (Vec::new(), 0)
+            (Vec::new(), 0, true)
         };
         if let Some(g) = grid.as_mut() {
-            g.load_pending(&mut rl, &thread, &priority, scan_start);
+            g.load_pending(&mut rl, &thread, &priority, scan_start, scan);
         }
 
         // Image mode: drain the streaming loader first; texture uploads need
