@@ -42,6 +42,8 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
   crosshair) and grab point (blue ring), and traces grab/release/warp
   events.
 - `VV_SLOW_STREAM=1` — see milestone 7.
+- `VV_MCP_PORT` — TCP port for the MCP server (`--mcp` mode),
+  default 43077; see MCP_PLAN.md. (planned)
 - `VV_BLUR_BG=1` — gimmick: image-view background is a tiny blurred copy of
   the viewed image (`blurbg` module), scaled to cover the window (fit on the
   narrower side, overflow cropped), GPU-upscaled with bilinear filtering.
@@ -113,3 +115,7 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
    zooms (25% steps, center-anchored) in image view. Dotfiles are hidden;
    formats the grid lists must have matching image-crate features.
 9. Video playback (mpv inspiration; backend TBD).
+10. MCP server: `vv --mcp` starts blank (Idle mode); AI agent connects
+    over localhost MCP Streamable HTTP and pushes images into the
+    window (show_image / show_image_bytes / clear / get_status).
+    Plan: MCP_PLAN.md.
