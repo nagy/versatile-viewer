@@ -11,7 +11,10 @@
 //!
 //! Decoding runs on the shared rayon pool (several files decode in
 //! parallel); the main thread only drains finished decodes and uploads
-//! textures (which needs the GL context). Jobs are dispatched
+//! textures (which needs the GL context). A first wave of tiny jobs gives
+//! every JPEG XL entry a blurry DC preview from just the first 256 KB of
+//! the file, so cells show something immediately; the full decodes follow
+//! and replace the previews with sharp thumbs. Jobs are dispatched
 //! priority-first: the neighbors of whatever is on screen (grid selection,
 //! or the open image in image view) decode before the rest. This keeps
 //! frame times short, so key taps are never swallowed by decode stalls, and
@@ -57,17 +60,26 @@ fn max_inflight() -> usize {
 /// (the selection or open entry plus its prefetched neighbors), so VRAM
 /// stays bounded on large directories. The image view also shows the
 /// thumb as a full-frame placeholder while a decode catches up, so it
-/// must cover the whole image, not just its center square.
-const THUMB_LONG_SIDE: u32 = 1024;
+/// must cover the whole image, not just its center square. JXL preview
+/// thumbs (the blurry prefix-pass ones) use the same long side.
+pub(crate) const THUMB_LONG_SIDE: u32 = 1024;
 
-/// A finished background decode, matched to an entry by its unique id
+/// A finished background job, matched to an entry by its unique id
 /// (indices shift when entries come and go; ids never do).
-/// `blur` is the tiny blurred copy for the `VV_BLUR_BG` gimmick (None when
-/// the gimmick is off), computed here on the worker so the main thread
-/// never touches full-res pixels for it.
-struct DecodeResult {
-    id: u64,
-    res: anyhow::Result<DecodeOk>,
+enum DecodeResult {
+    /// Blurry JXL preview from the prefix pass (see
+    /// `crate::decode_jxl_prefix`); RGBA8, already downscaled to
+    /// `THUMB_LONG_SIDE`. `None` when there was nothing useful to show.
+    Preview {
+        id: u64,
+        thumb: Option<(Vec<u8>, u32, u32)>,
+    },
+    /// Full decode. Failed decodes carry the error (the cell stays
+    /// visible as a dimmed error square instead of silently vanishing).
+    Full {
+        id: u64,
+        res: anyhow::Result<DecodeOk>,
+    },
 }
 
 /// Successful decode payload: the thumbnail RGBA (whole image, aspect
@@ -104,6 +116,14 @@ pub struct GridEntry {
     pub full: Option<Texture2D>,
     /// Unique, stable id used to match async decode results.
     pub id: u64,
+    /// The preview pass was dispatched for this entry (or is not
+    /// applicable: non-JXL formats have no progressive data). Exactly one
+    /// preview attempt per entry, ever; the full decode replaces it.
+    preview_queued: bool,
+    /// `texture` holds the final (sharp) thumb, produced by the full
+    /// decode. A blurry JXL preview sets `texture` but not this flag, so
+    /// the full decode still runs for the entry.
+    thumb_final: bool,
     /// A decode job for this entry is queued or in flight.
     pub queued: bool,
     /// Set when the decode (or texture upload) failed; the cell stays
@@ -132,6 +152,10 @@ pub struct Grid {
     result_tx: Sender<DecodeResult>,
     result_rx: Receiver<DecodeResult>,
     inflight: usize,
+    /// Preview (prefix) jobs in flight; they share the rayon pool with the
+    /// full decodes but get their own budget, so a slow full decode never
+    /// starves the cheap preview wave.
+    preview_inflight: usize,
     /// Auto-repeat state for the four direction keys (h/j/k/l + arrows),
     /// indexed [left, right, up, down] (xset r rate values).
     rep_dir: [crate::keyrepeat::RepeatState; 4],
@@ -179,6 +203,8 @@ impl Grid {
                     texture: None,
                     full: None,
                     id: i as u64,
+                    preview_queued: false,
+                    thumb_final: false,
                     queued: false,
                     failed: None,
                     viewing: false,
@@ -189,6 +215,7 @@ impl Grid {
             result_tx: res_tx,
             result_rx: res_rx,
             inflight: 0,
+            preview_inflight: 0,
             layout_cache: RefCell::new(None),
             rep_dir: Default::default(),
             zoom: 1.0,
@@ -224,75 +251,103 @@ impl Grid {
             )
             .collect();
 
-        // 1. Apply finished decodes. Failed decodes mark their entry as
+        // 1. Apply finished jobs. Failed full decodes mark their entry as
         // failed (the cell stays visible, dimmed, with an error glyph)
         // instead of splicing it out, so the grid count never lies.
         while let Ok(res) = self.result_rx.try_recv() {
-            self.inflight -= 1;
-            let Some(i) = self.entries.iter().position(|e| e.id == res.id) else {
-                continue; // entry was spliced out meanwhile; drop the result
-            };
-            match res.res {
-                Ok((thumb, tw, th, blur, full)) if self.entries[i].texture.is_none() => {
-                    match crate::upload_rgba(rl, thread, &thumb, tw, th) {
-                        Ok(t) => {
-                            let (fw, fh) = (full.1, full.2);
-                            let e = &mut self.entries[i];
-                            e.width = fw;
-                            e.height = fh;
-                            e.texture = Some(t);
-                            e.blur = blur;
-                            e.queued = false;
-                            if keep.contains(&e.id) {
-                                match crate::upload_rgba(rl, thread, &full.0, fw, fh) {
+            match res {
+                DecodeResult::Preview { id, thumb } => {
+                    self.preview_inflight -= 1;
+                    // Obsolete results (entry gone, already sharp, or its
+                    // decode failed) and empty results (nothing decodable
+                    // in the prefix) drop silently — the full decode
+                    // reports real errors.
+                    if let Some((thumb, tw, th)) = thumb
+                        && let Some(e) = self.entries.iter_mut().find(|e| e.id == id)
+                        && e.texture.is_none()
+                        && !e.thumb_final
+                        && e.failed.is_none()
+                    {
+                        match crate::upload_rgba(rl, thread, &thumb, tw, th) {
+                            Ok(t) => e.texture = Some(t),
+                            // Non-fatal: the full decode brings the sharp
+                            // thumb anyway.
+                            Err(err) => eprintln!("vv: preview texture: {err:#}"),
+                        }
+                    }
+                }
+                DecodeResult::Full { id, res } => {
+                    self.inflight -= 1;
+                    let Some(i) = self.entries.iter().position(|e| e.id == id) else {
+                        continue; // entry was spliced out meanwhile; drop the result
+                    };
+                    match res {
+                        Ok((thumb, tw, th, blur, full)) if !self.entries[i].thumb_final => {
+                            // Replaces a blurry preview texture if one
+                            // landed meanwhile (Texture2D drop unloads it).
+                            match crate::upload_rgba(rl, thread, &thumb, tw, th) {
+                                Ok(t) => {
+                                    let (fw, fh) = (full.1, full.2);
+                                    let e = &mut self.entries[i];
+                                    e.width = fw;
+                                    e.height = fh;
+                                    e.texture = Some(t);
+                                    e.thumb_final = true;
+                                    e.blur = blur;
+                                    e.queued = false;
+                                    if keep.contains(&e.id) {
+                                        match crate::upload_rgba(rl, thread, &full.0, fw, fh) {
+                                            Ok(ft) => e.full = Some(ft),
+                                            Err(err) => {
+                                                // Non-fatal: the thumb still
+                                                // shows; opening falls back
+                                                // to streaming.
+                                                eprintln!(
+                                                    "vv: {}: {err:#} (full-res texture skipped)",
+                                                    e.path.display()
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    eprintln!("vv: {}: {err:#}", self.entries[i].path.display());
+                                    let e = &mut self.entries[i];
+                                    e.queued = false;
+                                    e.failed = Some(format!("{err:#}"));
+                                }
+                            }
+                        }
+                        Ok((_, _, _, _, (full, fw, fh))) => {
+                            // Re-decode of an entry whose final thumb
+                            // already exists (keep-set refill): only the
+                            // full-res texture is wanted — and only if the
+                            // entry is still in the keep set (it may have
+                            // been navigated away from meanwhile).
+                            self.entries[i].queued = false;
+                            if keep.contains(&id)
+                                && let Some(e) = self.entries.get_mut(i)
+                                && e.full.is_none()
+                            {
+                                match crate::upload_rgba(rl, thread, &full, fw, fh) {
                                     Ok(ft) => e.full = Some(ft),
                                     Err(err) => {
-                                        // Non-fatal: the thumb still shows;
-                                        // opening falls back to streaming.
-                                        eprintln!(
-                                            "vv: {}: {err:#} (full-res texture skipped)",
-                                            e.path.display()
-                                        );
+                                        eprintln!("vv: {}: {err:#}", e.path.display());
+                                        e.failed = Some(format!("{err:#}"));
                                     }
                                 }
                             }
                         }
                         Err(err) => {
-                            eprintln!("vv: {}: {err:#}", self.entries[i].path.display());
+                            eprintln!(
+                                "vv: {}: decode failed: {err}",
+                                self.entries[i].path.display()
+                            );
                             let e = &mut self.entries[i];
                             e.queued = false;
-                            e.failed = Some(format!("{err:#}"));
+                            e.failed = Some(format!("decode failed: {err}"));
                         }
                     }
-                }
-                Ok((_, _, _, _, (full, fw, fh))) => {
-                    // Re-decode of a thumb-only entry (keep-set refill):
-                    // the thumb already exists, so only the full-res
-                    // texture is wanted — and only if the entry is still
-                    // in the keep set (it may have been navigated away
-                    // from meanwhile).
-                    self.entries[i].queued = false;
-                    if keep.contains(&res.id)
-                        && let Some(e) = self.entries.get_mut(i)
-                        && e.full.is_none()
-                    {
-                        match crate::upload_rgba(rl, thread, &full, fw, fh) {
-                            Ok(ft) => e.full = Some(ft),
-                            Err(err) => {
-                                eprintln!("vv: {}: {err:#}", e.path.display());
-                                e.failed = Some(format!("{err:#}"));
-                            }
-                        }
-                    }
-                }
-                Err(err) => {
-                    eprintln!(
-                        "vv: {}: decode failed: {err}",
-                        self.entries[i].path.display()
-                    );
-                    let e = &mut self.entries[i];
-                    e.queued = false;
-                    e.failed = Some(format!("decode failed: {err}"));
                 }
             }
         }
@@ -307,14 +362,19 @@ impl Grid {
             }
         }
 
-        // 2. Dispatch new jobs: `priority` indices first (the selection's
-        // or the open image's neighbors), then a wraparound scan from
-        // `scan_start`. Jobs run on the shared rayon pool, so several
-        // decodes proceed in parallel; each sends its result back over the
-        // channel, and the main thread uploads the texture above. The
-        // per-entry checks below (texture present, queued, viewing) make
-        // revisiting a priority index in the wraparound harmless, so no
-        // extra dedup bookkeeping is needed — O(1) per entry.
+        // 2. Dispatch new jobs, two waves on the shared rayon pool.
+        //
+        // Wave 1: one tiny preview job per JXL entry, decoding only the
+        // first `PREFIX_BYTES` of the file into a blurry DC thumb. These
+        // run first, so the whole grid shows blurry thumbs within
+        // moments instead of black cells. Wave 2: the full decodes,
+        // `priority` indices first (the selection's or the open image's
+        // neighbors), then a wraparound scan from `scan_start`; several
+        // decodes proceed in parallel, each sends its result back over
+        // the channel, and the main thread uploads the texture above.
+        // The per-entry checks below (texture present, queued, viewing)
+        // make revisiting a priority index in the wraparound harmless,
+        // so no extra dedup bookkeeping is needed — O(1) per entry.
         let n = self.entries.len();
         let start = scan_start.min(n);
         let order = priority
@@ -322,6 +382,35 @@ impl Grid {
             .copied()
             .filter(|&i| i < n)
             .chain((start..n).chain(0..start));
+
+        // Wave 1: preview dispatch. `preview_queued` marks the pass as
+        // done even for non-JXL entries, so `is_jxl` (a 2-byte file read)
+        // runs at most once per entry.
+        for i in order.clone() {
+            if self.preview_inflight >= max_inflight() {
+                break;
+            }
+            let e = &mut self.entries[i];
+            if e.preview_queued || e.failed.is_some() || e.texture.is_some() {
+                continue;
+            }
+            e.preview_queued = true;
+            if !crate::is_jxl(&e.path) {
+                continue; // no progressive data; the full decode fills the cell
+            }
+            self.preview_inflight += 1;
+            let id = e.id;
+            let path = e.path.clone();
+            let tx = self.result_tx.clone();
+            rayon::spawn(move || {
+                let thumb = crate::decode_jxl_prefix(&path);
+                // Receiver gone (grid dropped): result is discarded and
+                // the job simply ends.
+                let _ = tx.send(DecodeResult::Preview { id, thumb });
+            });
+        }
+
+        // Wave 2: full decodes.
         for i in order {
             if self.inflight >= max_inflight() {
                 break;
@@ -330,12 +419,13 @@ impl Grid {
             if e.queued || e.viewing || e.failed.is_some() {
                 continue;
             }
-            // Decode when there is no thumb yet. Re-decode a thumb-only
-            // entry when it is in the keep set but its full-res texture is
-            // missing (its decode drained while outside the keep set, so
-            // the full texture was dropped then). Thumb-only entries
-            // outside the keep set are never re-decoded.
-            if e.texture.is_some() && !(keep.contains(&e.id) && e.full.is_none()) {
+            // Decode when there is no final thumb yet (a blurry preview
+            // texture does not count). Re-decode a thumb-only entry when
+            // it is in the keep set but its full-res texture is missing
+            // (its decode drained while outside the keep set, so the full
+            // texture was dropped then). Thumb-only entries outside the
+            // keep set are never re-decoded.
+            if e.thumb_final && !(keep.contains(&e.id) && e.full.is_none()) {
                 continue;
             }
             e.queued = true;
@@ -355,7 +445,7 @@ impl Grid {
                 });
                 // Receiver gone (grid dropped): result is discarded and the
                 // job simply ends.
-                let _ = tx.send(DecodeResult { id, res });
+                let _ = tx.send(DecodeResult::Full { id, res });
             });
         }
     }

@@ -136,6 +136,56 @@ fn decode_jxl(path: &Path) -> Result<DecodedImage> {
     })
 }
 
+/// Size of the JXL file prefix decoded for the grid's blurry preview wave.
+/// Big enough that the DC (8x-downsampled LF data) of typical photos is
+/// complete within it; the DC of a huge image can exceed it, and those are
+/// skipped anyway (see `PREVIEW_MAX_PIXELS`).
+const PREFIX_BYTES: u64 = 256 * 1024;
+
+/// Grid preview skips images with more pixels than this: the partial
+/// render allocates a full-size RGBA buffer (~4 bytes/pixel), and on huge
+/// images that transient spike is not worth a blurry preview that the
+/// full decode replaces shortly anyway.
+const PREVIEW_MAX_PIXELS: u64 = 64_000_000;
+
+/// Decode only the first `PREFIX_BYTES` of a JXL file and render the
+/// partial frame: a full-size but blurry (DC-only) image, downscaled to a
+/// `THUMB_LONG_SIDE` preview thumb. `None` on any failure or when there is
+/// nothing useful to show (header not complete within the prefix, image
+/// too large, no decodable pass yet) — the full decode reports real
+/// errors, so this stays silent.
+pub(crate) fn decode_jxl_prefix(path: &Path) -> Option<(Vec<u8>, u32, u32)> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut bytes = Vec::with_capacity(PREFIX_BYTES as usize);
+    (&mut file)
+        .take(PREFIX_BYTES)
+        .read_to_end(&mut bytes)
+        .ok()?;
+
+    let mut uninit = jxl_oxide::JxlImage::builder().build_uninit();
+    let consumed = uninit.feed_bytes(&bytes).ok()?;
+    let mut img = match uninit.try_init().ok()? {
+        // Header spans more than the prefix: no cheap preview.
+        jxl_oxide::InitializeResult::NeedMoreData(_) => return None,
+        jxl_oxide::InitializeResult::Initialized(img) => img,
+    };
+    let _ = img.feed_bytes(&bytes[consumed..]);
+
+    if u64::from(img.width()) * u64::from(img.height()) > PREVIEW_MAX_PIXELS {
+        return None;
+    }
+    let render = img.render_loading_frame().ok()?;
+    let (rgba, width, height) = crate::fb_to_rgba(&render.image_all_channels()).ok()?;
+    Some(crate::downscale_rgba(
+        rgba,
+        width,
+        height,
+        crate::grid::THUMB_LONG_SIDE,
+    ))
+}
+
 /// Convert a jxl-oxide framebuffer (f32 samples, 1–4 interleaved channels)
 /// to RGBA8.
 ///
@@ -188,7 +238,7 @@ fn decode_common(path: &Path) -> Result<DecodedImage> {
 /// is sniffed first (JXL codestream vs the common formats), and the .jxl
 /// extension only acts as a tiebreaker for unknown magic (JXL container
 /// files start with a box header, not the codestream magic).
-fn is_jxl(path: &Path) -> bool {
+pub(crate) fn is_jxl(path: &Path) -> bool {
     match file_magic(path) {
         Some([0xff, 0x0a]) => true, // raw JXL codestream
         Some(m) if is_common_magic(m) => false,

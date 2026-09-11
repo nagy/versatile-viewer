@@ -76,5 +76,8 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
    scrolls — mouse wheel + selection-follow). Mouse: click selects a grid
    cell, clicking the selected cell opens it; left-drag pans and wheel
    zooms (25% steps, center-anchored) in image view. Dotfiles are hidden;
-   formats the grid lists must have matching image-crate features.
+   formats the grid lists must have matching image-crate features. JXL grid
+   cells show a blurry DC preview first: a tiny prefix-decode job (first
+   256 KB of the file, own in-flight budget) fills the cell before the
+   full decode replaces it; skipped above 64 MP and for non-JXL formats.
 9. Video playback (mpv inspiration; backend TBD).
