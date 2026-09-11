@@ -28,8 +28,9 @@ use std::{env, path::Path};
 use anyhow::{Context, Result, bail};
 use raylib::{
     color::Color,
-    consts::{KeyboardKey, PixelFormat},
+    consts::{KeyboardKey, PixelFormat, TextureFilter},
     prelude::*,
+    texture::RaylibTexture2D,
 };
 
 mod blurbg;
@@ -98,6 +99,9 @@ struct ViewState {
     target_pan: Vector2,
     /// On-screen scale, eased toward the target scale each frame.
     view_scale: Option<f32>,
+    /// `a` toggles nearest-neighbor filtering (pixelated) for pixel
+    /// peeping; default smooth (bilinear).
+    pixelated: bool,
     /// Streaming loader for the open image; drop cancels the worker.
     loader: Option<Loader>,
     /// `VV_BLUR_BG` background (None when the gimmick is off). Declared after
@@ -310,17 +314,34 @@ fn show_frame(
     rgba: &[u8],
     width: u32,
     height: u32,
+    pixelated: bool,
 ) -> Result<()> {
     match view_tex {
         Some(tex) if tex.width() == width as i32 && tex.height() == height as i32 => {
-            use raylib::texture::RaylibTexture2D;
             tex.update_texture(rgba)?;
         }
         _ => {
-            *view_tex = Some(upload_rgba(rl, thread, rgba, width, height)?);
+            let tex = upload_rgba(rl, thread, rgba, width, height)?;
+            apply_view_filter(thread, &tex, pixelated);
+            *view_tex = Some(tex);
         }
     }
     Ok(())
+}
+
+/// Texture filter for the image view: bilinear by default (good for
+/// photos), `a` toggles nearest-neighbor (pixelated) for 1:1 pixel
+/// peeping. Grid thumbs always stay bilinear (heavily downscaled;
+/// nearest would alias badly).
+fn apply_view_filter(thread: &RaylibThread, tex: &Texture2D, pixelated: bool) {
+    tex.set_texture_filter(
+        thread,
+        if pixelated {
+            TextureFilter::TEXTURE_FILTER_POINT
+        } else {
+            TextureFilter::TEXTURE_FILTER_BILINEAR
+        },
+    );
 }
 
 /// Upload a tiny blurred copy as the image-view background (`VV_BLUR_BG`
@@ -399,6 +420,7 @@ fn show_entry(
     if let Some(tex) = tex {
         grid.entries[idx].viewing = true;
         st.view_from_grid = Some(id);
+        apply_view_filter(thread, &tex, st.pixelated);
         st.view_tex = Some(tex);
         st.img_w = w as f32;
         st.img_h = h as f32;
@@ -530,6 +552,7 @@ fn main() -> Result<()> {
         pan: Vector2::ZERO,
         target_pan: Vector2::ZERO,
         view_scale: None,
+        pixelated: false,
         loader: None,
         blur_bg: BlurBg::from_env(),
     };
@@ -541,6 +564,11 @@ fn main() -> Result<()> {
             decoded.width,
             decoded.height,
         )?);
+        apply_view_filter(
+            &thread,
+            st.view_tex.as_ref().expect("just uploaded"),
+            st.pixelated,
+        );
         drop(decoded.rgba);
         st.img_w = win0_w as f32;
         st.img_h = win0_h as f32;
@@ -681,7 +709,15 @@ fn main() -> Result<()> {
                             blur,
                         } => {
                             // Progressively better render of the same image.
-                            show_frame(&mut rl, &thread, &mut st.view_tex, &rgba, width, height)?;
+                            show_frame(
+                                &mut rl,
+                                &thread,
+                                &mut st.view_tex,
+                                &rgba,
+                                width,
+                                height,
+                                st.pixelated,
+                            )?;
                             attach_blur_bg(
                                 &mut st.blur_bg,
                                 &mut rl,
@@ -705,7 +741,15 @@ fn main() -> Result<()> {
                                 st.target_pan = Vector2::ZERO;
                                 st.view_scale = Some((win_w / st.img_w).min(win_h / st.img_h));
                             }
-                            show_frame(&mut rl, &thread, &mut st.view_tex, &rgba, width, height)?;
+                            show_frame(
+                                &mut rl,
+                                &thread,
+                                &mut st.view_tex,
+                                &rgba,
+                                width,
+                                height,
+                                st.pixelated,
+                            )?;
                             attach_blur_bg(
                                 &mut st.blur_bg,
                                 &mut rl,
@@ -781,6 +825,7 @@ fn main() -> Result<()> {
             // first/last image.
             let mut enter = false;
             let mut quit_pressed = false;
+            let mut pixelated_toggle = false;
             let mut nav_next_edge = false;
             let mut nav_prev_edge = false;
             let mut jump_first = false;
@@ -795,6 +840,7 @@ fn main() -> Result<()> {
                         enter = true;
                     }
                     KeyboardKey::KEY_Q => quit_pressed = true,
+                    KeyboardKey::KEY_A => pixelated_toggle = true,
                     KeyboardKey::KEY_SPACE | KeyboardKey::KEY_N => nav_next_edge = true,
                     KeyboardKey::KEY_BACKSPACE | KeyboardKey::KEY_P => nav_prev_edge = true,
                     KeyboardKey::KEY_G => {
@@ -859,6 +905,15 @@ fn main() -> Result<()> {
             let mut return_to_grid = false;
             if quit_pressed {
                 quit = true; // single-file launch: no grid to fall back to
+            }
+            // `a`: toggle smooth (bilinear, default) vs pixelated
+            // (nearest-neighbor) filtering for the shown texture; the flag
+            // is re-applied to every texture that arrives later.
+            if pixelated_toggle {
+                st.pixelated = !st.pixelated;
+                if let Some(tex) = &st.view_tex {
+                    apply_view_filter(&thread, tex, st.pixelated);
+                }
             }
             if grid.is_some() && enter {
                 return_to_grid = true;
