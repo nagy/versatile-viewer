@@ -37,7 +37,18 @@ const GRID_ZOOM_STEP: f32 = 1.25;
 const GRID_MIN_SIDE: f32 = 32.0;
 /// Maximum number of decodes in flight at once (jobs run in parallel on the
 /// shared rayon pool; jxl-oxide parallelizes each decode further inside).
-const MAX_INFLIGHT: usize = 6;
+/// One job per logical core, at least 2: JPEG/PNG decodes via the `image`
+/// crate are single-threaded per file, so the cap decides how many cores
+/// actually work on a large directory.
+fn max_inflight() -> usize {
+    use std::sync::OnceLock;
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::thread::available_parallelism()
+            .map_or(2, |n| n.get())
+            .max(2)
+    })
+}
 
 /// Long side of the thumbnail texture stored per grid entry: the whole
 /// image, aspect preserved (the square crop for grid cells happens at
@@ -65,7 +76,7 @@ struct DecodeResult {
 /// entry but uploads the full texture only for keep-set entries
 /// (selection/open + prefetched neighbors), dropping the rest. The
 /// buffers live only until the next frame drains them, bounded by
-/// `MAX_INFLIGHT`.
+/// `max_inflight()`.
 type DecodeOk = (Vec<u8>, u32, u32, Option<BlurData>, (Vec<u8>, u32, u32));
 
 /// Grid layout: (`cols`, `cell_w`, `cell_h`, `side`, `content_h`).
@@ -312,7 +323,7 @@ impl Grid {
             .filter(|&i| i < n)
             .chain((start..n).chain(0..start));
         for i in order {
-            if self.inflight >= MAX_INFLIGHT {
+            if self.inflight >= max_inflight() {
                 break;
             }
             let e = &mut self.entries[i];
