@@ -1091,11 +1091,17 @@ fn main() -> Result<()> {
                 let dw = st.img_w * st.view_scale.unwrap();
                 let dh = st.img_h * st.view_scale.unwrap();
 
+                // Source rect in texture pixels — NOT the logical image
+                // size: uploads clamp oversized textures to
+                // MAX_TEXTURE_SIDE (and streaming previews to the screen
+                // size), so the texture can be smaller than st.img_w/h.
+                // A src rect larger than the texture produces UVs > 1,
+                // which raylib's repeat wrap renders as a tiled mosaic.
                 let src = Rectangle {
                     x: 0.0,
                     y: 0.0,
-                    width: st.img_w,
-                    height: st.img_h,
+                    width: texture.width() as f32,
+                    height: texture.height() as f32,
                 };
                 let dest = Rectangle {
                     x: (win_w - dw) / 2.0 + st.pan.x,
