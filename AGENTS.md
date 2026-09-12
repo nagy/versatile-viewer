@@ -50,7 +50,9 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
 5. [x] Free zoom: `+`/`-` (also numpad, layout-independent via typed
    character), 25% steps; zoom animates smoothly (exponential ease,
    ~150 ms) toward the target scale. Window resize snaps scale/pan
-   instantly (no ease glide after the new fit).
+   instantly (no ease glide after the new fit); resizes are detected by
+   comparing the window size across frames, so a tiling WM shrinking the
+   freshly spawned window also snaps (raylib's resize flag can miss it).
 6. [x] Zoom anchored at the window center (free zoom eases while keeping
    the image point under the window center fixed). Wheel zoom still open.
 7. [x] jxl-oxide progressive decoding (stream bytes, render preview

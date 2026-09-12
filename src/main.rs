@@ -588,6 +588,9 @@ fn main() -> Result<()> {
     // Auto-repeat state for image-mode prev/next (xset r rate values).
     let mut rep_nav_fwd = keyrepeat::RepeatState::new();
     let mut rep_nav_back = keyrepeat::RepeatState::new();
+    // Previous frame's window size: self-tracked resize detection (see the
+    // `resized` computation in the loop).
+    let mut last_win: Option<(f32, f32)> = None;
 
     while !rl.window_should_close() && !quit {
         // VV_DEBUG: trace every key raylib sees (keycode per raylib/GLFW:
@@ -618,6 +621,13 @@ fn main() -> Result<()> {
         }
         let win_w = rl.get_screen_width() as f32;
         let win_h = rl.get_screen_height() as f32;
+        // Resize detection done ourselves: `is_window_resized()` can miss a
+        // WM-reflow resize that lands around the time the window becomes
+        // visible (tiling WMs shrink the freshly spawned window into its
+        // tile), so the fit ease glides "out of nowhere". Any size difference
+        // from the previous frame counts as a resize frame.
+        let resized = last_win != Some((win_w, win_h));
+        last_win = Some((win_w, win_h));
 
         // Prefetch priority: in grid mode the selected entry's neighbors
         // (left/right/up/down); in image mode the previous/next entries.
@@ -1011,7 +1021,6 @@ fn main() -> Result<()> {
                 // smoothly (~95% of the way after 150 ms; snap when close enough).
                 // On a window resize, snap instead: the new fit target should
                 // track the window edge instantly, not glide after it.
-                let resized = rl.is_window_resized();
                 let prev_scale = st.view_scale;
                 let alpha = 1.0 - (-rl.get_frame_time() / 0.05).exp();
                 st.view_scale = Some(match st.view_scale {
