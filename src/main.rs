@@ -1009,10 +1009,14 @@ fn main() -> Result<()> {
 
                 // Ease the on-screen scale toward the target so zoom steps animate
                 // smoothly (~95% of the way after 150 ms; snap when close enough).
+                // On a window resize, snap instead: the new fit target should
+                // track the window edge instantly, not glide after it.
+                let resized = rl.is_window_resized();
                 let prev_scale = st.view_scale;
                 let alpha = 1.0 - (-rl.get_frame_time() / 0.05).exp();
                 st.view_scale = Some(match st.view_scale {
                     None => target_scale,
+                    Some(_) if resized => target_scale,
                     Some(s) => {
                         let s = s + (target_scale - s) * alpha;
                         if (target_scale - s).abs() < target_scale * 0.001 {
@@ -1102,6 +1106,11 @@ fn main() -> Result<()> {
                 }
                 if pan_down {
                     st.target_pan.y -= speed;
+                }
+                // On a resize frame, snap pan too so it doesn't glide after the
+                // new fit offset (matches the scale snap above).
+                if resized {
+                    st.pan = st.target_pan;
                 }
                 let pan_alpha = 1.0 - (-rl.get_frame_time() / 0.05).exp();
                 st.pan = Vector2 {
