@@ -37,6 +37,8 @@ mod blurbg;
 mod grid;
 mod keyrepeat;
 mod loader;
+#[cfg(target_os = "linux")]
+mod wmclass;
 use blurbg::BlurBg;
 use grid::{Grid, GridAction};
 use loader::{Loader, LoaderMsg};
@@ -538,6 +540,13 @@ fn main() -> Result<()> {
         // fight a non-60 Hz monitor (judder) and add input latency.
         .vsync()
         .build();
+    // WM_CLASS: raylib derives it from the creation title (full path —
+    // unusable for window rules); stamp "vv" on X11, no-op on Wayland.
+    #[cfg(target_os = "linux")]
+    // SAFETY: handle only read; valid while the window is open.
+    unsafe {
+        wmclass::set_class(rl.get_window_handle())
+    };
     // We quit via the q key handling ourselves (set_exit_key would make ESC
     // close the window outright instead of returning to the grid).
     rl.set_exit_key(None);

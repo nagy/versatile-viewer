@@ -21,6 +21,9 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
     treefmt wrapper included)
 - Run: `nix run . -- <image-path>`; q quits, ESC/Enter toggle grid ↔ image
   view (ESC never quits). Binary name: `vv`.
+- X11: WM_CLASS stamped to `vv` (both res_name and res_class) after window
+  creation via `XSetClassHint` (`src/wmclass.rs`) — raylib only derives it
+  from the window title, which carries the full path. No-op on Wayland.
 
 ## Env vars
 

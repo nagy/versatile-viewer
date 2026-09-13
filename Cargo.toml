@@ -26,6 +26,11 @@ raylib = "6"
 # uses rayon internally for single-image decode (its default feature).
 rayon = "1"
 
+# X11 WM_CLASS setup (XSetClassHint); Linux only, links the same libX11
+# raylib's X11 backend already pulls in.
+[target.'cfg(target_os = "linux")'.dependencies]
+x11 = "2.21"
+
 [[bin]]
 name = "vv"
 path = "src/main.rs"
