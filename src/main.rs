@@ -1112,7 +1112,9 @@ fn main() -> Result<()> {
                 if zoom_in || zoom_out {
                     let factor = if zoom_in { 1.25 } else { 1.0 / 1.25 };
                     st.zoom = ZoomMode::Free((target_scale * factor).clamp(0.01, 100.0));
-                    st.zoom_anchor = Some(rl.get_mouse_position());
+                    // Keyboard zoom centers on the picture, not the cursor:
+                    // None falls back to the window center anchor.
+                    st.zoom_anchor = None;
                 }
                 // Mouse wheel zooms free-mode with the same 25% steps, anchored
                 // at the cursor: while the scale eases, the image point under
@@ -1198,6 +1200,7 @@ fn main() -> Result<()> {
                     };
                     let a = st.zoom_anchor.unwrap_or(center);
                     let (ax, ay) = (a.x, a.y);
+                    let keyboard_zoom = st.zoom_anchor.is_none();
                     let r = scale / s_old;
                     let ox = ax - (ax - (win_w - st.img_w * s_old) / 2.0 - st.pan.x) * r;
                     let oy = ay - (ay - (win_h - st.img_h * s_old) / 2.0 - st.pan.y) * r;
@@ -1209,13 +1212,16 @@ fn main() -> Result<()> {
                     let d = (center - a) * (alpha * ZOOM_ANCHOR_DRIFT);
                     st.pan.x += d.x;
                     st.pan.y += d.y;
-                    st.zoom_anchor = Some(a + d);
+                    if !keyboard_zoom {
+                        st.zoom_anchor = Some(a + d);
+                    }
                     // Pin the target too, so pan easing doesn't fight the anchor.
                     st.target_pan.x = st.pan.x;
                     st.target_pan.y = st.pan.y;
                     // Ride the pointer along with the drifted image point
-                    // (never while a drag has it captured).
-                    if !pointer_captured {
+                    // (never while a drag has it captured; keyboard zoom
+                    // leaves the cursor wherever it is).
+                    if !keyboard_zoom && !pointer_captured {
                         if debug {
                             eprintln!("vv: zoom drift anchor to ({ax:.0},{ay:.0})");
                         }
