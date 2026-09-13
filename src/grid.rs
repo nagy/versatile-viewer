@@ -557,7 +557,7 @@ impl Grid {
         if left {
             if sel.is_multiple_of(cols) {
                 if sel > 0 {
-                    sel -= 1; // first element of a row -> last of the previous
+                    sel = sel.saturating_sub(1); // first element of a row -> last of the previous
                 }
             } else {
                 sel -= 1;

@@ -61,8 +61,9 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
    instantly (no ease glide after the new fit); resizes are detected by
    comparing the window size across frames, so a tiling WM shrinking the
    freshly spawned window also snaps (raylib's resize flag can miss it).
-6. [x] Zoom anchored at the window center (free zoom eases while keeping
-   the image point under the window center fixed). Wheel zoom still open.
+6. [x] Zoom anchored at the cursor (free zoom eases while keeping the image
+   point under the mouse fixed; anchor captured when the step starts,
+   falls back to window center). Wheel zoom still open.
 7. [x] jxl-oxide progressive decoding (stream bytes, render preview
    early; image view only — grid thumbs stay full-decode).
    `VV_SLOW_STREAM=1` dribbles 4 KB chunks with 1 s pauses until the

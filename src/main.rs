@@ -99,6 +99,10 @@ struct ViewState {
     target_pan: Vector2,
     /// On-screen scale, eased toward the target scale each frame.
     view_scale: Option<f32>,
+    /// Window-space point the running zoom eases around: captured from the
+    /// mouse position when a zoom step starts (+/- or wheel). None falls back
+    /// to the window center (e.g. easing still running from an earlier step).
+    zoom_anchor: Option<Vector2>,
     /// `a` toggles nearest-neighbor filtering (pixelated) for pixel
     /// peeping; default smooth (bilinear).
     pixelated: bool,
@@ -117,6 +121,7 @@ impl ViewState {
         self.zoom = ZoomMode::FitAll;
         self.pan = Vector2::ZERO;
         self.target_pan = Vector2::ZERO;
+        self.zoom_anchor = None;
         self.view_scale = None;
     }
 }
@@ -559,6 +564,7 @@ fn main() -> Result<()> {
         pan: Vector2::ZERO,
         target_pan: Vector2::ZERO,
         view_scale: None,
+        zoom_anchor: None,
         pixelated: false,
         loader: None,
         blur_bg: BlurBg::from_env(),
@@ -1101,13 +1107,16 @@ fn main() -> Result<()> {
                 if zoom_in || zoom_out {
                     let factor = if zoom_in { 1.25 } else { 1.0 / 1.25 };
                     st.zoom = ZoomMode::Free((target_scale * factor).clamp(0.01, 100.0));
+                    st.zoom_anchor = Some(rl.get_mouse_position());
                 }
-                // Mouse wheel zooms free-mode with the same 25% steps; the
-                // center-anchored easing below keeps the zoom anchored.
+                // Mouse wheel zooms free-mode with the same 25% steps, anchored
+                // at the cursor: while the scale eases, the image point under
+                // the mouse stays put.
                 let wheel = rl.get_mouse_wheel_move();
                 if wheel != 0.0 {
                     let factor = 1.25f32.powf(wheel);
                     st.zoom = ZoomMode::Free((target_scale * factor).clamp(0.01, 100.0));
+                    st.zoom_anchor = Some(rl.get_mouse_position());
                 }
                 // Left-drag pans: the image follows the cursor (grab-style).
                 // No easing while the cursor drives the pan — the drag delta
@@ -1162,9 +1171,10 @@ fn main() -> Result<()> {
                     st.target_pan.y += delta.y * 2.0;
                 }
 
-                // Window-center-anchored zoom (free zoom only): while the on-screen
+                // Mouse-anchored zoom (free zoom only): while the on-screen
                 // scale eases, shift the pan each frame so the image point under
-                // the window center stays fixed. offset = center + pan, so keeping
+                // the anchor (the cursor when the step started, else the window
+                // center) stays fixed. offset = center + pan, so keeping
                 // the anchor's image point put gives
                 //   offset' = anchor - (anchor - offset) * (scale'/scale).
                 let scale = st.view_scale.unwrap();
@@ -1173,9 +1183,11 @@ fn main() -> Result<()> {
                     && (scale - s_old).abs() > f32::EPSILON
                     && s_old > 0.0
                 {
+                    let (ax, ay) = match st.zoom_anchor {
+                        Some(a) => (a.x, a.y),
+                        None => (win_w / 2.0, win_h / 2.0),
+                    };
                     let r = scale / s_old;
-                    let ax = win_w / 2.0;
-                    let ay = win_h / 2.0;
                     let ox = ax - (ax - (win_w - st.img_w * s_old) / 2.0 - st.pan.x) * r;
                     let oy = ay - (ay - (win_h - st.img_h * s_old) / 2.0 - st.pan.y) * r;
                     st.pan.x = ox - (win_w - st.img_w * scale) / 2.0;
