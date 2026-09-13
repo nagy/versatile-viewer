@@ -25,6 +25,9 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
 ## Env vars
 
 - `VV_DEBUG=1` — trace grid open/return events and raw key events to stderr.
+  During an image-view drag it also draws the virtual cursor (yellow
+  crosshair) and grab point (blue ring), and traces grab/release/warp
+  events.
 - `VV_SLOW_STREAM=1` — see milestone 7.
 - `VV_BLUR_BG=1` — gimmick: image-view background is a tiny blurred copy of
   the viewed image (`blurbg` module), scaled to cover the window (fit on the
@@ -47,7 +50,10 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
    `a` toggles texture filtering in image view: smooth (bilinear,
    default) vs pixelated (nearest-neighbor, 1:1 pixel peeping).
 4. [x] Panning: `h/j/k/l` + arrow keys, unrestricted. Left-drag follows the
-   cursor directly (no ease; keyboard panning glides).
+   cursor directly (no ease; keyboard panning glides), at 2× travel speed.
+   While dragging the pointer is captured (hidden, unbounded deltas — no
+   screen-edge blocking); on release it is warped back to the grab point,
+   re-verified for a few frames against competing re-warps.
    Frame loop paced by vsync (no software FPS cap) — tear-free.
 5. [x] Free zoom: `+`/`-` (also numpad, layout-independent via typed
    character), 25% steps; zoom animates smoothly (exponential ease,

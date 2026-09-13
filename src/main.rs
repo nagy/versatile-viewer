@@ -598,6 +598,23 @@ fn main() -> Result<()> {
     // Previous frame's window size: self-tracked resize detection (see the
     // `resized` computation in the loop).
     let mut last_win: Option<(f32, f32)> = None;
+    // True while an image-view drag has the pointer captured (DisableCursor:
+    // hidden + locked, unbounded virtual deltas — the drag cannot hit a
+    // screen edge). Released on mouse-up; the pointer then reappears exactly
+    // where the drag started (GLFW restores the pre-capture position).
+    let mut pointer_captured = false;
+    // Window position where the current (or last) drag grabbed the pointer;
+    // raylib's EnableCursor does not reliably restore it, so we warp back
+    // explicitly on release.
+    let mut grab_pos = Vector2::ZERO;
+    // Virtual cursor position while captured (grab_pos + accumulated raw
+    // deltas; raylib's own virtual position is unreliable to interpret).
+    let mut drag_virtual = Vector2::ZERO;
+    // Post-drag pointer restore, re-checked for a few frames: X11 warps are
+    // async, and GLFW's own EnableCursor re-warp can land after ours and
+    // recenter the cursor. We warp again until the position sticks.
+    let mut pending_restore: Option<Vector2> = None;
+    let mut restore_tries = 0u32;
 
     while !rl.window_should_close() && !quit {
         // VV_DEBUG: trace every key raylib sees (keycode per raylib/GLFW:
@@ -628,6 +645,25 @@ fn main() -> Result<()> {
         }
         let win_w = rl.get_screen_width() as f32;
         let win_h = rl.get_screen_height() as f32;
+        // Post-drag restore: verify the warp landed where we sent it; if a
+        // competing re-warp (GLFW/WM/XWayland) moved it, snap again. Gives
+        // up after a few tries so a user moving the mouse is never pinned.
+        if let Some(target) = pending_restore {
+            let cur = rl.get_mouse_position();
+            let settled = (cur.x - target.x).abs() < 1.0 && (cur.y - target.y).abs() < 1.0;
+            if debug && !settled {
+                eprintln!(
+                    "vv: restore try {restore_tries}: cur ({:.0},{:.0}) -> ({:.0},{:.0})",
+                    cur.x, cur.y, target.x, target.y
+                );
+            }
+            if settled || restore_tries >= 3 {
+                pending_restore = None;
+            } else {
+                rl.set_mouse_position(target);
+                restore_tries += 1;
+            }
+        }
         // Resize detection done ourselves: `is_window_resized()` can miss a
         // WM-reflow resize that lands around the time the window becomes
         // visible (tiling WMs shrink the freshly spawned window into its
@@ -936,6 +972,15 @@ fn main() -> Result<()> {
                 return_to_grid = true;
             }
             if return_to_grid {
+                // Leaving image view mid-drag: give the pointer back before
+                // the grid's click handling needs a visible cursor.
+                if pointer_captured {
+                    rl.enable_cursor();
+                    rl.set_mouse_position(grab_pos);
+                    pending_restore = Some(grab_pos);
+                    restore_tries = 0;
+                    pointer_captured = false;
+                }
                 st.mode = Mode::Grid;
                 // Hand the shown texture back to its grid entry and make
                 // that entry the grid selection (nsxiv-like).
@@ -1071,11 +1116,50 @@ fn main() -> Result<()> {
                 // no interpolation: chart-action 9a5394b lesson). Keyboard
                 // panning below keeps its glide. Only meaningful once
                 // dimensions are known.
+                //
+                // Infinite drag: while the button is held the pointer is
+                // captured, so it neither disappears at the screen edge nor
+                // blocks there — panning continues with virtual deltas no
+                // matter how far the physical mouse travels. Mouse-up shows
+                // it again at the position where the drag began.
+                let drag_pressed = rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT);
+                let drag_released = rl.is_mouse_button_released(MouseButton::MOUSE_BUTTON_LEFT);
+                if drag_pressed {
+                    grab_pos = rl.get_mouse_position();
+                    drag_virtual = grab_pos;
+                    rl.disable_cursor();
+                    pointer_captured = true;
+                    if debug {
+                        eprintln!("vv: drag grab at ({:.0},{:.0})", grab_pos.x, grab_pos.y);
+                    }
+                } else if drag_released && pointer_captured {
+                    if debug {
+                        eprintln!(
+                            "vv: drag release: grab ({:.0},{:.0}), virtual ({:.0},{:.0}), rl pos \
+                             ({:.0},{:.0})",
+                            grab_pos.x,
+                            grab_pos.y,
+                            drag_virtual.x,
+                            drag_virtual.y,
+                            rl.get_mouse_position().x,
+                            rl.get_mouse_position().y
+                        );
+                    }
+                    rl.enable_cursor();
+                    rl.set_mouse_position(grab_pos);
+                    pending_restore = Some(grab_pos);
+                    restore_tries = 0;
+                    pointer_captured = false;
+                }
                 let dragging = rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT);
                 if dragging {
                     let delta = rl.get_mouse_delta();
-                    st.target_pan.x += delta.x;
-                    st.target_pan.y += delta.y;
+                    // Virtual cursor follows physical travel 1:1 (debug
+                    // crosshair); the pan gets the 2× speedup.
+                    drag_virtual.x += delta.x;
+                    drag_virtual.y += delta.y;
+                    st.target_pan.x += delta.x * 2.0;
+                    st.target_pan.y += delta.y * 2.0;
                 }
 
                 // Window-center-anchored zoom (free zoom only): while the on-screen
@@ -1251,6 +1335,25 @@ fn main() -> Result<()> {
                     win_h as i32 / 2 - 10,
                     20,
                     Color::GRAY,
+                );
+            }
+            // VV_DEBUG: while the pointer is captured, draw a crosshair at
+            // the virtual cursor position (clamped to the window) — the real
+            // cursor is hidden, and this shows where vv thinks it is. Plus a
+            // ring at the grab point, so a wrong restore is visible.
+            if debug && pointer_captured {
+                let vx = drag_virtual.x.clamp(0.0, win_w);
+                let vy = drag_virtual.y.clamp(0.0, win_h);
+                d.draw_circle_v(Vector2::new(grab_pos.x, grab_pos.y), 6.0, Color::SKYBLUE);
+                d.draw_line_v(
+                    Vector2::new(vx - 12.0, vy),
+                    Vector2::new(vx + 12.0, vy),
+                    Color::YELLOW,
+                );
+                d.draw_line_v(
+                    Vector2::new(vx, vy - 12.0),
+                    Vector2::new(vx, vy + 12.0),
+                    Color::YELLOW,
                 );
             }
         }
