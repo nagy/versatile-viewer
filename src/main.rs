@@ -522,6 +522,11 @@ fn main() -> Result<()> {
             }
         ))
         .resizable()
+        // Vsync on: the compositor/driver paces us to the monitor's refresh
+        // rate, eliminating tearing (most visible during the zoom ease).
+        // This replaces set_target_fps below — a software 60 FPS cap would
+        // fight a non-60 Hz monitor (judder) and add input latency.
+        .vsync()
         .build();
     // We quit via the q key handling ourselves (set_exit_key would make ESC
     // close the window outright instead of returning to the grid).
@@ -586,7 +591,7 @@ fn main() -> Result<()> {
     // Previous per-key down state for the VV_DEBUG event trace.
     let mut prev_down = [false; 349];
 
-    rl.set_target_fps(60);
+    // No set_target_fps: vsync paces the frame loop (see the builder above).
     // Auto-repeat state for image-mode prev/next (xset r rate values).
     let mut rep_nav_fwd = keyrepeat::RepeatState::new();
     let mut rep_nav_back = keyrepeat::RepeatState::new();
@@ -1060,9 +1065,14 @@ fn main() -> Result<()> {
                     st.zoom = ZoomMode::Free((target_scale * factor).clamp(0.01, 100.0));
                 }
                 // Left-drag pans: the image follows the cursor (grab-style).
-                // Same easing path as h/j/k/l panning, so it glides and
-                // settles; only meaningful once dimensions are known.
-                if rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT) {
+                // No easing while the cursor drives the pan — the drag delta
+                // is already per-frame, and piling the 50 ms pan ease on top
+                // of vsync's display latency reads as lag (same-frame input,
+                // no interpolation: chart-action 9a5394b lesson). Keyboard
+                // panning below keeps its glide. Only meaningful once
+                // dimensions are known.
+                let dragging = rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT);
+                if dragging {
                     let delta = rl.get_mouse_delta();
                     st.target_pan.x += delta.x;
                     st.target_pan.y += delta.y;
@@ -1128,6 +1138,11 @@ fn main() -> Result<()> {
                     x: st.pan.x + (st.target_pan.x - st.pan.x) * pan_alpha,
                     y: st.pan.y + (st.target_pan.y - st.pan.y) * pan_alpha,
                 };
+                // While dragging, skip the ease entirely: the image sticks to
+                // the cursor (only the zoom-anchor shift above may touch pan).
+                if dragging {
+                    st.pan = st.target_pan;
+                }
                 // Snap when the residual glide is sub-pixel.
                 if (st.target_pan.x - st.pan.x).abs() < 0.25 {
                     st.pan.x = st.target_pan.x;

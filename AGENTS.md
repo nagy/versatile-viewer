@@ -46,7 +46,9 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
    covered, overflow cropped); distinct for any image/window shape.
    `a` toggles texture filtering in image view: smooth (bilinear,
    default) vs pixelated (nearest-neighbor, 1:1 pixel peeping).
-4. [x] Panning: `h/j/k/l` + arrow keys, unrestricted.
+4. [x] Panning: `h/j/k/l` + arrow keys, unrestricted. Left-drag follows the
+   cursor directly (no ease; keyboard panning glides).
+   Frame loop paced by vsync (no software FPS cap) — tear-free.
 5. [x] Free zoom: `+`/`-` (also numpad, layout-independent via typed
    character), 25% steps; zoom animates smoothly (exponential ease,
    ~150 ms) toward the target scale. Window resize snaps scale/pan
