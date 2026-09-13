@@ -28,7 +28,7 @@ use std::{env, path::Path};
 use anyhow::{Context, Result, bail};
 use raylib::{
     color::Color,
-    consts::{KeyboardKey, PixelFormat, TextureFilter},
+    consts::{KeyboardKey, MouseCursor, PixelFormat, TextureFilter},
     prelude::*,
     texture::RaylibTexture2D,
 };
@@ -526,6 +526,8 @@ fn main() -> Result<()> {
     // We quit via the q key handling ourselves (set_exit_key would make ESC
     // close the window outright instead of returning to the grid).
     rl.set_exit_key(None);
+    // Explicit default-arrow cursor while the mouse hovers the window.
+    rl.set_mouse_cursor(MouseCursor::MOUSE_CURSOR_ARROW);
 
     // VV_BLUR_BG gimmick: blurred copy of the viewed image behind it. Declared
     // after `rl` so it drops (and unloads its texture) before the window.
