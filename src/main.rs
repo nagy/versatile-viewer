@@ -48,6 +48,11 @@ struct DecodedImage {
     rgba: Vec<u8>,
 }
 
+/// Fraction of its remaining distance to the window center that the
+/// zoomed image point (and the cursor riding it) drifts over one zoom
+/// ease; shares the ease's exponential time constant.
+const ZOOM_ANCHOR_DRIFT: f32 = 0.25;
+
 /// How the image is scaled to the window. Scale is recomputed every frame,
 /// so resizing always stays correct.
 #[derive(Clone, Copy, PartialEq)]
@@ -1177,24 +1182,45 @@ fn main() -> Result<()> {
                 // center) stays fixed. offset = center + pan, so keeping
                 // the anchor's image point put gives
                 //   offset' = anchor - (anchor - offset) * (scale'/scale).
+                // Gimmick: after each frame's anchor step, the image and the
+                // cursor slide TOGETHER a little toward the window center, so
+                // zooming gently recenters while the cursor stays glued to the
+                // same image point (image moves, pointer rides along).
                 let scale = st.view_scale.unwrap();
                 if matches!(st.zoom, ZoomMode::Free(_))
                     && let Some(s_old) = prev_scale
                     && (scale - s_old).abs() > f32::EPSILON
                     && s_old > 0.0
                 {
-                    let (ax, ay) = match st.zoom_anchor {
-                        Some(a) => (a.x, a.y),
-                        None => (win_w / 2.0, win_h / 2.0),
+                    let center = Vector2 {
+                        x: win_w / 2.0,
+                        y: win_h / 2.0,
                     };
+                    let a = st.zoom_anchor.unwrap_or(center);
+                    let (ax, ay) = (a.x, a.y);
                     let r = scale / s_old;
                     let ox = ax - (ax - (win_w - st.img_w * s_old) / 2.0 - st.pan.x) * r;
                     let oy = ay - (ay - (win_h - st.img_h * s_old) / 2.0 - st.pan.y) * r;
                     st.pan.x = ox - (win_w - st.img_w * scale) / 2.0;
                     st.pan.y = oy - (win_h - st.img_h * scale) / 2.0;
+                    // Drift shares the ease's exponential time constant: by
+                    // the time the scale has covered its remaining distance,
+                    // the pair has covered ZOOM_ANCHOR_DRIFT of its own.
+                    let d = (center - a) * (alpha * ZOOM_ANCHOR_DRIFT);
+                    st.pan.x += d.x;
+                    st.pan.y += d.y;
+                    st.zoom_anchor = Some(a + d);
                     // Pin the target too, so pan easing doesn't fight the anchor.
                     st.target_pan.x = st.pan.x;
                     st.target_pan.y = st.pan.y;
+                    // Ride the pointer along with the drifted image point
+                    // (never while a drag has it captured).
+                    if !pointer_captured {
+                        if debug {
+                            eprintln!("vv: zoom drift anchor to ({ax:.0},{ay:.0})");
+                        }
+                        rl.set_mouse_position(st.zoom_anchor.unwrap());
+                    }
                 }
 
                 // Vim-style panning (h/j/k/l + arrow keys); held keys move the

@@ -63,7 +63,10 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
    freshly spawned window also snaps (raylib's resize flag can miss it).
 6. [x] Zoom anchored at the cursor (free zoom eases while keeping the image
    point under the mouse fixed; anchor captured when the step starts,
-   falls back to window center). Wheel zoom still open.
+   falls back to window center). While the ease runs, the image point and
+   the cursor riding it drift together toward the window center
+   (ZOOM_ANCHOR_DRIFT = 0.25 of their remaining distance; pointer warped
+   along, never during a drag). Wheel zoom still open.
 7. [x] jxl-oxide progressive decoding (stream bytes, render preview
    early; image view only — grid thumbs stay full-decode).
    `VV_SLOW_STREAM=1` dribbles 4 KB chunks with 1 s pauses until the
