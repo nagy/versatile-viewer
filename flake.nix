@@ -1,5 +1,5 @@
 {
-  description = "versatile-viewer: a fast image (and later, video) viewer. nsxiv meets mpv. JPEG XL first-class.";
+  description = "A fast image viewer. nsxiv meets mpv. JPEG XL first-class.";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -94,6 +94,7 @@
             # nixpkgs' raylib package.
             nativeBuildInputs = nativeBuildInputs ++ [ pkgs.autoPatchelfHook ];
             appendRunpaths = [ (lib.makeLibraryPath libInputs) ];
+            meta.description = "A fast image viewer. nsxiv meets mpv. JPEG XL first-class.";
           };
         in
         {
@@ -108,6 +109,7 @@
               env
               ;
             buildInputs = libInputs;
+            meta.description = "Versatile-viewer test suite";
           };
 
           apps.default = {
