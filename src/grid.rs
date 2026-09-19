@@ -155,6 +155,10 @@ pub struct Grid {
 impl Grid {
     /// List the images in a directory (sorted by file name) and spawn the
     /// background decode worker.
+    ///
+    /// # Errors
+    ///
+    /// Errors when the directory cannot be read.
     pub fn from_dir(dir: &Path) -> Result<Grid> {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
             .with_context(|| format!("failed to read directory {}", dir.display()))?

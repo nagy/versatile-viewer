@@ -29,12 +29,14 @@ const DEFAULT_DIM: f32 = 0.6;
 const FADE_SECS: f64 = 0.4;
 
 /// Is the gimmick enabled? Strict opt-in: exactly `VV_BLUR_BG=1`.
+#[must_use]
 pub fn enabled() -> bool {
     std::env::var("VV_BLUR_BG").as_deref() == Ok("1")
 }
 
 /// Long side of the background texture, from `VV_BLUR_PX` (clamped to a sane
 /// 8..=1024; the default 128 is already far below any window size).
+#[must_use]
 pub fn blur_px() -> u32 {
     std::env::var("VV_BLUR_PX")
         .ok()
@@ -50,9 +52,31 @@ fn parse_dim(s: Option<&str>) -> f32 {
         .clamp(0.05, 1.0)
 }
 
-/// Compute the tiny blurred copy of an RGBA8 image. `long_side` is the
-/// texture's long side (`VV_BLUR_PX`, default 128). Cheap enough to run on a
-/// decode worker; the result is a few KB.
+/// Compute the tiny blurred copy of an RGBA8 image.
+///
+/// `long_side` is the texture's long side (`VV_BLUR_PX`, default 128).
+/// Cheap enough to run on a decode worker; the result is a few KB.
+///
+/// # Panics
+///
+/// Panics if `rgba` does not hold exactly `width * height * 4` bytes.
+///
+/// # Examples
+///
+/// ```
+/// # use versatile_viewer::blurbg::small_blur;
+/// // Landscape: the long side lands exactly on `long_side`, aspect
+/// // preserved, 4 bytes per pixel.
+/// let (rgba, w, h) = small_blur(&vec![0; 4 * 200 * 100], 200, 100, 128);
+/// assert_eq!((w, h), (128, 64));
+/// assert_eq!(rgba.len(), 4 * w as usize * h as usize);
+///
+/// // Portrait: the long side switches to the height.
+/// let (rgba, w, h) = small_blur(&vec![0; 4 * 100 * 200], 100, 200, 128);
+/// assert_eq!((w, h), (64, 128));
+/// assert_eq!(rgba.len(), 4 * w as usize * h as usize);
+/// ```
+#[must_use]
 pub fn small_blur(rgba: &[u8], width: u32, height: u32, long_side: u32) -> BlurData {
     let (tw, th) = if width >= height {
         (
@@ -91,6 +115,7 @@ pub struct BlurBg {
 
 impl BlurBg {
     /// None when the gimmick is off.
+    #[must_use]
     pub fn from_env() -> Option<BlurBg> {
         if !enabled() {
             return None;

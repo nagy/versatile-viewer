@@ -96,10 +96,40 @@
             appendRunpaths = [ (lib.makeLibraryPath libInputs) ];
             meta.description = "A fast image viewer. nsxiv meets mpv. JPEG XL first-class.";
           };
+
+          # Static rustdoc HTML (what `cargo doc` writes to ./target/doc/)
+          # installed under $out/share/doc. Reuses the same cargoArtifacts,
+          # so only doc crates compile; --no-deps (crane's default) keeps
+          # third-party crates out of the search index. Browse offline:
+          # nix run nixpkgs#python3 -- -m http.server -d <doc-out>/share/doc
+          docs = craneLib.cargoDoc {
+            inherit
+              src
+              cargoArtifacts
+              nativeBuildInputs
+              env
+              ;
+            buildInputs = libInputs;
+            meta.description = "Versatile-viewer API documentation";
+          };
+
+          # Doctests: code blocks in doc comments compiled and run against
+          # the library (`cargo test --doc`), same artifact set as above.
+          doctests = craneLib.cargoDocTest {
+            inherit
+              src
+              cargoArtifacts
+              nativeBuildInputs
+              env
+              ;
+            buildInputs = libInputs;
+            meta.description = "Versatile-viewer doctests";
+          };
         in
         {
           packages.versatile-viewer = versatileViewer;
           packages.default = config.packages.versatile-viewer;
+          packages.versatile-viewer-doc = docs;
 
           checks.default = craneLib.cargoTest {
             inherit
@@ -112,10 +142,12 @@
             meta.description = "Versatile-viewer test suite";
           };
 
+          checks.doctests = doctests;
+
           apps.default = {
             type = "app";
             program = "${versatileViewer}/bin/vv";
-            meta.description = "A fast image (and later, video) viewer. JPEG XL first-class.";
+            meta.description = "A fast image viewer. nsxiv meets mpv. JPEG XL first-class.";
             meta.license = lib.licenses.agpl3Plus;
           };
 

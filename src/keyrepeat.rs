@@ -24,6 +24,7 @@ pub struct RepeatState {
 }
 
 impl RepeatState {
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             held: false,
@@ -31,12 +32,30 @@ impl RepeatState {
         }
     }
 
-    /// Feed this key's state once per frame. `edge`: the key was pressed
-    /// this frame (from the raw event queue — `IsKeyPressed` can miss taps
-    /// that fit inside one frame); `down`: the key is currently held;
-    /// `now`: `rl.get_time`(). Returns true exactly when the action should
-    /// fire: on the initial press, then every 1/rate seconds once the hold
-    /// outlasts the delay.
+    /// Feed this key's state once per frame.
+    ///
+    /// `edge`: the key was pressed this frame (from the raw event queue —
+    /// `IsKeyPressed` can miss taps that fit inside one frame); `down`: the
+    /// key is currently held; `now`: `rl.get_time`(). Returns true exactly
+    /// when the action should fire: on the initial press, then every 1/rate
+    /// seconds once the hold outlasts the delay.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use versatile_viewer::keyrepeat::RepeatState;
+    /// let mut st = RepeatState::new();
+    /// // Initial press fires immediately.
+    /// assert!(st.tick(true, true, 0.0, 0.66, 20.0));
+    /// // Repeats wait out the delay (660 ms), then fire every 1/rate
+    /// // (50 ms at 20/s), scheduled from the last fire — not from `now`.
+    /// assert!(!st.tick(false, true, 0.65, 0.66, 20.0));
+    /// assert!(st.tick(false, true, 0.67, 0.66, 20.0));
+    /// assert!(st.tick(false, true, 0.72, 0.66, 20.0));
+    /// // Release stops repeats; a fresh edge fires again.
+    /// assert!(!st.tick(false, false, 0.8, 0.66, 20.0));
+    /// assert!(st.tick(true, true, 1.0, 0.66, 20.0));
+    /// ```
     pub fn tick(&mut self, edge: bool, down: bool, now: f64, delay: f32, rate: f32) -> bool {
         if edge {
             self.held = true;

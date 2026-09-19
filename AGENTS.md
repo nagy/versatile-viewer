@@ -13,6 +13,9 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
 - Build: nix flake (crane).
   - `nix build` — package
   - `nix build .#checks.default` — tests
+  - `nix build .#versatile-viewer-doc` — static rustdoc HTML; doctests run
+    as `checks.doctests` (`cargo test --doc` needs the lib target in
+    `src/lib.rs`, which also hosts the decode/upload helpers)
   - `nix fmt` — format the tree (treefmt: rustfmt, taplo, nixfmt); rustfmt
     runs with extended options (import grouping, 100-col width) via
     `settings.formatter.rustfmt.options` with `lib.mkAfter`

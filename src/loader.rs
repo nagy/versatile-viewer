@@ -82,6 +82,7 @@ impl Loader {
     /// `preview_px` caps the long side of progressive-preview buffers: the
     /// screen never shows more pixels than that, so shipping full-size RGBA
     /// every `PREVIEW_INTERVAL` is pure allocation churn.
+    #[must_use]
     pub fn start(path: PathBuf, preview_px: u32) -> Loader {
         let (tx, rx) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -106,6 +107,7 @@ impl Loader {
     }
 
     /// Poll the next queued message without blocking.
+    #[must_use]
     pub fn try_recv(&self) -> Option<LoaderMsg> {
         self.rx.try_recv().ok()
     }
