@@ -24,9 +24,12 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
     treefmt wrapper included)
 - Run: `nix run . -- <image-path>`; q quits, ESC/Enter toggle grid ↔ image
   view (ESC never quits). Binary name: `vv`.
-- Window title (set once at creation, en-dash separated, path canonicalized
-  then $HOME abbreviated to `~`): single image — `<file> – <dir> –
-  versatile-viewer`; grid — `(<n> image(s)) – <dir> – versatile-viewer`.
+- Window title (en-dash separated, paths canonicalized then $HOME
+  abbreviated to `~`): single image — `<file> – <dir> – versatile-viewer`;
+  grid — `(<n> image(s)) – <dir> – versatile-viewer`. Title updates
+  dynamically in image view to follow the open image (grid mode keeps the
+  launch title). A one-image directory skips the grid at launch and opens
+  that image directly (ESC still returns to the grid).
 - X11: WM_CLASS stamped to `vv` (both res_name and res_class) after window
   creation via `XSetClassHint` (`src/wmclass.rs`) — raylib only derives it
   from the creation title (path-derived, unusable for window rules).

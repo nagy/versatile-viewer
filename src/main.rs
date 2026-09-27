@@ -312,26 +312,38 @@ fn tilde_path(path: &Path) -> String {
     path.display().to_string()
 }
 
-/// Window title for the launch mode: image view vs. grid view.
+/// Window title pieces shared by both launch modes.
+const SEP: &str = " – ";
+const APP: &str = "versatile-viewer";
+
+/// Title for the image view of a single file: name, dir, app.
+fn image_title(img_path: &Path) -> String {
+    let abs = fs::canonicalize(img_path).unwrap_or_else(|_| img_path.to_path_buf());
+    let file = abs.file_name().map_or_else(
+        || abs.display().to_string(),
+        |f| f.to_string_lossy().into_owned(),
+    );
+    let dir = abs.parent().unwrap_or(Path::new("/"));
+    format!("{file}{SEP}{}{SEP}{APP}", tilde_path(dir))
+}
+
+/// Title for the grid over a directory with `n` images.
+fn grid_title(dir_path: &Path, n: usize) -> String {
+    format!(
+        "({n} image{plural}){SEP}{}{SEP}{APP}",
+        tilde_path(dir_path),
+        plural = if n == 1 { "" } else { "s" },
+    )
+}
+
+/// Initial window title for the launch mode: image view vs. grid view.
 fn window_title(path: &Path, dir_grid: Option<&Grid>) -> String {
-    const SEP: &str = " – ";
     // Make the path absolute (resolving `.` and symlinks) so the title is
     // meaningful regardless of the launch cwd.
     let abs: PathBuf = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    if let Some(g) = dir_grid {
-        let n = g.entries.len();
-        format!(
-            "({n} image{plural}){SEP}{}{SEP}versatile-viewer",
-            tilde_path(&abs),
-            plural = if n == 1 { "" } else { "s" },
-        )
-    } else {
-        let file = abs.file_name().map_or_else(
-            || abs.display().to_string(),
-            |f| f.to_string_lossy().into_owned(),
-        );
-        let dir = abs.parent().unwrap_or(Path::new("/"));
-        format!("{file}{SEP}{}{SEP}versatile-viewer", tilde_path(dir))
+    match dir_grid {
+        Some(g) => grid_title(&abs, g.entries.len()),
+        None => image_title(&abs),
     }
 }
 
@@ -453,6 +465,25 @@ fn main() -> Result<()> {
             attach_blur_bg(&mut st.blur_bg, &mut rl, &thread, Some(&data), None);
         }
     }
+    // A one-image directory skips the grid: jump straight into that image
+    // (ESC still returns to the grid view).
+    if grid.as_ref().is_some_and(|g| g.entries.len() == 1) {
+        let win = (rl.get_screen_width() as f32, rl.get_screen_height() as f32);
+        show_entry(
+            &mut st,
+            grid.as_mut().unwrap(),
+            0,
+            &mut rl,
+            &thread,
+            win,
+            true,
+        );
+    }
+
+    // Window title: grid mode / single-file launch keep the launch title;
+    // image view rewrites it per open entry (reset when open_id changes).
+    let launch_title = window_title(path, grid.as_ref());
+    let mut title_open_id: Option<u64> = None;
 
     // Set when the viewer should exit entirely.
     let mut quit = false;
@@ -541,6 +572,23 @@ fn main() -> Result<()> {
         // from the previous frame counts as a resize frame.
         let resized = last_win != Some((win_w, win_h));
         last_win = Some((win_w, win_h));
+
+        // Dynamic window title: follow the open image in image view; back
+        // to the launch title in grid mode.
+        if st.open_id != title_open_id {
+            title_open_id = st.open_id;
+            let title = st
+                .open_id
+                .and_then(|id| {
+                    grid.as_ref()?
+                        .entries
+                        .iter()
+                        .find(|e| e.id == id)
+                        .map(|e| image_title(&e.path))
+                })
+                .unwrap_or_else(|| launch_title.clone());
+            rl.set_window_title(&thread, &title);
+        }
 
         // Prefetch priority: in grid mode the selected entry's neighbors
         // (left/right/up/down); in image mode the previous/next entries.
