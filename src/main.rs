@@ -23,7 +23,10 @@
 //! blur resolution — the tiny texture's long side, default 128, fewer =
 //! blurrier.
 
-use std::{env, path::Path};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, bail};
 use raylib::{
@@ -288,6 +291,50 @@ fn show_entry(
     }
 }
 
+/// Display a path with `$HOME` collapsed to `~`.
+fn tilde_path(path: &Path) -> String {
+    if let Ok(home) = env::var("HOME") {
+        // Skip the pathological HOME=/ case (everything would collapse).
+        let home = home.trim_end_matches('/');
+        if home.is_empty() || home == "/" {
+            return path.display().to_string();
+        }
+        if let Ok(rest) = path.strip_prefix(home) {
+            // strip_prefix yields a relative remainder ("pics"), so the
+            // separator must be re-added; $HOME itself maps to plain "~".
+            return if rest.as_os_str().is_empty() {
+                "~".to_string()
+            } else {
+                format!("~/{rest}", rest = rest.display())
+            };
+        }
+    }
+    path.display().to_string()
+}
+
+/// Window title for the launch mode: image view vs. grid view.
+fn window_title(path: &Path, dir_grid: Option<&Grid>) -> String {
+    const SEP: &str = " – ";
+    // Make the path absolute (resolving `.` and symlinks) so the title is
+    // meaningful regardless of the launch cwd.
+    let abs: PathBuf = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if let Some(g) = dir_grid {
+        let n = g.entries.len();
+        format!(
+            "({n} image{plural}){SEP}{}{SEP}versatile-viewer",
+            tilde_path(&abs),
+            plural = if n == 1 { "" } else { "s" },
+        )
+    } else {
+        let file = abs.file_name().map_or_else(
+            || abs.display().to_string(),
+            |f| f.to_string_lossy().into_owned(),
+        );
+        let dir = abs.parent().unwrap_or(Path::new("/"));
+        format!("{file}{SEP}{}{SEP}versatile-viewer", tilde_path(dir))
+    }
+}
+
 // The event loop is one long state machine by design; splitting it
 // would scatter the frame-order invariants across call sites.
 #[allow(clippy::too_many_lines)]
@@ -335,14 +382,7 @@ fn main() -> Result<()> {
 
     let (mut rl, thread) = raylib::init()
         .size(win0_w, win0_h)
-        .title(&format!(
-            "versatile-viewer — {}",
-            if let Some(g) = &dir_grid {
-                format!("{} ({} images)", path.display(), g.entries.len())
-            } else {
-                path.display().to_string()
-            }
-        ))
+        .title(&window_title(path, dir_grid.as_ref()))
         .resizable()
         // Vsync on: the compositor/driver paces us to the monitor's refresh
         // rate, eliminating tearing (most visible during the zoom ease).
