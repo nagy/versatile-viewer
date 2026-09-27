@@ -13,8 +13,10 @@
 
 //! versatile-viewer — image viewer (JXL first-class, plus PNG/JPEG) with a
 //! directory thumbnail grid. q quits; ESC/Enter toggle grid ↔ image view.
+//! `--osm` opens an OpenStreetMap slippy-map mode instead (map.rs).
 //!
 //! Usage: versatile-viewer <image-path-or-directory>
+//!        versatile-viewer --osm [z/lat/lon]
 //!
 //! Env gimmicks: `VV_DEBUG`=1 traces input events; `VV_SLOW_STREAM`=1 slows the
 //! JXL stream; `VV_BLUR_BG`=1 draws a blurred copy of the viewed image as the
@@ -43,7 +45,7 @@ use versatile_viewer::{
     grid::{Grid, GridAction},
     keyrepeat,
     loader::{Loader, LoaderMsg},
-    upload_rgba,
+    map, upload_rgba,
 };
 
 /// Fraction of its remaining distance to the window center that the
@@ -351,9 +353,18 @@ fn window_title(path: &Path, dir_grid: Option<&Grid>) -> String {
 // would scatter the frame-order invariants across call sites.
 #[allow(clippy::too_many_lines)]
 fn main() -> Result<()> {
-    let arg = env::args()
-        .nth(1)
-        .context("usage: versatile-viewer <image-path-or-directory>")?;
+    let mut args = env::args().skip(1);
+    let arg = args.next().context(
+        "usage: versatile-viewer <image-path-or-directory>\n       versatile-viewer --osm \
+         [z/lat/lon]",
+    )?;
+
+    // `--osm` mode: OpenStreetMap slippy map (map.rs). Own run loop; no
+    // file arguments, no grid. Optional position arg: z/lat/lon.
+    if arg == "--osm" {
+        return map::run(args.next());
+    }
+
     let path = Path::new(&arg);
 
     // Directory launch: list the directory before opening the window (the

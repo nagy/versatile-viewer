@@ -25,6 +25,7 @@ pub mod blurbg;
 pub mod grid;
 pub mod keyrepeat;
 pub mod loader;
+pub mod map;
 #[cfg(target_os = "linux")]
 pub mod wmclass;
 
