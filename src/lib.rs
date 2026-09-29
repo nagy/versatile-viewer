@@ -138,7 +138,7 @@ fn file_magic(path: &Path) -> Option<[u8; 2]> {
 // The magic table is kept flat and grouped by format on purpose; clippy's
 // nested suggestion reorders it into a byte soup.
 #[allow(clippy::unnested_or_patterns)]
-fn is_common_magic(m: [u8; 2]) -> bool {
+const fn is_common_magic(m: [u8; 2]) -> bool {
     let [a, b] = m;
     matches!(
         (a, b),
