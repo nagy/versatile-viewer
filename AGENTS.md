@@ -59,7 +59,9 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
    sides (upscales until first border touch), `e` fit width, `Shift+E`
    fit height.
    `t` toggles between fit-all (whole image visible) and fill (window fully
-   covered, overflow cropped); distinct for any image/window shape.
+   covered, overflow cropped); distinct for any image/window shape; zooming
+   in (`t` → fill) centers the fill view on the image point under the mouse,
+   clamped so the window never shows background; zooming out recentres.
    `a` toggles texture filtering in image view: smooth (bilinear,
    default) vs pixelated (nearest-neighbor, 1:1 pixel peeping).
 4. [x] Panning: `h/j/k/l` + arrow keys, unrestricted. Left-drag follows the

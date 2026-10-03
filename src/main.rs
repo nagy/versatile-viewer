@@ -968,7 +968,39 @@ fn main() -> Result<()> {
                 } else {
                     ZoomMode::Fill
                 };
-                st.target_pan = Vector2::ZERO;
+                if st.zoom == ZoomMode::FitAll {
+                    // Zoom out: recentre, ignoring the mouse (old behavior).
+                    st.target_pan = Vector2::ZERO;
+                } else {
+                    // Zoom in at the cursor: the image point currently under
+                    // the mouse becomes the window center in the fill view,
+                    // clamped so the window never shows background. Mouse at
+                    // the image edge just pans as far as coverage allows.
+                    if st.img_w > 0.0
+                        && let Some(cur) = st.view_scale
+                        && cur > 0.0
+                    {
+                        let target = (win_w / st.img_w).max(win_h / st.img_h);
+                        // Mouse position in image coordinates at the current
+                        // scale (offset = window top-left of the unpanned
+                        // image).
+                        let m = rl.get_mouse_position();
+                        let img_x = (m.x - (win_w - st.img_w * cur) / 2.0 - st.pan.x) / cur;
+                        let img_y = (m.y - (win_h - st.img_h * cur) / 2.0 - st.pan.y) / cur;
+                        // Pan that puts that image point at the window
+                        // center, then clamp both axes to the coverage
+                        // interval [-|offset|, |offset|]: outside it, a
+                        // window edge would expose background.
+                        let off_x = (win_w - st.img_w * target) / 2.0;
+                        let off_y = (win_h - st.img_h * target) / 2.0;
+                        let aim_x = win_w / 2.0 - off_x - img_x * target;
+                        let aim_y = win_h / 2.0 - off_y - img_y * target;
+                        st.target_pan.x = aim_x.clamp(-off_x.abs(), off_x.abs());
+                        st.target_pan.y = aim_y.clamp(-off_y.abs(), off_y.abs());
+                    } else {
+                        st.target_pan = Vector2::ZERO;
+                    }
+                }
             }
 
             // Before the header arrives the image dimensions are unknown;
