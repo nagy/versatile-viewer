@@ -473,10 +473,12 @@ impl Grid {
         let mut jump_last = false;
         let mut zoom_in = false;
         let mut zoom_out = false;
+        let mut open_at_cursor = false;
         while let Some(k) = rl.get_key_pressed() {
             match k {
                 KeyboardKey::KEY_ENTER | KeyboardKey::KEY_KP_ENTER => enter = true,
                 KeyboardKey::KEY_Q => quit = true,
+                KeyboardKey::KEY_F => open_at_cursor = true,
                 KeyboardKey::KEY_H | KeyboardKey::KEY_LEFT => left = true,
                 KeyboardKey::KEY_L | KeyboardKey::KEY_RIGHT => right = true,
                 KeyboardKey::KEY_K | KeyboardKey::KEY_UP => up = true,
@@ -604,31 +606,45 @@ impl Grid {
         }
         // Mouse: click selects a cell; clicking the already-selected cell
         // opens it (first click selects, second opens — nsxiv-style).
-        if rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT) {
-            let m = rl.get_mouse_position();
-            let (cols, cw, ch, _side, _content_h) = self.layout(win_w, win_h);
-            // Grid coordinates: content is drawn at MARGIN + col*(cw+GAP)
-            // minus scroll, so add scroll back to the cursor position.
-            let (mx, my) = (m.x - MARGIN, m.y + self.scroll - MARGIN);
-            let col = (mx / (cw + GAP)).floor();
-            let row = (my / (ch + GAP)).floor();
-            if col >= 0.0
-                && row >= 0.0
-                && col < cols as f32
-                && mx - col * (cw + GAP) <= cw
-                && my - row * (ch + GAP) <= ch
-            {
-                let idx = row as usize * cols + col as usize;
-                if idx < self.entries.len() {
-                    if idx == self.selected {
-                        return GridAction::Open(idx);
-                    }
-                    self.selected = idx;
-                    self.ensure_visible(win_w, win_h);
-                }
+        // `f` opens the cell under the cursor directly (a double-click
+        // without the clicking: select + open in one step).
+        if rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
+            && let Some(idx) = self.cell_at(rl.get_mouse_position(), win_w, win_h)
+        {
+            if idx == self.selected {
+                return GridAction::Open(idx);
             }
+            self.selected = idx;
+            self.ensure_visible(win_w, win_h);
+        }
+        if open_at_cursor && let Some(idx) = self.cell_at(rl.get_mouse_position(), win_w, win_h) {
+            self.selected = idx;
+            self.ensure_visible(win_w, win_h);
+            return GridAction::Open(idx);
         }
         GridAction::None
+    }
+
+    /// Grid cell under the window-space point, if any.
+    fn cell_at(&self, m: Vector2, win_w: f32, win_h: f32) -> Option<usize> {
+        let (cols, cw, ch, _side, _content_h) = self.layout(win_w, win_h);
+        // Grid coordinates: content is drawn at MARGIN + col*(cw+GAP)
+        // minus scroll, so add scroll back to the cursor position.
+        let (mx, my) = (m.x - MARGIN, m.y + self.scroll - MARGIN);
+        let col = (mx / (cw + GAP)).floor();
+        let row = (my / (ch + GAP)).floor();
+        if col >= 0.0
+            && row >= 0.0
+            && col < cols as f32
+            && mx - col * (cw + GAP) <= cw
+            && my - row * (ch + GAP) <= ch
+        {
+            let idx = row as usize * cols + col as usize;
+            if idx < self.entries.len() {
+                return Some(idx);
+            }
+        }
+        None
     }
 
     pub fn draw(&self, d: &mut RaylibDrawHandle, win_w: f32, win_h: f32) {

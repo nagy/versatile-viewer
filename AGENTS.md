@@ -24,6 +24,10 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
     treefmt wrapper included)
 - Run: `nix run . -- <image-path>`; q quits, ESC/Enter toggle grid ↔ image
   view (ESC never quits). Binary name: `vv`.
+  `f` action key: grid — open the cell under the cursor (double-click
+  without the clicking); image view — cursor on the image: zoom into fill
+  aimed at the cursor (like `t`), or zoom out if the image already covers
+  the whole window; cursor over the background: back to the grid (ESC).
 - Window title (en-dash separated, paths canonicalized then $HOME
   abbreviated to `~`): single image — `<file> – <dir> – versatile-viewer`;
   grid — `(<n> image(s)) – <dir> – versatile-viewer`. Title updates

@@ -51,6 +51,26 @@ use versatile_viewer::{
 /// ease; shares the ease's exponential time constant.
 const ZOOM_ANCHOR_DRIFT: f32 = 0.25;
 
+/// Target pan that centers the fill view on the image point under `mouse`.
+///
+/// Both axes are clamped to `[-|offset|, |offset|]`: outside that interval a
+/// window edge would expose background, so a cursor near the image edge just
+/// pans as far as coverage allows.
+fn aim_fill_pan(st: &ViewState, mouse: Vector2, win_w: f32, win_h: f32) -> Vector2 {
+    let target = (win_w / st.img_w).max(win_h / st.img_h);
+    let cur = st.view_scale.unwrap_or(target);
+    // Mouse position in image coordinates at the current scale (offset =
+    // window top-left of the unpanned image).
+    let img_x = (mouse.x - (win_w - st.img_w * cur) / 2.0 - st.pan.x) / cur;
+    let img_y = (mouse.y - (win_h - st.img_h * cur) / 2.0 - st.pan.y) / cur;
+    let off_x = (win_w - st.img_w * target) / 2.0;
+    let off_y = (win_h - st.img_h * target) / 2.0;
+    Vector2 {
+        x: (win_w / 2.0 - off_x - img_x * target).clamp(-off_x.abs(), off_x.abs()),
+        y: (win_h / 2.0 - off_y - img_y * target).clamp(-off_y.abs(), off_y.abs()),
+    }
+}
+
 /// How the image is scaled to the window. Scale is recomputed every frame,
 /// so resizing always stays correct.
 #[derive(Clone, Copy, PartialEq)]
@@ -797,6 +817,7 @@ fn main() -> Result<()> {
             let mut enter = false;
             let mut quit_pressed = false;
             let mut pixelated_toggle = false;
+            let mut f_key = false;
             let mut nav_next_edge = false;
             let mut nav_prev_edge = false;
             let mut jump_first = false;
@@ -812,6 +833,7 @@ fn main() -> Result<()> {
                     }
                     KeyboardKey::KEY_Q => quit_pressed = true,
                     KeyboardKey::KEY_A => pixelated_toggle = true,
+                    KeyboardKey::KEY_F => f_key = true,
                     KeyboardKey::KEY_SPACE | KeyboardKey::KEY_N => nav_next_edge = true,
                     KeyboardKey::KEY_BACKSPACE | KeyboardKey::KEY_P => nav_prev_edge = true,
                     KeyboardKey::KEY_G => {
@@ -886,6 +908,41 @@ fn main() -> Result<()> {
                     apply_view_filter(&thread, tex, st.pixelated);
                 }
             }
+            // `f` action key (needs known geometry; the hit test uses the
+            // drawn image rect — offset + pan at the on-screen scale):
+            // cursor over the background returns to the grid (ESC-like);
+            // over an image that covers the whole window it zooms out
+            // (recentred, like t's zoom-out half); otherwise it zooms into
+            // fill view aimed at the cursor (like t's zoom-in half).
+            let mut f_open_grid = false;
+            let mut f_zoom = false;
+            if f_key
+                && st.img_w > 0.0
+                && let Some(scale) = st.view_scale
+            {
+                let m = rl.get_mouse_position();
+                let ox = (win_w - st.img_w * scale) / 2.0 + st.pan.x;
+                let oy = (win_h - st.img_h * scale) / 2.0 + st.pan.y;
+                let inside = m.x >= ox
+                    && m.x < ox + st.img_w * scale
+                    && m.y >= oy
+                    && m.y < oy + st.img_h * scale;
+                let filled = ox <= 0.0
+                    && oy <= 0.0
+                    && ox + st.img_w * scale >= win_w
+                    && oy + st.img_h * scale >= win_h;
+                if !inside {
+                    f_open_grid = grid.is_some();
+                } else if filled {
+                    st.zoom = ZoomMode::FitAll;
+                    st.target_pan = Vector2::ZERO;
+                } else {
+                    f_zoom = true;
+                }
+            }
+            if f_open_grid {
+                enter = true;
+            }
             if grid.is_some() && enter {
                 return_to_grid = true;
             }
@@ -959,47 +1016,26 @@ fn main() -> Result<()> {
                     ZoomMode::FitWidth
                 };
                 st.target_pan = Vector2::ZERO;
-            } else if rl.is_key_pressed(KeyboardKey::KEY_T) {
-                // Two-state toggle: whole image visible (fit-all) vs window
-                // completely covered (fill). Distinct for any image/window
-                // combination, unlike a fit-width/fit-height cycle.
-                st.zoom = if st.zoom == ZoomMode::Fill {
-                    ZoomMode::FitAll
+            } else if rl.is_key_pressed(KeyboardKey::KEY_T) || f_zoom {
+                // t: two-state toggle — whole image visible (fit-all) vs
+                // window completely covered (fill). Distinct for any
+                // image/window combination, unlike a fit-width/fit-height
+                // cycle. f (f_zoom) always zooms in: it only reaches here
+                // when the cursor is on a not-yet-covering image.
+                if f_zoom {
+                    st.zoom = ZoomMode::Fill;
+                } else if st.zoom == ZoomMode::Fill {
+                    st.zoom = ZoomMode::FitAll;
                 } else {
-                    ZoomMode::Fill
-                };
-                if st.zoom == ZoomMode::FitAll {
-                    // Zoom out: recentre, ignoring the mouse (old behavior).
+                    st.zoom = ZoomMode::Fill;
+                }
+                // Zoom-in lands with the image point under the mouse at the
+                // window center, clamped so the window never shows
+                // background; zoom-out recentres.
+                if st.zoom == ZoomMode::Fill && st.img_w > 0.0 && st.view_scale.is_some() {
+                    st.target_pan = aim_fill_pan(&st, rl.get_mouse_position(), win_w, win_h);
+                } else {
                     st.target_pan = Vector2::ZERO;
-                } else {
-                    // Zoom in at the cursor: the image point currently under
-                    // the mouse becomes the window center in the fill view,
-                    // clamped so the window never shows background. Mouse at
-                    // the image edge just pans as far as coverage allows.
-                    if st.img_w > 0.0
-                        && let Some(cur) = st.view_scale
-                        && cur > 0.0
-                    {
-                        let target = (win_w / st.img_w).max(win_h / st.img_h);
-                        // Mouse position in image coordinates at the current
-                        // scale (offset = window top-left of the unpanned
-                        // image).
-                        let m = rl.get_mouse_position();
-                        let img_x = (m.x - (win_w - st.img_w * cur) / 2.0 - st.pan.x) / cur;
-                        let img_y = (m.y - (win_h - st.img_h * cur) / 2.0 - st.pan.y) / cur;
-                        // Pan that puts that image point at the window
-                        // center, then clamp both axes to the coverage
-                        // interval [-|offset|, |offset|]: outside it, a
-                        // window edge would expose background.
-                        let off_x = (win_w - st.img_w * target) / 2.0;
-                        let off_y = (win_h - st.img_h * target) / 2.0;
-                        let aim_x = win_w / 2.0 - off_x - img_x * target;
-                        let aim_y = win_h / 2.0 - off_y - img_y * target;
-                        st.target_pan.x = aim_x.clamp(-off_x.abs(), off_x.abs());
-                        st.target_pan.y = aim_y.clamp(-off_y.abs(), off_y.abs());
-                    } else {
-                        st.target_pan = Vector2::ZERO;
-                    }
                 }
             }
 
