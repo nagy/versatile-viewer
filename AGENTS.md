@@ -28,6 +28,9 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
   without the clicking); image view — cursor on the image: zoom into fill
   aimed at the cursor (like `t`), or zoom out if the image already covers
   the whole window; cursor over the background: back to the grid (ESC).
+  In image view, holding `f` instead pans like a left-drag (pointer
+  captured/hidden, image follows); the action fires on release only when
+  the hold did not travel (tap vs. hold-and-pan).
 - Window title (en-dash separated, paths canonicalized then $HOME
   abbreviated to `~`): single image — `<file> – <dir> – versatile-viewer`;
   grid — `(<n> image(s)) – <dir> – versatile-viewer`. Title updates
@@ -70,6 +73,8 @@ Fast image (later: video) viewer. nsxiv meets mpv. JPEG XL first-class.
    default) vs pixelated (nearest-neighbor, 1:1 pixel peeping).
 4. [x] Panning: `h/j/k/l` + arrow keys, unrestricted. Left-drag follows the
    cursor directly (no ease; keyboard panning glides), at 2× travel speed.
+   Holding `f` in image view pans the same way (captured pointer, hidden
+   cursor); `f`'s tap action runs on release only if the hold did not move.
    While dragging the pointer is captured (hidden, unbounded deltas — no
    screen-edge blocking); on release it is warped back to the grab point,
    re-verified for a few frames against competing re-warps.

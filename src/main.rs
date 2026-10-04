@@ -536,6 +536,10 @@ fn main() -> Result<()> {
     // recenter the cursor. We warp again until the position sticks.
     let mut pending_restore: Option<Vector2> = None;
     let mut restore_tries = 0u32;
+    // `f` held captures the pointer like a left-drag (hold = pan, cursor
+    // hidden). A tap (no pointer travel) runs the `f` action on release
+    // instead, so a press and a press-and-hold can be told apart.
+    let mut f_capture = false;
 
     while !rl.window_should_close() && !quit {
         // VV_DEBUG: trace every key raylib sees (keycode per raylib/GLFW:
@@ -846,6 +850,49 @@ fn main() -> Result<()> {
                     _ => {}
                 }
             }
+            // `f` pan-drag: the press edge captures the pointer exactly like
+            // a left-drag (cursor hidden, unbounded virtual deltas); the
+            // release ends it and restores the pointer to the grab point.
+            // Travel marks it a hold (no tap action); otherwise the release
+            // runs the `f` action at the grab point. Auto-repeat re-fires
+            // the press edge while held, hence the `!pointer_captured` guard.
+            let mut f_click: Option<Vector2> = None;
+            if f_key && !pointer_captured {
+                grab_pos = rl.get_mouse_position();
+                drag_virtual = grab_pos;
+                rl.disable_cursor();
+                pointer_captured = true;
+                f_capture = true;
+                if debug {
+                    eprintln!("vv: f hold grab at ({:.0},{:.0})", grab_pos.x, grab_pos.y);
+                }
+            }
+            // `!is_key_down` also covers a press+release landing inside one
+            // frame (the pressed queue records the press, but there is no
+            // release edge to observe — without this the capture would stick).
+            if f_capture && !rl.is_key_down(KeyboardKey::KEY_F) {
+                // Fold in this frame's motion before the lock is released
+                // (the drag block below no longer runs once capture ends).
+                let delta = rl.get_mouse_delta();
+                drag_virtual.x += delta.x;
+                drag_virtual.y += delta.y;
+                let f_dragged = (drag_virtual - grab_pos).length() > 4.0;
+                rl.enable_cursor();
+                rl.set_mouse_position(grab_pos);
+                pending_restore = Some(grab_pos);
+                restore_tries = 0;
+                pointer_captured = false;
+                f_capture = false;
+                if !f_dragged {
+                    f_click = Some(grab_pos);
+                }
+                if debug {
+                    eprintln!(
+                        "vv: f release: grab ({:.0},{:.0}), virtual ({:.0},{:.0}), dragged {}",
+                        grab_pos.x, grab_pos.y, drag_virtual.x, drag_virtual.y, f_dragged
+                    );
+                }
+            }
             // Auto-repeat: the initial press fires immediately (edge from
             // the queue above), holding fires at the X server's repeat rate
             // after its delay.
@@ -908,19 +955,19 @@ fn main() -> Result<()> {
                     apply_view_filter(&thread, tex, st.pixelated);
                 }
             }
-            // `f` action key (needs known geometry; the hit test uses the
+            // `f` tap action (needs known geometry; the hit test uses the
             // drawn image rect — offset + pan at the on-screen scale):
             // cursor over the background returns to the grid (ESC-like);
             // over an image that covers the whole window it zooms out
             // (recentred, like t's zoom-out half); otherwise it zooms into
-            // fill view aimed at the cursor (like t's zoom-in half).
+            // fill view aimed at the cursor (like t's zoom-in half). Fires
+            // on the key release, and only when the hold did not pan.
             let mut f_open_grid = false;
             let mut f_zoom = false;
-            if f_key
+            if let Some(m) = f_click
                 && st.img_w > 0.0
                 && let Some(scale) = st.view_scale
             {
-                let m = rl.get_mouse_position();
                 let ox = (win_w - st.img_w * scale) / 2.0 + st.pan.x;
                 let oy = (win_h - st.img_h * scale) / 2.0 + st.pan.y;
                 let inside = m.x >= ox
@@ -956,6 +1003,7 @@ fn main() -> Result<()> {
                     restore_tries = 0;
                     pointer_captured = false;
                 }
+                f_capture = false;
                 st.mode = Mode::Grid;
                 // Hand the shown texture back to its grid entry and make
                 // that entry the grid selection (nsxiv-like).
@@ -1115,7 +1163,7 @@ fn main() -> Result<()> {
                 // it again at the position where the drag began.
                 let drag_pressed = rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT);
                 let drag_released = rl.is_mouse_button_released(MouseButton::MOUSE_BUTTON_LEFT);
-                if drag_pressed {
+                if drag_pressed && !pointer_captured {
                     grab_pos = rl.get_mouse_position();
                     drag_virtual = grab_pos;
                     rl.disable_cursor();
@@ -1123,7 +1171,7 @@ fn main() -> Result<()> {
                     if debug {
                         eprintln!("vv: drag grab at ({:.0},{:.0})", grab_pos.x, grab_pos.y);
                     }
-                } else if drag_released && pointer_captured {
+                } else if drag_released && pointer_captured && !f_capture {
                     if debug {
                         eprintln!(
                             "vv: drag release: grab ({:.0},{:.0}), virtual ({:.0},{:.0}), rl pos \
@@ -1142,7 +1190,9 @@ fn main() -> Result<()> {
                     restore_tries = 0;
                     pointer_captured = false;
                 }
-                let dragging = rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT);
+                // Any captured pointer (left-drag or held `f`) pans: the
+                // virtual deltas drive both the same way.
+                let dragging = pointer_captured;
                 if dragging {
                     let delta = rl.get_mouse_delta();
                     // Virtual cursor follows physical travel 1:1 (debug
