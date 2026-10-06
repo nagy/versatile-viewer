@@ -1,18 +1,18 @@
-//! Set the X11 WM_CLASS hint on the raylib window.
+//! Set the X11 `WM_CLASS` hint on the raylib window.
 //!
-//! raylib (via GLFW) derives WM_CLASS from the window title at creation
+//! raylib (via GLFW) derives `WM_CLASS` from the window title at creation
 //! time — here that is the full `versatile-viewer — <path>` string, which
 //! is useless for window rules — and never exposes GLFW's class-name
 //! hints. Instead we open our own libX11 connection and call
-//! `XSetClassHint` directly. No-op on Wayland (app_id there comes from the
+//! `XSetClassHint` directly. No-op on Wayland (`app_id` there comes from the
 //! desktop entry) and whenever no X display is reachable.
 
 use std::{ffi::CString, os::raw::c_void, ptr};
 
 use x11::xlib;
 
-/// WM_CLASS value: both res_name (instance) and res_class, matching the
-/// binary name.
+/// `WM_CLASS` value: both `res_name` (instance) and `res_class`, matching
+/// the binary name.
 const CLASS: &str = "vv";
 
 /// Stamp `WM_CLASS = vv` on the window behind raylib's `get_window_handle()`.

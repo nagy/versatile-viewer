@@ -427,8 +427,8 @@ fn main() -> Result<()> {
     #[cfg(target_os = "linux")]
     // SAFETY: handle only read; valid while the window is open.
     unsafe {
-        wmclass::set_class(rl.get_window_handle())
-    };
+        wmclass::set_class(rl.get_window_handle());
+    }
     // We quit via the q key handling ourselves (set_exit_key would make ESC
     // close the window outright instead of returning to the grid).
     rl.set_exit_key(None);

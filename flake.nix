@@ -125,6 +125,24 @@
             buildInputs = libInputs;
             meta.description = "Versatile-viewer doctests";
           };
+
+          # Lint gate: warnings are errors, every target included. Same
+          # clippy/cargo from nixpkgs as the devshell, so `nix flake check`
+          # and a plain `cargo clippy` agree instead of drifting with the
+          # toolchain the developer happens to have on PATH. `all = "deny"`
+          # in Cargo.toml only applies under clippy, so without this check
+          # the build/test/cargoDoc paths never see a lint error at all.
+          clippy = craneLib.cargoClippy {
+            inherit
+              src
+              cargoArtifacts
+              nativeBuildInputs
+              env
+              ;
+            buildInputs = libInputs;
+            cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+            meta.description = "Versatile-viewer clippy lint gate";
+          };
         in
         {
           packages.versatile-viewer = versatileViewer;
@@ -141,6 +159,8 @@
             buildInputs = libInputs;
             meta.description = "Versatile-viewer test suite";
           };
+
+          checks.clippy = clippy;
 
           checks.doctests = doctests;
 

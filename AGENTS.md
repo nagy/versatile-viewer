@@ -14,6 +14,7 @@ Fast image viewer (video later). nsxiv meets mpv. JPEG XL first-class. Binary `v
 ## Build
 
 - `nix build .#versatile-viewer-doc` — rustdoc HTML.
+- `nix flake check` gates clippy (`--all-targets -- --deny warnings`), tests, doctests, treefmt.
 
 ## Run
 

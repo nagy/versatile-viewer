@@ -76,7 +76,12 @@ pub(crate) fn fb_to_rgba(fb: &jxl_oxide::FrameBuffer) -> Result<(Vec<u8>, u32, u
     }
 
     let mut rgba = vec![0u8; width as usize * height as usize * 4];
-    for (dst, src) in rgba.chunks_exact_mut(4).zip(samples.chunks_exact(channels)) {
+    for (dst, src) in rgba
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(samples.chunks_exact(channels))
+    {
         let g = to_u8(src[0]);
         dst[0] = g;
         dst[1] = if channels >= 3 { to_u8(src[1]) } else { g };

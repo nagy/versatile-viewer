@@ -47,7 +47,7 @@ fn max_inflight() -> usize {
     static N: OnceLock<usize> = OnceLock::new();
     *N.get_or_init(|| {
         std::thread::available_parallelism()
-            .map_or(2, |n| n.get())
+            .map_or(2, std::num::NonZeroUsize::get)
             .max(2)
     })
 }
@@ -234,9 +234,15 @@ impl Grid {
             )
             .collect();
 
-        // 1. Apply finished decodes. Failed decodes mark their entry as
-        // failed (the cell stays visible, dimmed, with an error glyph)
-        // instead of splicing it out, so the grid count never lies.
+        self.drain_results(rl, thread, &keep);
+        self.dispatch(priority, scan_start, scan, &keep);
+    }
+
+    /// Step 1 of [`Self::load_pending`]: apply finished decodes. Failed
+    /// decodes mark their entry as failed (the cell stays visible, dimmed,
+    /// with an error glyph) instead of splicing it out, so the grid count
+    /// never lies. Textures upload here because that needs the main thread.
+    fn drain_results(&mut self, rl: &mut RaylibHandle, thread: &RaylibThread, keep: &HashSet<u64>) {
         while let Ok(res) = self.result_rx.try_recv() {
             self.inflight -= 1;
             let Some(i) = self.entries.iter().position(|e| e.id == res.id) else {
@@ -316,15 +322,17 @@ impl Grid {
                 drop(e.full.take());
             }
         }
+    }
 
-        // 2. Dispatch new jobs: `priority` indices first (the selection's
-        // or the open image's neighbors), then a wraparound scan from
-        // `scan_start`. Jobs run on the shared rayon pool, so several
-        // decodes proceed in parallel; each sends its result back over the
-        // channel, and the main thread uploads the texture above. The
-        // per-entry checks below (texture present, queued, viewing) make
-        // revisiting a priority index in the wraparound harmless, so no
-        // extra dedup bookkeeping is needed — O(1) per entry.
+    /// Step 2 of [`Self::load_pending`]: dispatch new jobs. `priority`
+    /// indices first (the selection's or the open image's neighbors), then a
+    /// wraparound scan from `scan_start`. Jobs run on the shared rayon pool,
+    /// so several decodes proceed in parallel; each sends its result back
+    /// over the channel for `drain_results` to upload. The per-entry checks
+    /// below (texture present, queued, viewing) make revisiting a priority
+    /// index in the wraparound harmless, so no extra dedup bookkeeping is
+    /// needed — O(1) per entry.
+    fn dispatch(&mut self, priority: &[usize], scan_start: usize, scan: bool, keep: &HashSet<u64>) {
         let n = self.entries.len();
         let start = scan_start.min(n);
         let order = priority.iter().copied().filter(|&i| i < n).chain(
@@ -333,7 +341,6 @@ impl Grid {
                 .flatten(),
         );
 
-        // Full decodes.
         for i in order {
             if self.inflight >= max_inflight() {
                 break;
