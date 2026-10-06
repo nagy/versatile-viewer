@@ -22,10 +22,7 @@ use std::{
 use anyhow::{Context, Result};
 use jxl_oxide::{InitializeResult, JxlImage};
 
-use crate::{
-    blurbg::{self, BlurData},
-    decode_common, downscale_rgba, fb_to_rgba, is_jxl,
-};
+use crate::{DecodedImage, blurbg, decode_common, downscale_rgba, fb_to_rgba, is_jxl};
 
 /// Wrap a jxl-oxide error (a bare boxed trait object) into anyhow,
 /// consuming the box (anyhow adopts `Box<dyn Error + Send + Sync>`).
@@ -47,7 +44,11 @@ const SLOW_PAUSE: Duration = Duration::from_secs(1);
 const SLOW_DRIBBLE_MAX: usize = 256 * 1024;
 
 /// Messages from the loader worker to the main thread.
-pub enum LoaderMsg {
+///
+/// Carries only successes; a decode failure arrives as an [`Err`] through the
+/// same channel, so [`Loader::try_recv`] can hand both back as one
+/// `Result<DecodeMsg, anyhow::Error>` with `?`-friendly composition.
+pub enum DecodeMsg {
     /// JXL header parsed: final (orientation-applied) dimensions are known,
     /// before any pixel data arrives.
     Header { width: u32, height: u32 },
@@ -55,26 +56,20 @@ pub enum LoaderMsg {
     /// blurry until done). Sent at most every `PREVIEW_INTERVAL`. `blur` is
     /// the tiny blurred copy for the `VV_BLUR_BG` gimmick (None when off).
     Preview {
-        rgba: Vec<u8>,
-        width: u32,
-        height: u32,
-        blur: Option<BlurData>,
+        image: DecodedImage,
+        blur: Option<DecodedImage>,
     },
     /// Final full-quality image.
     Done {
-        rgba: Vec<u8>,
-        width: u32,
-        height: u32,
-        blur: Option<BlurData>,
+        image: DecodedImage,
+        blur: Option<DecodedImage>,
     },
-    /// Decoding failed; no image will arrive.
-    Failed(String),
 }
 
 /// Handle for one in-flight image load. Drop to cancel.
 pub struct Loader {
     cancel: Arc<AtomicBool>,
-    rx: Receiver<LoaderMsg>,
+    rx: Receiver<Result<DecodeMsg, anyhow::Error>>,
 }
 
 impl Loader {
@@ -92,7 +87,7 @@ impl Loader {
         let blur_enabled = blurbg::enabled();
         let blur_px = blurbg::blur_px();
         std::thread::spawn(move || {
-            if let Err(err) = stream(
+            match stream(
                 &path,
                 &worker_cancel,
                 &tx,
@@ -100,7 +95,14 @@ impl Loader {
                 blur_px,
                 preview_px,
             ) {
-                let _ = tx.send(LoaderMsg::Failed(format!("{err:#}")));
+                Ok(Some(msg)) => {
+                    let _ = tx.send(Ok(msg));
+                }
+                // Cancelled: send nothing, just drop the channel.
+                Ok(None) => {}
+                Err(err) => {
+                    let _ = tx.send(Err(anyhow::anyhow!("{err:#}")));
+                }
             }
         });
         Loader { cancel, rx }
@@ -108,7 +110,7 @@ impl Loader {
 
     /// Poll the next queued message without blocking.
     #[must_use]
-    pub fn try_recv(&self) -> Option<LoaderMsg> {
+    pub fn try_recv(&self) -> Option<Result<DecodeMsg, anyhow::Error>> {
         self.rx.try_recv().ok()
     }
 }
@@ -119,27 +121,25 @@ impl Drop for Loader {
     }
 }
 
-/// Worker body. The caller turns errors into `Failed` messages.
+/// Worker body.
+///
+/// `Ok(Some(msg))` is a terminal success (`Done`); `Ok(None)` means the
+/// worker was cancelled and sends nothing; any non-terminal progress
+/// (`Header`, `Preview`) goes out through `tx` directly.
+#[allow(clippy::too_many_arguments)]
 fn stream(
     path: &Path,
     cancel: &AtomicBool,
-    tx: &Sender<LoaderMsg>,
+    tx: &Sender<Result<DecodeMsg, anyhow::Error>>,
     blur_enabled: bool,
     blur_px: u32,
     preview_px: u32,
-) -> Result<()> {
+) -> Result<Option<DecodeMsg>> {
     if !is_jxl(path) {
         // No progressive data for common formats: one full decode.
-        let decoded = decode_common(path)?;
-        let blur = blur_enabled
-            .then(|| blurbg::small_blur(&decoded.rgba, decoded.width, decoded.height, blur_px));
-        let _ = tx.send(LoaderMsg::Done {
-            rgba: decoded.rgba,
-            width: decoded.width,
-            height: decoded.height,
-            blur,
-        });
-        return Ok(());
+        let image = decode_common(path)?;
+        let blur = blur_enabled.then(|| blurbg::small_blur(&image, blur_px));
+        return Ok(Some(DecodeMsg::Done { image, blur }));
     }
 
     let mut file =
@@ -155,7 +155,7 @@ fn stream(
 
     loop {
         if cancel.load(Ordering::Relaxed) {
-            return Ok(());
+            return Ok(None);
         }
         // Slow mode: keep dribbling small chunks (with pauses) until the
         // first preview actually rendered; a single dribble would usually
@@ -173,11 +173,11 @@ fn stream(
                 match u.try_init().map_err(jxl_err)? {
                     InitializeResult::NeedMoreData(u) => uninit = Some(u),
                     InitializeResult::Initialized(img) => {
-                        let msg = LoaderMsg::Header {
+                        let msg = DecodeMsg::Header {
                             width: img.width(),
                             height: img.height(),
                         };
-                        let _ = tx.send(msg);
+                        let _ = tx.send(Ok(msg));
                         image = Some(img);
                     }
                 }
@@ -200,19 +200,13 @@ fn stream(
                 // Render errors are expected while groups/passes are
                 // missing; ignore them and retry after the next chunk.
                 if let Ok(render) = img.render_loading_frame() {
-                    let (rgba, width, height) = fb_to_rgba(&render.image_all_channels())?;
+                    let image = fb_to_rgba(&render.image_all_channels())?;
                     // Previews never need full resolution (the screen is
                     // smaller); cap the long side so a 50 MP image does not
                     // allocate ~200 MB of RGBA per preview.
-                    let (rgba, width, height) = downscale_rgba(rgba, width, height, preview_px);
-                    let blur =
-                        blur_enabled.then(|| blurbg::small_blur(&rgba, width, height, blur_px));
-                    let _ = tx.send(LoaderMsg::Preview {
-                        rgba,
-                        width,
-                        height,
-                        blur,
-                    });
+                    let image = downscale_rgba(image, preview_px);
+                    let blur = blur_enabled.then(|| blurbg::small_blur(&image, blur_px));
+                    let _ = tx.send(Ok(DecodeMsg::Preview { image, blur }));
                     last_preview = Some(Instant::now());
                 }
             }
@@ -223,7 +217,7 @@ fn stream(
             // Cancel-aware pause so ESC never sticks for a full pause.
             for _ in 0..(SLOW_PAUSE.as_millis() / 50) {
                 if cancel.load(Ordering::Relaxed) {
-                    return Ok(());
+                    return Ok(None);
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -236,15 +230,9 @@ fn stream(
         .render_frame(0)
         .map_err(jxl_err)
         .with_context(|| format!("failed to render {}", path.display()))?;
-    let (rgba, width, height) = fb_to_rgba(&render.image_all_channels())?;
-    let blur = blur_enabled.then(|| blurbg::small_blur(&rgba, width, height, blur_px));
-    let _ = tx.send(LoaderMsg::Done {
-        rgba,
-        width,
-        height,
-        blur,
-    });
-    Ok(())
+    let image = fb_to_rgba(&render.image_all_channels())?;
+    let blur = blur_enabled.then(|| blurbg::small_blur(&image, blur_px));
+    Ok(Some(DecodeMsg::Done { image, blur }))
 }
 
 /// Read up to `buf.len()` bytes; 0 at EOF. A single read call: regular files
@@ -266,7 +254,7 @@ mod tests {
     }
 
     /// Poll the loader until a message arrives or `timeout` elapses.
-    fn wait(loader: &Loader, timeout: Duration) -> Option<LoaderMsg> {
+    fn wait(loader: &Loader, timeout: Duration) -> Option<Result<DecodeMsg, anyhow::Error>> {
         let start = Instant::now();
         while start.elapsed() < timeout {
             if let Some(msg) = loader.try_recv() {
@@ -279,15 +267,20 @@ mod tests {
 
     #[test]
     fn downscale_rgba_caps_long_side_and_never_upscales() {
+        let img = |w: u32, h: u32, v: u8| DecodedImage {
+            width: w,
+            height: h,
+            data: vec![v; (w * h * 4) as usize],
+        };
         // Above the cap: 800x200 with cap 64 -> 64x16, RGBA8 length matches.
-        let (out, w, h) = downscale_rgba(vec![7u8; 800 * 200 * 4], 800, 200, 64);
-        assert_eq!((w, h), (64, 16));
-        assert_eq!(out.len(), (w * h * 4) as usize);
+        let out = downscale_rgba(img(800, 200, 7), 64);
+        assert_eq!((out.width, out.height), (64, 16));
+        assert_eq!(out.data.len(), (out.width * out.height * 4) as usize);
         // Below the cap: returned untouched.
-        let rgba = vec![7u8; 32 * 16 * 4];
-        let (out, w, h) = downscale_rgba(rgba.clone(), 32, 16, 64);
-        assert_eq!((w, h), (32, 16));
-        assert_eq!(out, rgba);
+        let src = img(32, 16, 7);
+        let out = downscale_rgba(src.clone(), 64);
+        assert_eq!((out.width, out.height), (32, 16));
+        assert_eq!(out.data, src.data);
     }
 
     #[test]
@@ -303,26 +296,22 @@ mod tests {
         let mut saw_header_or_preview = false;
         let done;
         loop {
-            match wait(&loader, Duration::from_secs(10)).expect("loader timed out") {
-                LoaderMsg::Done {
-                    rgba,
-                    width,
-                    height,
-                    ..
-                } => {
-                    done = (rgba, width, height);
+            match wait(&loader, Duration::from_secs(10))
+                .expect("loader timed out")
+                .expect("decode failed")
+            {
+                DecodeMsg::Done { image, .. } => {
+                    done = image;
                     break;
                 }
-                LoaderMsg::Header { .. } | LoaderMsg::Preview { .. } => {
+                DecodeMsg::Header { .. } | DecodeMsg::Preview { .. } => {
                     saw_header_or_preview = true;
                 }
-                LoaderMsg::Failed(err) => panic!("unexpected failure: {err}"),
             }
         }
         assert!(!saw_header_or_preview);
-        let (rgba, width, height) = done;
-        assert_eq!((width, height), (4, 3));
-        assert_eq!(rgba.len(), 4 * 3 * 4);
+        assert_eq!((done.width, done.height), (4, 3));
+        assert_eq!(done.data.len(), 4 * 3 * 4);
     }
 
     #[test]
@@ -336,9 +325,9 @@ mod tests {
         let loader = Loader::start(path, 512);
         loop {
             match wait(&loader, Duration::from_secs(10)).expect("loader timed out") {
-                LoaderMsg::Failed(_) => break,
-                LoaderMsg::Done { .. } => panic!("garbage must not decode"),
-                LoaderMsg::Header { .. } | LoaderMsg::Preview { .. } => {}
+                Err(_) => break,
+                Ok(DecodeMsg::Done { .. }) => panic!("garbage must not decode"),
+                Ok(DecodeMsg::Header { .. } | DecodeMsg::Preview { .. }) => {}
             }
         }
     }
@@ -354,9 +343,9 @@ mod tests {
         let loader = Loader::start(path, 512);
         loop {
             match wait(&loader, Duration::from_secs(10)).expect("loader timed out") {
-                LoaderMsg::Failed(_) => break,
-                LoaderMsg::Done { .. } => panic!("truncated file must not decode"),
-                LoaderMsg::Header { .. } | LoaderMsg::Preview { .. } => {}
+                Err(_) => break,
+                Ok(DecodeMsg::Done { .. }) => panic!("truncated file must not decode"),
+                Ok(DecodeMsg::Header { .. } | DecodeMsg::Preview { .. }) => {}
             }
         }
     }

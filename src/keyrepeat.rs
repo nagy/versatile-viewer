@@ -24,14 +24,6 @@ pub struct RepeatState {
 }
 
 impl RepeatState {
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            held: false,
-            next: 0.0,
-        }
-    }
-
     /// Feed this key's state once per frame.
     ///
     /// `edge`: the key was pressed this frame (from the raw event queue —
@@ -44,7 +36,7 @@ impl RepeatState {
     ///
     /// ```
     /// # use versatile_viewer::keyrepeat::RepeatState;
-    /// let mut st = RepeatState::new();
+    /// let mut st = RepeatState::default();
     /// // Initial press fires immediately.
     /// assert!(st.tick(true, true, 0.0, 0.66, 20.0));
     /// // Repeats wait out the delay (660 ms), then fire every 1/rate
@@ -118,7 +110,7 @@ mod tests {
 
     #[test]
     fn repeat_fires_on_edge_then_at_rate() {
-        let mut st = RepeatState::new();
+        let mut st = RepeatState::default();
         let (d, r) = (0.66, 20.0);
         assert!(st.tick(true, true, 0.0, d, r)); // initial press fires
         assert!(!st.tick(false, true, 0.1, d, r)); // held, before delay
@@ -134,7 +126,7 @@ mod tests {
     fn repeat_press_release_within_one_frame() {
         // Edge caught by the event queue fires once even though the key is
         // already up when polled (IsKeyDown false).
-        let mut st = RepeatState::new();
+        let mut st = RepeatState::default();
         assert!(st.tick(true, false, 0.0, 0.66, 20.0));
         assert!(!st.tick(false, false, 0.01, 0.66, 20.0));
         assert!(!st.tick(false, false, 1.0, 0.66, 20.0));
@@ -145,7 +137,7 @@ mod tests {
         // Without an observed press edge (edge missed entirely) the key is
         // not considered held, so no repeat fires — the first edge starts
         // the cycle.
-        let mut st = RepeatState::new();
+        let mut st = RepeatState::default();
         assert!(!st.tick(false, true, 0.0, 0.66, 20.0));
         assert!(!st.tick(false, true, 10.0, 0.66, 20.0));
         assert!(st.tick(true, true, 10.0, 0.66, 20.0));

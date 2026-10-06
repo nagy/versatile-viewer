@@ -29,7 +29,10 @@ use std::{
 use anyhow::{Context, Result};
 use raylib::{color::Color, prelude::*};
 
-use crate::blurbg::{self, BlurData};
+use crate::{
+    DecodedImage,
+    blurbg::{self},
+};
 
 const MARGIN: f32 = 8.0;
 const GAP: f32 = 8.0;
@@ -64,26 +67,39 @@ const THUMB_LONG_SIDE: u32 = 1024;
 
 /// A finished background decode, matched to an entry by its unique id
 /// (indices shift when entries come and go; ids never do).
-/// `blur` is the tiny blurred copy for the `VV_BLUR_BG` gimmick (None when
-/// the gimmick is off), computed here on the worker so the main thread
-/// never touches full-res pixels for it.
 struct DecodeResult {
     id: u64,
     res: anyhow::Result<DecodeOk>,
 }
 
-/// Successful decode payload: the thumbnail RGBA (whole image, aspect
-/// preserved, long side `THUMB_LONG_SIDE`) plus the untouched
-/// full-resolution RGBA. The main thread uploads the thumb for every
-/// entry but uploads the full texture only for keep-set entries
-/// (selection/open + prefetched neighbors), dropping the rest. The
-/// buffers live only until the next frame drains them, bounded by
-/// `max_inflight()`.
-type DecodeOk = (Vec<u8>, u32, u32, Option<BlurData>, (Vec<u8>, u32, u32));
+/// Successful decode payload: the thumbnail plus the untouched full-resolution
+/// image. The main thread uploads the thumb for every entry but uploads the
+/// full texture only for keep-set entries (selection/open + prefetched
+/// neighbors), dropping the rest. The buffers live only until the next frame
+/// drains them, bounded by `max_inflight()`.
+struct DecodeOk {
+    /// Whole image, aspect preserved, long side [`THUMB_LONG_SIDE`].
+    thumb: DecodedImage,
+    /// Tiny blurred copy for the `VV_BLUR_BG` gimmick (None when off).
+    blur: Option<DecodedImage>,
+    /// Untouched full-resolution image.
+    full: DecodedImage,
+}
 
-/// Grid layout: (`cols`, `cell_w`, `cell_h`, `side`, `content_h`).
-type Layout = (usize, f32, f32, f32, f32);
-/// Cache key: entry count + bit patterns of window size and zoom.
+/// Grid layout, in window pixels.
+#[derive(Clone, Copy)]
+struct Layout {
+    cols: usize,
+    cell_w: f32,
+    cell_h: f32,
+    /// Square thumbnail side drawn inside each cell.
+    side: f32,
+    /// Total content height (rows + gaps + margins), for scrolling.
+    content_h: f32,
+}
+
+/// Cache key for [`Grid::layout`]: entry count + bit patterns of window size
+/// and zoom.
 type LayoutKey = (usize, u32, u32, u32);
 
 /// One grid cell: the image file plus its uploaded full-resolution texture
@@ -116,13 +132,12 @@ pub struct GridEntry {
     pub viewing: bool,
     /// Tiny blurred copy for the `VV_BLUR_BG` background (kept when the
     /// texture is out in the image view; the view clones it).
-    pub blur: Option<BlurData>,
+    pub blur: Option<DecodedImage>,
 }
 
 /// What the user asked the grid to do this frame.
 #[derive(Clone, Copy, PartialEq)]
 pub enum GridAction {
-    None,
     /// Open the grid entry at this index in image mode.
     Open(usize),
     Quit,
@@ -249,18 +264,24 @@ impl Grid {
                 continue; // entry was spliced out meanwhile; drop the result
             };
             match res.res {
-                Ok((thumb, tw, th, blur, full)) if self.entries[i].texture.is_none() => {
-                    match crate::upload_rgba(rl, thread, &thumb, tw, th) {
+                Ok(ok) if self.entries[i].texture.is_none() => {
+                    let DecodeOk { thumb, blur, full } = ok;
+                    match crate::upload_rgba(rl, thread, &thumb.data, thumb.width, thumb.height) {
                         Ok(t) => {
-                            let (fw, fh) = (full.1, full.2);
                             let e = &mut self.entries[i];
-                            e.width = fw;
-                            e.height = fh;
+                            e.width = full.width;
+                            e.height = full.height;
                             e.texture = Some(t);
                             e.blur = blur;
                             e.queued = false;
                             if keep.contains(&e.id) {
-                                match crate::upload_rgba(rl, thread, &full.0, fw, fh) {
+                                match crate::upload_rgba(
+                                    rl,
+                                    thread,
+                                    &full.data,
+                                    full.width,
+                                    full.height,
+                                ) {
                                     Ok(ft) => e.full = Some(ft),
                                     Err(err) => {
                                         // Non-fatal: the thumb still shows;
@@ -281,7 +302,7 @@ impl Grid {
                         }
                     }
                 }
-                Ok((_, _, _, _, (full, fw, fh))) => {
+                Ok(DecodeOk { full, .. }) => {
                     // Re-decode of a thumb-only entry (keep-set refill):
                     // the thumb already exists, so only the full-res
                     // texture is wanted — and only if the entry is still
@@ -292,7 +313,7 @@ impl Grid {
                         && let Some(e) = self.entries.get_mut(i)
                         && e.full.is_none()
                     {
-                        match crate::upload_rgba(rl, thread, &full, fw, fh) {
+                        match crate::upload_rgba(rl, thread, &full.data, full.width, full.height) {
                             Ok(ft) => e.full = Some(ft),
                             Err(err) => {
                                 eprintln!("vv: {}: {err:#}", e.path.display());
@@ -365,12 +386,10 @@ impl Grid {
             let blur_enabled = self.blur_enabled;
             let blur_px = self.blur_px;
             rayon::spawn(move || {
-                let res = crate::decode_image(&path).map(|d| {
-                    let blur = blur_enabled
-                        .then(|| blurbg::small_blur(&d.rgba, d.width, d.height, blur_px));
-                    let (thumb, tw, th) =
-                        crate::downscale_rgba(d.rgba.clone(), d.width, d.height, THUMB_LONG_SIDE);
-                    (thumb, tw, th, blur, (d.rgba, d.width, d.height))
+                let res = crate::decode_image(&path).map(|full| {
+                    let blur = blur_enabled.then(|| blurbg::small_blur(&full, blur_px));
+                    let thumb = crate::downscale_rgba(full.clone(), THUMB_LONG_SIDE);
+                    DecodeOk { thumb, blur, full }
                 });
                 // Receiver gone (grid dropped): result is discarded and the
                 // job simply ends.
@@ -413,7 +432,7 @@ impl Grid {
         if n == 0 {
             return Vec::new();
         }
-        let (cols, ..) = self.layout(win_w, win_h);
+        let cols = self.layout(win_w, win_h).cols;
         let mut v = Vec::with_capacity(4);
         for i in [
             sel.checked_sub(1),
@@ -438,11 +457,11 @@ impl Grid {
         if self.entries.is_empty() {
             return;
         }
-        let (cols, _cw, ch, _side, content_h) = self.layout(win_w, win_h);
-        let scroll_max = (content_h - win_h).max(0.0);
-        let row = self.selected / cols;
-        let top = MARGIN + row as f32 * (ch + GAP);
-        let bottom = top + ch;
+        let l = self.layout(win_w, win_h);
+        let scroll_max = (l.content_h - win_h).max(0.0);
+        let row = self.selected / l.cols;
+        let top = MARGIN + row as f32 * (l.cell_h + GAP);
+        let bottom = top + l.cell_h;
         if top - self.scroll < MARGIN {
             self.scroll = top - MARGIN;
         }
@@ -456,12 +475,19 @@ impl Grid {
     /// while held, at the X server's rate — xset r rate), g/G jump to the
     /// first/last image, Enter opens the selected image, q quits. ESC is
     /// inert here (grid is the home view).
+    ///
+    /// `None` means no action this frame.
     // One frame's input pipeline (queue drain, repeat, zoom, scroll,
     // navigation, mouse) is intentionally linear; see main() too.
     #[allow(clippy::too_many_lines)]
-    pub fn handle_input(&mut self, rl: &mut RaylibHandle, win_w: f32, win_h: f32) -> GridAction {
+    pub fn handle_input(
+        &mut self,
+        rl: &mut RaylibHandle,
+        win_w: f32,
+        win_h: f32,
+    ) -> Option<GridAction> {
         if self.entries.is_empty() {
-            return GridAction::None;
+            return None;
         }
         // Drain the raw key queue instead of is_key_pressed(). A press whose
         // release lands within the same frame is invisible to is_key_pressed
@@ -554,8 +580,9 @@ impl Grid {
             }
             follow = true;
         }
-        let (cols, _cw, _ch, side, content_h) = self.layout(win_w, win_h);
-        let scroll_max = (content_h - win_h).max(0.0);
+        let l = self.layout(win_w, win_h);
+        let (cols, side) = (l.cols, l.side);
+        let scroll_max = (l.content_h - win_h).max(0.0);
         // Mouse wheel scrolls the grid (only meaningful once zoomed in past
         // the exact-fill layout, where nothing overflows).
         let wheel = rl.get_mouse_wheel_move();
@@ -606,10 +633,10 @@ impl Grid {
             self.ensure_visible(win_w, win_h);
         }
         if enter {
-            return GridAction::Open(self.selected);
+            return Some(GridAction::Open(self.selected));
         }
         if quit {
-            return GridAction::Quit;
+            return Some(GridAction::Quit);
         }
         // Mouse: click selects a cell; clicking the already-selected cell
         // opens it (first click selects, second opens — nsxiv-style).
@@ -619,7 +646,7 @@ impl Grid {
             && let Some(idx) = self.cell_at(rl.get_mouse_position(), win_w, win_h)
         {
             if idx == self.selected {
-                return GridAction::Open(idx);
+                return Some(GridAction::Open(idx));
             }
             self.selected = idx;
             self.ensure_visible(win_w, win_h);
@@ -627,14 +654,15 @@ impl Grid {
         if open_at_cursor && let Some(idx) = self.cell_at(rl.get_mouse_position(), win_w, win_h) {
             self.selected = idx;
             self.ensure_visible(win_w, win_h);
-            return GridAction::Open(idx);
+            return Some(GridAction::Open(idx));
         }
-        GridAction::None
+        None
     }
 
     /// Grid cell under the window-space point, if any.
     fn cell_at(&self, m: Vector2, win_w: f32, win_h: f32) -> Option<usize> {
-        let (cols, cw, ch, _side, _content_h) = self.layout(win_w, win_h);
+        let l = self.layout(win_w, win_h);
+        let (cw, ch) = (l.cell_w, l.cell_h);
         // Grid coordinates: content is drawn at MARGIN + col*(cw+GAP)
         // minus scroll, so add scroll back to the cursor position.
         let (mx, my) = (m.x - MARGIN, m.y + self.scroll - MARGIN);
@@ -642,11 +670,11 @@ impl Grid {
         let row = (my / (ch + GAP)).floor();
         if col >= 0.0
             && row >= 0.0
-            && col < cols as f32
+            && col < l.cols as f32
             && mx - col * (cw + GAP) <= cw
             && my - row * (ch + GAP) <= ch
         {
-            let idx = row as usize * cols + col as usize;
+            let idx = row as usize * l.cols + col as usize;
             if idx < self.entries.len() {
                 return Some(idx);
             }
@@ -667,7 +695,8 @@ impl Grid {
             );
             return;
         }
-        let (cols, cw, ch, side, _) = self.layout(win_w, win_h);
+        let l = self.layout(win_w, win_h);
+        let (cols, cw, ch, side) = (l.cols, l.cell_w, l.cell_h, l.side);
         for (i, e) in self.entries.iter().enumerate() {
             let col = i % cols;
             let row = i / cols;
@@ -769,7 +798,7 @@ fn best_fill_side(n: usize, aw: f32, ah: f32) -> f32 {
 /// rows no longer fit vertically: cells stay square at the target side
 /// (columns stretch a little so the grid still spans the width), rows
 /// overflow, and the caller scrolls.
-fn grid_layout_at(n: usize, win_w: f32, win_h: f32, zoom: f32) -> (usize, f32, f32, f32, f32) {
+fn grid_layout_at(n: usize, win_w: f32, win_h: f32, zoom: f32) -> Layout {
     let n = n.max(1);
     let aw = (win_w - 2.0 * MARGIN).max(1.0);
     let ah = (win_h - 2.0 * MARGIN).max(1.0);
@@ -796,7 +825,13 @@ fn grid_layout_at(n: usize, win_w: f32, win_h: f32, zoom: f32) -> (usize, f32, f
         let (cols, cw, ch) = best;
         let rows = n.div_ceil(cols);
         let content_h = 2.0 * MARGIN + rows as f32 * ch + (rows - 1) as f32 * GAP;
-        (cols, cw, ch, cw.min(ch), content_h)
+        Layout {
+            cols,
+            cell_w: cw,
+            cell_h: ch,
+            side: cw.min(ch),
+            content_h,
+        }
     } else {
         // Overflow: square cells at the target side, as many columns as fit
         // the width; the rows scroll vertically.
@@ -805,7 +840,13 @@ fn grid_layout_at(n: usize, win_w: f32, win_h: f32, zoom: f32) -> (usize, f32, f
         let cw = ((aw - (cols - 1) as f32 * GAP) / cols as f32).max(target);
         let rows = n.div_ceil(cols);
         let content_h = 2.0 * MARGIN + rows as f32 * target + (rows - 1) as f32 * GAP;
-        (cols, cw, target, target, content_h)
+        Layout {
+            cols,
+            cell_w: cw,
+            cell_h: target,
+            side: target,
+            content_h,
+        }
     }
 }
 
@@ -834,12 +875,12 @@ mod tests {
     #[test]
     fn grid_layout_default_single_image_fills_smaller_side() {
         // One image, 100x100 window, 8px margin -> 84x84 cell and thumb.
-        let (cols, cw, ch, side, content_h) = grid_layout_at(1, 100.0, 100.0, 1.0);
-        assert_eq!(cols, 1);
-        assert_eq!(cw, 84.0);
-        assert_eq!(ch, 84.0);
-        assert_eq!(side, 84.0);
-        assert_eq!(content_h, 100.0);
+        let l = grid_layout_at(1, 100.0, 100.0, 1.0);
+        assert_eq!(l.cols, 1);
+        assert_eq!(l.cell_w, 84.0);
+        assert_eq!(l.cell_h, 84.0);
+        assert_eq!(l.side, 84.0);
+        assert_eq!(l.content_h, 100.0);
     }
 
     #[test]
@@ -848,21 +889,21 @@ mod tests {
         // space, so the grid must span the whole window in both dimensions
         // and the content height must equal the window height.
         for (n, win_w, win_h) in [(1, 100.0, 100.0), (7, 1200.0, 700.0), (100, 1600.0, 900.0)] {
-            let (cols, cw, ch, side, content_h) = grid_layout_at(n, win_w, win_h, 1.0);
-            let rows = n.div_ceil(cols);
-            let span_w = 2.0 * MARGIN + cols as f32 * cw + (cols - 1) as f32 * GAP;
-            let span_h = 2.0 * MARGIN + rows as f32 * ch + (rows - 1) as f32 * GAP;
+            let l = grid_layout_at(n, win_w, win_h, 1.0);
+            let rows = n.div_ceil(l.cols);
+            let span_w = 2.0 * MARGIN + l.cols as f32 * l.cell_w + (l.cols - 1) as f32 * GAP;
+            let span_h = 2.0 * MARGIN + rows as f32 * l.cell_h + (rows - 1) as f32 * GAP;
             assert!((span_w - win_w).abs() < 0.01, "n={n}: span_w={span_w}");
             assert!((span_h - win_h).abs() < 0.01, "n={n}: span_h={span_h}");
-            assert_eq!(content_h, win_h);
-            assert_eq!(side, cw.min(ch));
+            assert_eq!(l.content_h, win_h);
+            assert_eq!(l.side, l.cell_w.min(l.cell_h));
         }
     }
 
     #[test]
     fn grid_layout_never_crashes_on_degenerate_input() {
-        let (cols, _, _, side, _) = grid_layout_at(3, 50.0, 800.0, 1.0);
-        assert!(cols >= 1 && side > 0.0);
+        let l = grid_layout_at(3, 50.0, 800.0, 1.0);
+        assert!(l.cols >= 1 && l.side > 0.0);
         let _ = grid_layout_at(0, 0.0, 0.0, 1.0);
         let _ = grid_layout_at(5, 800.0, 600.0, 0.0);
         let _ = grid_layout_at(5, 800.0, 600.0, 1000.0);
@@ -873,17 +914,22 @@ mod tests {
         // 9 images in a 640x640 window: default is 3x3 with ~208px thumbs;
         // zooming out must shrink the thumbs, add columns, and still span
         // the window exactly (no scrolling).
-        let (d_cols, _, _, d_side, _) = grid_layout_at(9, 640.0, 640.0, 1.0);
-        let (cols, cw, ch, side, content_h) = grid_layout_at(9, 640.0, 640.0, 0.8);
-        assert!(cols > d_cols, "cols={cols}, default={d_cols}");
-        assert!(side < d_side);
-        assert_eq!(side, cw.min(ch));
-        let rows = 9_usize.div_ceil(cols);
-        let span_w = 2.0 * MARGIN + cols as f32 * cw + (cols - 1) as f32 * GAP;
-        let span_h = 2.0 * MARGIN + rows as f32 * ch + (rows - 1) as f32 * GAP;
+        let default = grid_layout_at(9, 640.0, 640.0, 1.0);
+        let l = grid_layout_at(9, 640.0, 640.0, 0.8);
+        assert!(
+            l.cols > default.cols,
+            "cols={}, default={}",
+            l.cols,
+            default.cols
+        );
+        assert!(l.side < default.side);
+        assert_eq!(l.side, l.cell_w.min(l.cell_h));
+        let rows = 9_usize.div_ceil(l.cols);
+        let span_w = 2.0 * MARGIN + l.cols as f32 * l.cell_w + (l.cols - 1) as f32 * GAP;
+        let span_h = 2.0 * MARGIN + rows as f32 * l.cell_h + (rows - 1) as f32 * GAP;
         assert!((span_w - 640.0).abs() < 0.01, "span_w={span_w}");
         assert!((span_h - 640.0).abs() < 0.01, "span_h={span_h}");
-        assert_eq!(content_h, 640.0);
+        assert_eq!(l.content_h, 640.0);
     }
 
     #[test]
@@ -891,19 +937,24 @@ mod tests {
         // Zooming in grows thumbs past the largest exact-fill size: fewer
         // columns, square thumbs at the zoomed size, content taller than
         // the window (scrollable).
-        let (d_cols, _, _, d_side, _) = grid_layout_at(9, 640.0, 640.0, 1.0);
-        let (cols, cw, ch, side, content_h) = grid_layout_at(9, 640.0, 640.0, 2.0);
-        assert!(cols < d_cols, "cols={cols}, default={d_cols}");
-        assert!(side > d_side);
-        assert_eq!(side, ch);
-        assert!(cw >= side);
-        assert!(content_h > 640.0, "content_h={content_h}");
+        let default = grid_layout_at(9, 640.0, 640.0, 1.0);
+        let l = grid_layout_at(9, 640.0, 640.0, 2.0);
+        assert!(
+            l.cols < default.cols,
+            "cols={}, default={}",
+            l.cols,
+            default.cols
+        );
+        assert!(l.side > default.side);
+        assert_eq!(l.side, l.cell_h);
+        assert!(l.cell_w >= l.side);
+        assert!(l.content_h > 640.0, "content_h={}", l.content_h);
     }
 
     #[test]
     fn grid_layout_side_is_square_of_cell_minimum() {
-        let (_, cw, ch, side, _) = grid_layout_at(7, 1200.0, 700.0, 1.0);
-        assert_eq!(side, cw.min(ch));
+        let l = grid_layout_at(7, 1200.0, 700.0, 1.0);
+        assert_eq!(l.side, l.cell_w.min(l.cell_h));
     }
 
     #[test]

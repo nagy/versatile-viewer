@@ -4,18 +4,16 @@
 //! side by default) blurred copy of the image, uploaded as a texture and
 //! upscaled by the GPU with bilinear filtering — the upscale itself is the
 //! blur, so the CPU cost is a single downscale+blur pass on a worker
-//! thread. Drawn
-//! scaled to cover the whole window (fit on the narrower side, overflow
-//! cropped) behind the sharp image, dimmed so the image
-//! stands out; `VV_BG_DIM` sets the background brightness as a 0..=1
-//! multiplier (default 0.6).
+//! thread. It is drawn scaled to cover the whole window (fit on the narrower
+//! side, overflow cropped) behind the sharp image, dimmed so the image stands
+//! out; `VV_BG_DIM` sets the background brightness as a 0..=1 multiplier
+//! (default 0.6).
 
 use std::time::Instant;
 
 use raylib::{color::Color, consts::TextureFilter, prelude::*, texture::RaylibTexture2D};
 
-/// Tiny blurred RGBA8 copy of an image, ready to upload: (rgba, w, h).
-pub type BlurData = (Vec<u8>, u32, u32);
+use crate::DecodedImage;
 
 /// Long side of the blurred background texture (GPU-upscaled from this).
 /// Configurable via `VV_BLUR_PX`; fewer pixels = blurrier.
@@ -31,7 +29,7 @@ const FADE_SECS: f64 = 0.4;
 /// Is the gimmick enabled? Strict opt-in: exactly `VV_BLUR_BG=1`.
 #[must_use]
 pub fn enabled() -> bool {
-    std::env::var("VV_BLUR_BG").as_deref() == Ok("1")
+    std::env::var_os("VV_BLUR_BG").is_some_and(|v| v == "1")
 }
 
 /// Long side of the background texture, from `VV_BLUR_PX` (clamped to a sane
@@ -64,20 +62,31 @@ fn parse_dim(s: Option<&str>) -> f32 {
 /// # Examples
 ///
 /// ```
-/// # use versatile_viewer::blurbg::small_blur;
+/// # use versatile_viewer::{DecodedImage, blurbg::small_blur};
 /// // Landscape: the long side lands exactly on `long_side`, aspect
 /// // preserved, 4 bytes per pixel.
-/// let (rgba, w, h) = small_blur(&vec![0; 4 * 200 * 100], 200, 100, 128);
-/// assert_eq!((w, h), (128, 64));
-/// assert_eq!(rgba.len(), 4 * w as usize * h as usize);
+/// let img = DecodedImage {
+///     width: 200,
+///     height: 100,
+///     data: vec![0; 4 * 200 * 100],
+/// };
+/// let img = small_blur(&img, 128);
+/// assert_eq!((img.width, img.height), (128, 64));
+/// assert_eq!(img.data.len(), 4 * img.width as usize * img.height as usize);
 ///
 /// // Portrait: the long side switches to the height.
-/// let (rgba, w, h) = small_blur(&vec![0; 4 * 100 * 200], 100, 200, 128);
-/// assert_eq!((w, h), (64, 128));
-/// assert_eq!(rgba.len(), 4 * w as usize * h as usize);
+/// let img = DecodedImage {
+///     width: 100,
+///     height: 200,
+///     data: vec![0; 4 * 100 * 200],
+/// };
+/// let img = small_blur(&img, 128);
+/// assert_eq!((img.width, img.height), (64, 128));
+/// assert_eq!(img.data.len(), 4 * img.width as usize * img.height as usize);
 /// ```
 #[must_use]
-pub fn small_blur(rgba: &[u8], width: u32, height: u32, long_side: u32) -> BlurData {
+pub fn small_blur(image: &DecodedImage, long_side: u32) -> DecodedImage {
+    let (width, height) = (image.width, image.height);
     let (tw, th) = if width >= height {
         (
             long_side,
@@ -90,11 +99,15 @@ pub fn small_blur(rgba: &[u8], width: u32, height: u32, long_side: u32) -> BlurD
         )
     };
     let img: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
-        image::ImageBuffer::from_raw(width, height, rgba.to_vec())
+        image::ImageBuffer::from_raw(width, height, image.data.clone())
             .expect("rgba buffer matches dimensions");
     let small = image::imageops::resize(&img, tw, th, image::imageops::FilterType::Triangle);
     let blurred = image::imageops::blur(&small, BLUR_SIGMA);
-    (blurred.into_raw(), tw, th)
+    DecodedImage {
+        width: tw,
+        height: th,
+        data: blurred.into_raw(),
+    }
 }
 
 /// GPU side of the gimmick: holds the blurred background texture for the
@@ -131,8 +144,12 @@ impl BlurBg {
 
     /// Upload a tiny blurred copy as the background texture, reusing the
     /// texture in place when dimensions match (streaming previews).
-    fn upload(&mut self, rl: &mut RaylibHandle, thread: &RaylibThread, data: BlurData) {
-        let (rgba, width, height) = data;
+    fn upload(&mut self, rl: &mut RaylibHandle, thread: &RaylibThread, data: DecodedImage) {
+        let DecodedImage {
+            width,
+            height,
+            data: rgba,
+        } = data;
         let same = matches!(&self.tex, Some(t) if t.width() == width as i32 && t.height() == height as i32);
         if same {
             if let Some(t) = &mut self.tex
@@ -164,7 +181,7 @@ impl BlurBg {
         &mut self,
         rl: &mut RaylibHandle,
         thread: &RaylibThread,
-        data: BlurData,
+        data: DecodedImage,
         tag: Option<u64>,
     ) {
         self.upload(rl, thread, data);
@@ -181,17 +198,17 @@ impl BlurBg {
         &mut self,
         rl: &mut RaylibHandle,
         thread: &RaylibThread,
-        data: &BlurData,
+        data: &DecodedImage,
         tag: u64,
     ) {
         if self.current == Some(tag) {
             return;
         }
-        let (rgba, width, height) = data;
+        let (rgba, width, height) = (&data.data, data.width, data.height);
         // First background ever (empty window at startup): show it
         // instantly, no fade-in from black.
         let first = self.tex.is_none();
-        match crate::upload_rgba(rl, thread, rgba, *width, *height) {
+        match crate::upload_rgba(rl, thread, rgba, width, height) {
             Ok(t) => {
                 t.set_texture_filter(thread, TextureFilter::TEXTURE_FILTER_BILINEAR);
                 if first {
@@ -282,24 +299,25 @@ mod tests {
 
     #[test]
     fn small_blur_dims_and_size() {
+        let img = |w: u32, h: u32, v: u8| DecodedImage {
+            width: w,
+            height: h,
+            data: vec![v; (w * h * 4) as usize],
+        };
         // Long side 64 (VV_BLUR_PX): 800x200 in -> 64x16 out, RGBA8 matches.
-        let rgba = vec![128u8; 800 * 200 * 4];
-        let (out, w, h) = small_blur(&rgba, 800, 200, 64);
-        assert_eq!((w, h), (64, 16));
-        assert_eq!(out.len(), (w * h * 4) as usize);
+        let out = small_blur(&img(800, 200, 128), 64);
+        assert_eq!((out.width, out.height), (64, 16));
+        assert_eq!(out.data.len(), (64 * 16 * 4) as usize);
         // Portrait input keeps the aspect the other way around.
-        let rgba = vec![0u8; 100 * 400 * 4];
-        let (_, w, h) = small_blur(&rgba, 100, 400, 64);
-        assert_eq!((w, h), (16, 64));
+        let out = small_blur(&img(100, 400, 0), 64);
+        assert_eq!((out.width, out.height), (16, 64));
         // Configurable long side (VV_BLUR_PX) is honored.
-        let rgba = vec![0u8; 800 * 200 * 4];
-        let (_, w, h) = small_blur(&rgba, 800, 200, 256);
-        assert_eq!((w, h), (256, 64));
+        let out = small_blur(&img(800, 200, 0), 256);
+        assert_eq!((out.width, out.height), (256, 64));
         // Degenerate 1xN input still yields at least 1px on each side.
-        let rgba = vec![0u8; 9 * 4];
-        let (out, w, h) = small_blur(&rgba, 1, 9, 64);
-        assert!(w >= 1 && h >= 1);
-        assert_eq!(out.len(), (w * h * 4) as usize);
+        let out = small_blur(&img(1, 9, 0), 64);
+        assert!(out.width >= 1 && out.height >= 1);
+        assert_eq!(out.data.len(), (out.width * out.height * 4) as usize);
     }
 
     #[test]

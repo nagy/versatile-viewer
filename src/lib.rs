@@ -33,12 +33,16 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use raylib::{consts::PixelFormat, prelude::*};
 
-/// A fully decoded image: RGBA8 plus its pixel dimensions.
+/// An RGBA8 pixel buffer plus its dimensions.
+///
+/// Decoded images, downscaled buffers and thumbnails all share this type;
+/// `data` is row-major, 4 bytes per pixel.
+#[derive(Clone)]
 pub struct DecodedImage {
     pub width: u32,
     pub height: u32,
     /// RGBA8, row-major, 4 bytes per pixel.
-    pub rgba: Vec<u8>,
+    pub data: Vec<u8>,
 }
 
 /// Decode a JPEG XL file with jxl-oxide (pure Rust).
@@ -52,12 +56,7 @@ fn decode_jxl(path: &Path) -> Result<DecodedImage> {
         .map_err(|e| anyhow::anyhow!("jxl-oxide: {e}"))
         .context("failed to render frame")?;
 
-    let (rgba, width, height) = fb_to_rgba(&render.image_all_channels())?;
-    Ok(DecodedImage {
-        width,
-        height,
-        rgba,
-    })
+    fb_to_rgba(&render.image_all_channels())
 }
 
 /// Convert a jxl-oxide framebuffer (f32 samples, 1–4 interleaved channels)
@@ -66,7 +65,7 @@ fn decode_jxl(path: &Path) -> Result<DecodedImage> {
 /// Grayscale (1 channel) is replicated into R/G/B; gray+alpha (2 channels)
 /// additionally takes alpha from channel 1. RGB (3 channels) gets alpha = 1,
 /// RGBA (4 channels) is taken as-is.
-pub(crate) fn fb_to_rgba(fb: &jxl_oxide::FrameBuffer) -> Result<(Vec<u8>, u32, u32)> {
+pub(crate) fn fb_to_rgba(fb: &jxl_oxide::FrameBuffer) -> Result<DecodedImage> {
     let width = fb.width() as u32;
     let height = fb.height() as u32;
     let channels = fb.channels();
@@ -92,7 +91,11 @@ pub(crate) fn fb_to_rgba(fb: &jxl_oxide::FrameBuffer) -> Result<(Vec<u8>, u32, u
             255
         };
     }
-    Ok((rgba, width, height))
+    Ok(DecodedImage {
+        width,
+        height,
+        data: rgba,
+    })
 }
 
 const fn to_u8(v: f32) -> u8 {
@@ -109,7 +112,7 @@ fn decode_common(path: &Path) -> Result<DecodedImage> {
     Ok(DecodedImage {
         width,
         height,
-        rgba: rgba.into_raw(),
+        data: rgba.into_raw(),
     })
 }
 
@@ -187,46 +190,69 @@ const MAX_TEXTURE_SIDE: u32 = 8192;
 /// # Examples
 ///
 /// ```
-/// # use versatile_viewer::downscale_rgba;
+/// # use versatile_viewer::{DecodedImage, downscale_rgba};
 /// // Below the cap: returned unchanged.
-/// let (rgba, w, h) = downscale_rgba(vec![0; 4 * 2 * 2], 2, 2, 8);
-/// assert_eq!((w, h), (2, 2));
-/// assert_eq!(rgba.len(), 4 * 2 * 2);
+/// let img = DecodedImage {
+///     width: 2,
+///     height: 2,
+///     data: vec![0; 4 * 2 * 2],
+/// };
+/// let img = downscale_rgba(img, 8);
+/// assert_eq!((img.width, img.height), (2, 2));
+/// assert_eq!(img.data.len(), 4 * 2 * 2);
 ///
 /// // Over it: aspect preserved, long side exactly the cap.
-/// let (rgba, w, h) = downscale_rgba(vec![0; 4 * 200 * 100], 200, 100, 100);
-/// assert_eq!((w, h), (100, 50));
-/// assert_eq!(rgba.len(), 4 * 100 * 50);
+/// let img = DecodedImage {
+///     width: 200,
+///     height: 100,
+///     data: vec![0; 4 * 200 * 100],
+/// };
+/// let img = downscale_rgba(img, 100);
+/// assert_eq!((img.width, img.height), (100, 50));
+/// assert_eq!(img.data.len(), 4 * 100 * 50);
 ///
 /// // Degenerate zero dimensions are clamped, the buffer untouched.
-/// let (rgba, w, h) = downscale_rgba(Vec::new(), 0, 0, 8);
-/// assert_eq!((w, h), (1, 1));
-/// assert!(rgba.is_empty());
+/// let img = DecodedImage {
+///     width: 0,
+///     height: 0,
+///     data: Vec::new(),
+/// };
+/// let img = downscale_rgba(img, 8);
+/// assert_eq!((img.width, img.height), (1, 1));
+/// assert!(img.data.is_empty());
 /// ```
 ///
 /// # Panics
 ///
-/// Panics if `rgba` does not hold exactly `width * height * 4` bytes
+/// Panics if `image.data` does not hold exactly `width * height * 4` bytes
 /// (and a downscale is actually needed).
 #[must_use]
-pub fn downscale_rgba(
-    rgba: Vec<u8>,
-    width: u32,
-    height: u32,
-    long_side: u32,
-) -> (Vec<u8>, u32, u32) {
+pub fn downscale_rgba(image: DecodedImage, long_side: u32) -> DecodedImage {
+    let DecodedImage {
+        width,
+        height,
+        data,
+    } = image;
     let (width, height) = (width.max(1), height.max(1));
     let m = width.max(height);
     if m <= long_side.max(1) {
-        return (rgba, width, height);
+        return DecodedImage {
+            width,
+            height,
+            data,
+        };
     }
     let scale = long_side.max(1) as f32 / m as f32;
     let nw = ((width as f32 * scale).round() as u32).max(1);
     let nh = ((height as f32 * scale).round() as u32).max(1);
     let img: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
-        image::ImageBuffer::from_raw(width, height, rgba).expect("rgba matches dimensions");
+        image::ImageBuffer::from_raw(width, height, data).expect("rgba matches dimensions");
     let small = image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle);
-    (small.into_raw(), nw, nh)
+    DecodedImage {
+        width: nw,
+        height: nh,
+        data: small.into_raw(),
+    }
 }
 
 /// Upload a raw RGBA8 buffer as a GPU texture.
@@ -250,9 +276,15 @@ pub fn upload_rgba(
     // them to the safe side limit here, in the single choke point.
     let owned;
     let (rgba, width, height) = if width.max(height) > MAX_TEXTURE_SIDE {
-        let (buf, w, h) = downscale_rgba(rgba.to_vec(), width, height, MAX_TEXTURE_SIDE);
-        owned = buf;
-        (owned.as_slice(), w, h)
+        owned = downscale_rgba(
+            DecodedImage {
+                width,
+                height,
+                data: rgba.to_vec(),
+            },
+            MAX_TEXTURE_SIDE,
+        );
+        (owned.data.as_slice(), owned.width, owned.height)
     } else {
         (rgba, width, height)
     };
@@ -330,9 +362,9 @@ mod tests {
         // 1 channel (grayscale): gray sample goes to R, G and B; alpha = 255.
         let mut fb = jxl_oxide::FrameBuffer::new(2, 1, 1);
         fb.buf_mut()[..2].copy_from_slice(&[0.0, 0.5]);
-        let (rgba, w, h) = fb_to_rgba(&fb).unwrap();
-        assert_eq!((w, h), (2, 1));
-        assert_eq!(rgba, [0, 0, 0, 255, 128, 128, 128, 255]);
+        let img = fb_to_rgba(&fb).unwrap();
+        assert_eq!((img.width, img.height), (2, 1));
+        assert_eq!(img.data, [0, 0, 0, 255, 128, 128, 128, 255]);
     }
 
     #[test]
@@ -340,9 +372,9 @@ mod tests {
         // 2 channels (gray + alpha): gray replicated, alpha from channel 1.
         let mut fb = jxl_oxide::FrameBuffer::new(1, 1, 2);
         fb.buf_mut()[..2].copy_from_slice(&[1.0, 0.5]);
-        let (rgba, w, h) = fb_to_rgba(&fb).unwrap();
-        assert_eq!((w, h), (1, 1));
-        assert_eq!(rgba, [255, 255, 255, 128]);
+        let img = fb_to_rgba(&fb).unwrap();
+        assert_eq!((img.width, img.height), (1, 1));
+        assert_eq!(img.data, [255, 255, 255, 128]);
     }
 
     #[test]
@@ -354,7 +386,7 @@ mod tests {
         let decoded = decode_image(&path).unwrap();
         assert_eq!(decoded.width, 3);
         assert_eq!(decoded.height, 2);
-        assert_eq!(decoded.rgba.len(), 3 * 2 * 4);
+        assert_eq!(decoded.data.len(), 3 * 2 * 4);
     }
 
     #[test]
@@ -370,7 +402,7 @@ mod tests {
         let decoded = decode_image(&path).unwrap();
         assert_eq!(decoded.width, 5);
         assert_eq!(decoded.height, 4);
-        assert_eq!(decoded.rgba.len(), 5 * 4 * 4);
+        assert_eq!(decoded.data.len(), 5 * 4 * 4);
     }
 
     #[test]
@@ -392,7 +424,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("encode {ext}: {e}"));
             let decoded = decode_image(&path).unwrap_or_else(|e| panic!("decode {ext}: {e}"));
             assert_eq!((decoded.width, decoded.height), (4, 2), "{ext}");
-            assert_eq!(decoded.rgba.len(), 4 * 2 * 4, "{ext}");
+            assert_eq!(decoded.data.len(), 4 * 2 * 4, "{ext}");
         }
     }
 

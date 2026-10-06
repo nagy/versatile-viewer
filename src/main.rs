@@ -38,11 +38,12 @@ use raylib::{
 #[cfg(target_os = "linux")]
 use versatile_viewer::wmclass;
 use versatile_viewer::{
+    DecodedImage,
     blurbg::{self, BlurBg},
     decode_image,
     grid::{Grid, GridAction},
     keyrepeat,
-    loader::{Loader, LoaderMsg},
+    loader::{DecodeMsg, Loader},
     upload_rgba,
 };
 
@@ -197,7 +198,7 @@ fn attach_blur_bg(
     blur_bg: &mut Option<BlurBg>,
     rl: &mut RaylibHandle,
     thread: &RaylibThread,
-    blur: Option<&blurbg::BlurData>,
+    blur: Option<&DecodedImage>,
     tag: Option<u64>,
 ) {
     if let (Some(bg), Some(data)) = (blur_bg.as_mut(), blur) {
@@ -237,13 +238,15 @@ fn put_back_view(
 ///
 /// With `set_scale_now`, the initial fit scale is set immediately because
 /// the caller's frame skips the per-frame scale math (it ran earlier).
+/// `win` is the window size in pixels, matching the window-space
+/// [`Vector2`] used elsewhere in the image view.
 fn show_entry(
     st: &mut ViewState,
     grid: &mut Grid,
     idx: usize,
     rl: &mut RaylibHandle,
     thread: &RaylibThread,
-    win: (f32, f32),
+    win: Vector2,
     set_scale_now: bool,
 ) {
     let (id, tex, w, h, path, queued, thumb, blur) = {
@@ -272,8 +275,7 @@ fn show_entry(
         st.loader = None;
         st.view_loading = false;
         if set_scale_now {
-            let (win_w, win_h) = win;
-            st.view_scale = Some((win_w / st.img_w).min(win_h / st.img_h));
+            st.view_scale = Some((win.x / st.img_w).min(win.y / st.img_h));
         }
         attach_blur_bg(&mut st.blur_bg, rl, thread, blur.as_ref(), st.open_id);
     } else {
@@ -289,8 +291,7 @@ fn show_entry(
             st.img_w = w as f32;
             st.img_h = h as f32;
             if set_scale_now {
-                let (win_w, win_h) = win;
-                st.view_scale = Some((win_w / st.img_w).min(win_h / st.img_h));
+                st.view_scale = Some((win.x / st.img_w).min(win.y / st.img_h));
             }
         } else {
             st.img_w = 0.0; // dimensions arrive with the header/texture
@@ -313,10 +314,11 @@ fn show_entry(
 
 /// Display a path with `$HOME` collapsed to `~`.
 fn tilde_path(path: &Path) -> String {
-    if let Ok(home) = env::var("HOME") {
-        // Skip the pathological HOME=/ case (everything would collapse).
-        let home = home.trim_end_matches('/');
-        if home.is_empty() || home == "/" {
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = Path::new(&home);
+        // Skip the pathological HOME=/ case (everything would collapse) and
+        // an unset-but-empty value.
+        if home.as_os_str().is_empty() || home == Path::new("/") {
             return path.display().to_string();
         }
         if let Ok(rest) = path.strip_prefix(home) {
@@ -398,13 +400,8 @@ fn main() -> Result<()> {
     // RGBA buffer is still around (before the window/GL context exists);
     // uploaded once the window is open.
     let single_blur = if dir_grid.is_none() && blurbg::enabled() {
-        let d = single_decoded.as_ref().unwrap();
-        Some(blurbg::small_blur(
-            &d.rgba,
-            d.width,
-            d.height,
-            blurbg::blur_px(),
-        ))
+        let d = single_decoded.as_ref().expect("single file decoded");
+        Some(blurbg::small_blur(d, blurbg::blur_px()))
     } else {
         None
     };
@@ -469,7 +466,7 @@ fn main() -> Result<()> {
         st.view_tex = Some(upload_rgba(
             &mut rl,
             &thread,
-            &decoded.rgba,
+            &decoded.data,
             decoded.width,
             decoded.height,
         )?);
@@ -478,7 +475,7 @@ fn main() -> Result<()> {
             st.view_tex.as_ref().expect("just uploaded"),
             st.pixelated,
         );
-        drop(decoded.rgba);
+        drop(decoded);
         st.img_w = win0_w as f32;
         st.img_h = win0_h as f32;
         if let Some(data) = single_blur {
@@ -488,7 +485,7 @@ fn main() -> Result<()> {
     // A one-image directory skips the grid: jump straight into that image
     // (ESC still returns to the grid view).
     if grid.as_ref().is_some_and(|g| g.entries.len() == 1) {
-        let win = (rl.get_screen_width() as f32, rl.get_screen_height() as f32);
+        let win = Vector2::new(rl.get_screen_width() as f32, rl.get_screen_height() as f32);
         show_entry(
             &mut st,
             grid.as_mut().unwrap(),
@@ -514,8 +511,8 @@ fn main() -> Result<()> {
 
     // No set_target_fps: vsync paces the frame loop (see the builder above).
     // Auto-repeat state for image-mode prev/next (xset r rate values).
-    let mut rep_nav_fwd = keyrepeat::RepeatState::new();
-    let mut rep_nav_back = keyrepeat::RepeatState::new();
+    let mut rep_nav_fwd = keyrepeat::RepeatState::default();
+    let mut rep_nav_back = keyrepeat::RepeatState::default();
     // Previous frame's window size: self-tracked resize detection (see the
     // `resized` computation in the loop).
     let mut last_win: Option<(f32, f32)> = None;
@@ -673,7 +670,15 @@ fn main() -> Result<()> {
                             // Decode landed: its full-res texture was kept
                             // for the open entry (keep set) — show_entry
                             // takes it over.
-                            show_entry(&mut st, g, i, &mut rl, &thread, (win_w, win_h), false);
+                            show_entry(
+                                &mut st,
+                                g,
+                                i,
+                                &mut rl,
+                                &thread,
+                                Vector2::new(win_w, win_h),
+                                false,
+                            );
                         }
                         // else: the decode is still in flight or awaiting
                         // dispatch (thumb-only keep-set entry; the open
@@ -687,7 +692,7 @@ fn main() -> Result<()> {
             if let Some(loader) = &st.loader {
                 while let Some(msg) = loader.try_recv() {
                     match msg {
-                        LoaderMsg::Header { width, height } => {
+                        Ok(DecodeMsg::Header { width, height }) => {
                             // Dimensions known: fit-down immediately (the
                             // ease block only runs from the next frame on).
                             st.img_w = width as f32;
@@ -697,20 +702,15 @@ fn main() -> Result<()> {
                             st.target_pan = Vector2::ZERO;
                             st.view_scale = Some((win_w / st.img_w).min(win_h / st.img_h));
                         }
-                        LoaderMsg::Preview {
-                            rgba,
-                            width,
-                            height,
-                            blur,
-                        } => {
+                        Ok(DecodeMsg::Preview { image, blur }) => {
                             // Progressively better render of the same image.
                             show_frame(
                                 &mut rl,
                                 &thread,
                                 &mut st.view_tex,
-                                &rgba,
-                                width,
-                                height,
+                                &image.data,
+                                image.width,
+                                image.height,
                                 st.pixelated,
                             )?;
                             attach_blur_bg(
@@ -721,16 +721,11 @@ fn main() -> Result<()> {
                                 st.open_id,
                             );
                         }
-                        LoaderMsg::Done {
-                            rgba,
-                            width,
-                            height,
-                            blur,
-                        } => {
+                        Ok(DecodeMsg::Done { image, blur }) => {
                             // Non-JXL formats only learn dimensions here.
                             if st.img_w == 0.0 {
-                                st.img_w = width as f32;
-                                st.img_h = height as f32;
+                                st.img_w = image.width as f32;
+                                st.img_h = image.height as f32;
                                 st.zoom = ZoomMode::FitAll;
                                 st.pan = Vector2::ZERO;
                                 st.target_pan = Vector2::ZERO;
@@ -740,9 +735,9 @@ fn main() -> Result<()> {
                                 &mut rl,
                                 &thread,
                                 &mut st.view_tex,
-                                &rgba,
-                                width,
-                                height,
+                                &image.data,
+                                image.width,
+                                image.height,
                                 st.pixelated,
                             )?;
                             attach_blur_bg(
@@ -754,7 +749,7 @@ fn main() -> Result<()> {
                             );
                             st.view_loading = false;
                         }
-                        LoaderMsg::Failed(err) => {
+                        Err(err) => {
                             eprintln!("vv: {err}");
                             open_failed = true;
                         }
@@ -782,7 +777,7 @@ fn main() -> Result<()> {
             // Enter opens the selected image, q quits (ESC is inert here;
             // the grid is the home view).
             match grid.as_mut().unwrap().handle_input(&mut rl, win_w, win_h) {
-                GridAction::Open(i) => {
+                Some(GridAction::Open(i)) => {
                     if debug {
                         eprintln!("vv: enter pressed -> open idx {i}");
                     }
@@ -792,12 +787,12 @@ fn main() -> Result<()> {
                         i,
                         &mut rl,
                         &thread,
-                        (win_w, win_h),
+                        Vector2::new(win_w, win_h),
                         true,
                     );
                 }
-                GridAction::Quit => quit = true,
-                GridAction::None => {}
+                Some(GridAction::Quit) => quit = true,
+                None => {}
             }
         } else {
             // Image mode.
@@ -1042,7 +1037,7 @@ fn main() -> Result<()> {
                             j,
                             &mut rl,
                             &thread,
-                            (win_w, win_h),
+                            Vector2::new(win_w, win_h),
                             true,
                         );
                     }
