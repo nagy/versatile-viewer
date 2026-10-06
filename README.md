@@ -35,6 +35,8 @@ via rpath, so the result is self-contained. Outside Nix:
 |`W` / `Shift+W`      |—                           |fit-down / fit-all             |
 |`e` / `Shift+E`      |—                           |fit width / fit height         |
 |`t`                  |—                           |toggle fit-all / fill          |
+|`a`                  |—                           |toggle smooth / pixelated filter|
+|`f`                  |open cell under cursor      |fill-zoom at cursor / zoom out / back to grid (hold: pan)|
 |`+` / `-`            |zoom thumbnails             |free zoom (25% steps, eased)   |
 |mouse wheel          |scroll (when zoomed in)     |free zoom (25% steps, anchored)|
 |left-drag            |—                           |pan                            |
