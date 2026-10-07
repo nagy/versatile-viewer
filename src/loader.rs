@@ -1,13 +1,16 @@
 //! Background streaming loader for the image view.
 //!
-//! Opens an image off the main thread and streams results back over a
-//! channel. JPEG XL is decoded progressively: the file is read in chunks and
-//! fed into jxl-oxide, which renders a blurry full-size preview long before
-//! all bytes arrive; the final full-quality render is sent when decoding
-//! completes. Every other format decodes in one go.
+//! The loader opens an image off the main thread.
+//! It streams results back over a channel.
+//! JPEG XL decodes progressively.
+//! The worker reads the file in chunks and feeds them into jxl-oxide.
+//! jxl-oxide renders a blurry full-size preview long before all bytes arrive.
+//! The worker sends the final full-quality render when decoding completes.
+//! Every other format decodes in one step.
 //!
-//! Cancellation: dropping the `Loader` sets a flag the worker checks between
-//! chunks and closes the channel, so pending sends fail and the worker exits.
+//! Cancellation: dropping the `Loader` sets a flag.
+//! The worker checks this flag between chunks and closes the channel.
+//! Pending sends fail then, and the worker exits.
 
 use std::{
     path::{Path, PathBuf},
@@ -24,66 +27,79 @@ use jxl_oxide::{InitializeResult, JxlImage};
 
 use crate::{DecodedImage, blurbg, decode_common, downscale_rgba, fb_to_rgba, is_jxl};
 
-/// Wrap a jxl-oxide error (a bare boxed trait object) into anyhow,
-/// consuming the box (anyhow adopts `Box<dyn Error + Send + Sync>`).
+/// Convert a jxl-oxide error into an anyhow error.
+/// The input is a bare boxed trait object.
+/// The function consumes the box.
+/// anyhow accepts `Box<dyn Error + Send + Sync>`.
 fn jxl_err(e: Box<dyn std::error::Error + Send + Sync + 'static>) -> anyhow::Error {
     anyhow::Error::from_boxed(e).context("jxl-oxide")
 }
 
-/// Normal read chunk size: big enough that file IO never bottlenecks.
+/// Normal read chunk size.
+/// The size is large enough that file IO never limits the speed.
 const CHUNK: usize = 256 * 1024;
-/// Minimum time between progressive preview uploads, so the main thread is
-/// not flooded with full-size RGBA buffers.
+/// Minimum time between progressive preview uploads.
+/// The main thread then gets no flood of full-size RGBA buffers.
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(100);
-/// `VV_SLOW_STREAM`=1: dribble chunks of this size with a pause between them
-/// until the first preview renders (or `SLOW_DRIBBLE_MAX` bytes have been
-/// dribbled), then continue normally — makes progressive decoding visible
-/// to the eye in debug runs.
+/// Chunk size for `VV_SLOW_STREAM`=1.
+/// With this setting the worker sends chunks of this size with a pause
+/// between them.
+/// It continues until the first preview renders or `SLOW_DRIBBLE_MAX` bytes
+/// go out.
+/// After that it continues normally.
+/// This setting makes progressive decoding visible in debug runs.
 const SLOW_CHUNK: usize = 4 * 1024;
 const SLOW_PAUSE: Duration = Duration::from_secs(1);
 const SLOW_DRIBBLE_MAX: usize = 256 * 1024;
 
 /// Messages from the loader worker to the main thread.
 ///
-/// Carries only successes; a decode failure arrives as an [`Err`] through the
-/// same channel, so [`Loader::try_recv`] can hand both back as one
-/// `Result<DecodeMsg, anyhow::Error>` with `?`-friendly composition.
+/// The type carries only successes.
+/// A decode failure arrives as an [`Err`] through the same channel.
+/// [`Loader::try_recv`] can then return both as one
+/// `Result<DecodeMsg, anyhow::Error>`.
+/// The `?` operator composes this result.
 pub enum DecodeMsg {
-    /// JXL header parsed: final (orientation-applied) dimensions are known,
-    /// before any pixel data arrives.
+    /// The JXL header is parsed.
+    /// The code knows the final dimensions, with the orientation applied.
+    /// No pixel data arrives yet.
     Header { width: u32, height: u32 },
-    /// Progressive preview of the still-loading frame (full-size RGBA8,
-    /// blurry until done). Sent at most every `PREVIEW_INTERVAL`. `blur` is
-    /// the tiny blurred copy for the `VV_BLUR_BG` gimmick (None when off).
+    /// A progressive preview of the still-loading frame.
+    /// The buffer is full-size RGBA8 and stays blurry until the end.
+    /// The worker sends a preview at most every `PREVIEW_INTERVAL`.
+    /// `blur` is the tiny blurred copy for the `VV_BLUR_BG` gimmick.
+    /// It is `None` when the gimmick is off.
     Preview {
         image: DecodedImage,
         blur: Option<DecodedImage>,
     },
-    /// Final full-quality image.
+    /// The final full-quality image.
     Done {
         image: DecodedImage,
         blur: Option<DecodedImage>,
     },
 }
 
-/// Handle for one in-flight image load. Drop to cancel.
+/// Handle for one image load in flight.
+/// Drop the handle to cancel the load.
 pub struct Loader {
     cancel: Arc<AtomicBool>,
     rx: Receiver<Result<DecodeMsg, anyhow::Error>>,
 }
 
 impl Loader {
-    /// Spawn the worker for `path`.
-    /// `preview_px` caps the long side of progressive-preview buffers: the
-    /// screen never shows more pixels than that, so shipping full-size RGBA
-    /// every `PREVIEW_INTERVAL` is pure allocation churn.
+    /// Start the worker for `path`.
+    /// `preview_px` limits the long side of progressive-preview buffers.
+    /// The screen never shows more pixels than that.
+    /// Full-size RGBA every `PREVIEW_INTERVAL` wastes allocations.
     #[must_use]
     pub fn start(path: PathBuf, preview_px: u32) -> Loader {
         let (tx, rx) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
-        // Detached on purpose: the main thread never joins; the worker ends
-        // on cancellation or when sends start failing (receiver dropped).
+        // Detached on purpose: the main thread never joins.
+        // The worker ends on cancellation or when the sends start to fail
+        // (the receiver dropped).
         let blur_enabled = blurbg::enabled();
         let blur_px = blurbg::blur_px();
         std::thread::spawn(move || {
@@ -108,7 +124,8 @@ impl Loader {
         Loader { cancel, rx }
     }
 
-    /// Poll the next queued message without blocking.
+    /// Poll the next queued message.
+    /// The function does not block.
     #[must_use]
     pub fn try_recv(&self) -> Option<Result<DecodeMsg, anyhow::Error>> {
         self.rx.try_recv().ok()
@@ -121,11 +138,12 @@ impl Drop for Loader {
     }
 }
 
-/// Worker body.
+/// The worker body.
 ///
-/// `Ok(Some(msg))` is a terminal success (`Done`); `Ok(None)` means the
-/// worker was cancelled and sends nothing; any non-terminal progress
-/// (`Header`, `Preview`) goes out through `tx` directly.
+/// `Ok(Some(msg))` is a terminal success (`Done`).
+/// `Ok(None)` means the worker stopped and sends nothing.
+/// Any other progress (`Header`, `Preview`) goes out through `tx`
+/// directly.
 #[allow(clippy::too_many_arguments)]
 fn stream(
     path: &Path,
@@ -146,8 +164,9 @@ fn stream(
         std::fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let slow = std::env::var_os("VV_SLOW_STREAM").is_some();
     let mut buf = vec![0u8; CHUNK];
-    // `try_init` consumes the uninit image; keep it in an Option so the
-    // NeedMoreData branch can put it back.
+    // `try_init` consumes the uninit image.
+    // The code keeps it in an Option so the NeedMoreData branch can put it
+    // back.
     let mut uninit = Some(JxlImage::builder().build_uninit());
     let mut image: Option<JxlImage> = None;
     let mut last_preview: Option<Instant> = None;
@@ -158,8 +177,9 @@ fn stream(
             return Ok(None);
         }
         // Slow mode: keep dribbling small chunks (with pauses) until the
-        // first preview actually rendered; a single dribble would usually
-        // only carry the header and show nothing.
+        // first preview renders.
+        // A single dribble usually carries only the header and shows
+        // nothing.
         let dribbling = slow && last_preview.is_none() && dribbled < SLOW_DRIBBLE_MAX;
         let chunk_size = if dribbling { SLOW_CHUNK } else { CHUNK };
         let n = read_chunk(&mut file, &mut buf[..chunk_size])?;
@@ -187,22 +207,25 @@ fn stream(
             }
         }
 
-        // Progressive preview while the first frame is still loading. Once
-        // any frame has finished (the only frame, for stills), wait for the
-        // final render — this also keeps animations from overwriting frame 0
-        // with a half-loaded frame 1.
+        // Progressive preview while the first frame still loads.
+        // Once any frame finishes (the only frame, for stills), wait for
+        // the final render.
+        // This also stops animations from overwriting frame 0 with a
+        // half-loaded frame 1.
         if let Some(img) = &mut image
             && img.num_loaded_keyframes() == 0
             && !img.is_loading_done()
         {
             let due = last_preview.is_none_or(|t| t.elapsed() >= PREVIEW_INTERVAL);
             if due {
-                // Render errors are expected while groups/passes are
-                // missing; ignore them and retry after the next chunk.
+                // Render errors are normal while groups or passes are
+                // missing.
+                // The code ignores them and retries after the next chunk.
                 if let Ok(render) = img.render_loading_frame() {
                     let image = fb_to_rgba(&render.image_all_channels())?;
                     // Previews never need full resolution (the screen is
-                    // smaller); cap the long side so a 50 MP image does not
+                    // smaller).
+                    // The code caps the long side so a 50 MP image does not
                     // allocate ~200 MB of RGBA per preview.
                     let image = downscale_rgba(image, preview_px);
                     let blur = blur_enabled.then(|| blurbg::small_blur(&image, blur_px));
@@ -235,9 +258,12 @@ fn stream(
     Ok(Some(DecodeMsg::Done { image, blur }))
 }
 
-/// Read up to `buf.len()` bytes; 0 at EOF. A single read call: regular files
-/// normally fill the whole buffer, and short reads are fine anyway (the next
-/// loop iteration just reads more).
+/// Read up to `buf.len()` bytes.
+/// The function returns 0 at the end of the file.
+/// It makes a single read call.
+/// Regular files normally fill the whole buffer.
+/// Short reads are also correct.
+/// The next loop iteration reads more data then.
 fn read_chunk(file: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
     use std::io::Read;
     file.read(buf)
@@ -253,7 +279,7 @@ mod tests {
         tempfile::TempDir::new().unwrap()
     }
 
-    /// Poll the loader until a message arrives or `timeout` elapses.
+    /// Poll the loader until a message arrives or `timeout` goes by.
     fn wait(loader: &Loader, timeout: Duration) -> Option<Result<DecodeMsg, anyhow::Error>> {
         let start = Instant::now();
         while start.elapsed() < timeout {
@@ -316,7 +342,8 @@ mod tests {
 
     #[test]
     fn garbage_jxl_extension_fails_cleanly() {
-        // .jxl extension decides before sniffing; content is not a codestream.
+        // The .jxl extension decides before the code sniffs the content.
+        // The content is not a codestream.
         let tmp = temp_dir();
         let dir = tmp.path();
         let path = dir.join("x.jxl");
@@ -352,10 +379,10 @@ mod tests {
 
     #[test]
     fn cancel_stops_the_worker() {
-        // Dropping the loader must terminate the worker without hanging:
-        // join the thread via a fresh handle is not possible, so instead
-        // start a loader on a big-ish file, drop it immediately, and assert
-        // no further messages arrive afterwards (channel is closed).
+        // Dropping the loader must terminate the worker without a hang.
+        // A fresh handle cannot join the thread.
+        // Instead start a loader on a big-ish file, drop it immediately,
+        // and assert that no more messages arrive (the channel is closed).
         let tmp = temp_dir();
         let dir = tmp.path();
         let path = dir.join("img.png");
@@ -364,8 +391,8 @@ mod tests {
         let loader = Loader::start(path, 512);
         drop(loader);
         std::thread::sleep(Duration::from_millis(50));
-        // Nothing to assert beyond "no panic, no hang"; try_recv on the
-        // dropped receiver was never observable. The real check is that this
-        // test finishes.
+        // Nothing to assert beyond "no panic, no hang".
+        // A `try_recv` on the dropped receiver never becomes observable.
+        // The real check is that this test finishes.
     }
 }

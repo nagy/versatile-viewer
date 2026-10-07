@@ -1,13 +1,17 @@
-//! Gimmick: blurred copy of the viewed image as the image-view background.
+//! Gimmick: a blurred copy of the viewed image as the image-view background.
 //!
-//! Off unless `VV_BLUR_BG=1` is set. The background is a tiny (128px long
-//! side by default) blurred copy of the image, uploaded as a texture and
-//! upscaled by the GPU with bilinear filtering — the upscale itself is the
-//! blur, so the CPU cost is a single downscale+blur pass on a worker
-//! thread. It is drawn scaled to cover the whole window (fit on the narrower
-//! side, overflow cropped) behind the sharp image, dimmed so the image stands
-//! out; `VV_BG_DIM` sets the background brightness as a 0..=1 multiplier
-//! (default 0.6).
+//! The gimmick is off unless `VV_BLUR_BG=1` is set.
+//! The background is a tiny blurred copy of the image.
+//! Its long side is 128 pixels by default.
+//! The code uploads this copy as a texture.
+//! The GPU upscales the texture with bilinear filtering.
+//! The upscale itself is the blur.
+//! The CPU cost is one downscale and blur pass on a worker thread.
+//! The background is drawn scaled to cover the whole window.
+//! It fits on the narrower side and the code crops the overflow.
+//! It sits behind the sharp image and is dimmed, so the image stands out.
+//! `VV_BG_DIM` sets the background brightness as a 0..=1 multiplier.
+//! The default is 0.6.
 
 use std::time::Instant;
 
@@ -15,25 +19,29 @@ use raylib::{color::Color, consts::TextureFilter, prelude::*, texture::RaylibTex
 
 use crate::DecodedImage;
 
-/// Long side of the blurred background texture (GPU-upscaled from this).
-/// Configurable via `VV_BLUR_PX`; fewer pixels = blurrier.
+/// Long side of the blurred background texture.
+/// The GPU upscales from this size.
+/// `VV_BLUR_PX` configures it.
+/// Fewer pixels give a blurrier result.
 const DEFAULT_LONG_SIDE: u32 = 128;
-/// Gaussian sigma applied to the tiny image (in its own pixels).
+/// Gaussian sigma applied to the tiny image, in its own pixels.
 const BLUR_SIGMA: f32 = 8.0;
 /// Background brightness when `VV_BG_DIM` is unset.
 const DEFAULT_DIM: f32 = 0.6;
 
-/// Crossfade duration for grid-view background changes (seconds).
+/// Crossfade duration for grid-view background changes, in seconds.
 const FADE_SECS: f64 = 0.4;
 
-/// Is the gimmick enabled? Strict opt-in: exactly `VV_BLUR_BG=1`.
+/// Return true when the gimmick is enabled.
+/// This is a strict opt-in: exactly `VV_BLUR_BG=1`.
 #[must_use]
 pub fn enabled() -> bool {
     std::env::var_os("VV_BLUR_BG").is_some_and(|v| v == "1")
 }
 
-/// Long side of the background texture, from `VV_BLUR_PX` (clamped to a sane
-/// 8..=1024; the default 128 is already far below any window size).
+/// Long side of the background texture, from `VV_BLUR_PX`.
+/// The value is clamped to 8..=1024.
+/// The default 128 is already far below any window size.
 #[must_use]
 pub fn blur_px() -> u32 {
     std::env::var("VV_BLUR_PX")
@@ -43,7 +51,8 @@ pub fn blur_px() -> u32 {
         .clamp(8, 1024)
 }
 
-/// Background brightness from `VV_BG_DIM` (0..=1 multiplier, clamped).
+/// Background brightness from `VV_BG_DIM`.
+/// The value is a 0..=1 multiplier and is clamped.
 fn parse_dim(s: Option<&str>) -> f32 {
     s.and_then(|s| s.trim().parse::<f32>().ok())
         .unwrap_or(DEFAULT_DIM)
@@ -52,19 +61,21 @@ fn parse_dim(s: Option<&str>) -> f32 {
 
 /// Compute the tiny blurred copy of an RGBA8 image.
 ///
-/// `long_side` is the texture's long side (`VV_BLUR_PX`, default 128).
-/// Cheap enough to run on a decode worker; the result is a few KB.
+/// `long_side` is the long side of the texture (`VV_BLUR_PX`, default 128).
+/// The function is cheap enough for a decode worker.
+/// The result holds a few KB.
 ///
 /// # Panics
 ///
-/// Panics if `rgba` does not hold exactly `width * height * 4` bytes.
+/// The function panics if `rgba` does not hold exactly `width * height * 4`
+/// bytes.
 ///
 /// # Examples
 ///
 /// ```
 /// # use versatile_viewer::{DecodedImage, blurbg::small_blur};
-/// // Landscape: the long side lands exactly on `long_side`, aspect
-/// // preserved, 4 bytes per pixel.
+/// // Landscape: the long side lands exactly on `long_side`.
+/// // The aspect stays and each pixel holds 4 bytes.
 /// let img = DecodedImage {
 ///     width: 200,
 ///     height: 100,
@@ -110,19 +121,21 @@ pub fn small_blur(image: &DecodedImage, long_side: u32) -> DecodedImage {
     }
 }
 
-/// GPU side of the gimmick: holds the blurred background texture for the
-/// image view. Lives between `rl` and its users in main so it drops (and
-/// unloads) before the window closes.
+/// GPU side of the gimmick.
+/// It holds the blurred background texture for the image view.
+/// It lives between `rl` and its users in main.
+/// It then drops and unloads before the window closes.
 pub struct BlurBg {
     dim: f32,
-    /// Current background texture.
+    /// The current background texture.
     tex: Option<Texture2D>,
-    /// Source tag of the current texture (grid entry id; None = unknown,
-    /// e.g. a single-file launch). Used to skip redundant transitions.
+    /// Source tag of the current texture (grid entry id).
+    /// None means unknown, for example a single-file launch.
+    /// The code uses the tag to skip redundant transitions.
     current: Option<u64>,
-    /// Previous texture, kept while a crossfade to `tex` is running.
+    /// The previous texture, kept while a crossfade to `tex` runs.
     old: Option<Texture2D>,
-    /// When the running crossfade started.
+    /// The start time of the running crossfade.
     fade_start: Option<Instant>,
 }
 
@@ -142,8 +155,9 @@ impl BlurBg {
         })
     }
 
-    /// Upload a tiny blurred copy as the background texture, reusing the
-    /// texture in place when dimensions match (streaming previews).
+    /// Upload a tiny blurred copy as the background texture.
+    /// The function updates the texture in place when the dimensions match
+    /// (streaming previews).
     fn upload(&mut self, rl: &mut RaylibHandle, thread: &RaylibThread, data: DecodedImage) {
         let DecodedImage {
             width,
@@ -161,8 +175,8 @@ impl BlurBg {
         }
         match crate::upload_rgba(rl, thread, &rgba, width, height) {
             Ok(t) => {
-                // Bilinear filtering is what turns the tiny copy into a
-                // smooth blur when the GPU upscales it every frame.
+                // Bilinear filtering turns the tiny copy into a smooth blur
+                // when the GPU upscales it every frame.
                 t.set_texture_filter(thread, TextureFilter::TEXTURE_FILTER_BILINEAR);
                 self.tex = Some(t); // drops (unloads) any previous texture
             }
@@ -173,10 +187,11 @@ impl BlurBg {
         }
     }
 
-    /// Replace (or update in place) the background texture from a tiny
-    /// blurred copy, without a fade (same image: streaming previews). Any
-    /// running crossfade is cut short. Errors are non-fatal: the background
-    /// just stays black.
+    /// Replace the background texture from a tiny blurred copy, or update
+    /// it in place.
+    /// This path has no fade (same image: streaming previews).
+    /// The code cuts a running crossfade short.
+    /// Errors are non-fatal: the background just stays black.
     pub fn attach(
         &mut self,
         rl: &mut RaylibHandle,
@@ -190,10 +205,10 @@ impl BlurBg {
         }
     }
 
-    /// Swap the background to `data` with a slow crossfade. No-op while
-    /// `tag` already matches (the grid calls this every frame for the
-    /// selected entry). Without an existing background, the new texture
-    /// simply fades in from black.
+    /// Swap the background to `data` with a slow crossfade.
+    /// The function does nothing while `tag` already matches.
+    /// The grid calls this function every frame for the selected entry.
+    /// Without an existing background, the new texture fades in from black.
     pub fn transition(
         &mut self,
         rl: &mut RaylibHandle,
@@ -206,7 +221,7 @@ impl BlurBg {
         }
         let (rgba, width, height) = (&data.data, data.width, data.height);
         // First background ever (empty window at startup): show it
-        // instantly, no fade-in from black.
+        // at once, with no fade-in from black.
         let first = self.tex.is_none();
         match crate::upload_rgba(rl, thread, rgba, width, height) {
             Ok(t) => {
@@ -215,8 +230,9 @@ impl BlurBg {
                     self.old = None;
                     self.fade_start = None;
                 } else {
-                    // The current texture becomes the fade-out layer; any
-                    // older fade-out layer is dropped (max two alive).
+                    // The current texture becomes the fade-out layer.
+                    // The code drops the older fade-out layer (max two
+                    // alive).
                     self.old = self.tex.take();
                     self.fade_start = Some(Instant::now());
                 }
@@ -227,10 +243,11 @@ impl BlurBg {
         }
     }
 
-    /// Draw the background (if any) scaled to cover the window: during a
-    /// crossfade the old texture at full opacity underneath the new one
-    /// fading in. Must be called every frame so fades complete (and the
-    /// old texture gets freed).
+    /// Draw the background (if any) scaled to cover the window.
+    /// During a crossfade the old texture shows at full opacity underneath.
+    /// The new texture fades in on top.
+    /// Call this function every frame so the fades complete and the code
+    /// frees the old texture.
     pub fn draw(&mut self, d: &mut RaylibDrawHandle, win_w: f32, win_h: f32) {
         let progress = self
             .fade_start
@@ -277,8 +294,9 @@ impl BlurBg {
     }
 }
 
-/// Dest rect for a texture of w x h scaled to cover the window (fit on the
-/// narrower side, centered; the other axis overflows and is cropped).
+/// Dest rect for a texture of w x h scaled to cover the window.
+/// The texture fits on the narrower side and stays centered.
+/// The other axis overflows and the code crops it.
 const fn cover_rect(w: u32, h: u32, win_w: f32, win_h: f32) -> Rectangle {
     let (fw, fh) = (w as f32, h as f32);
     let s = (win_w / fw).max(win_h / fh);
@@ -311,7 +329,7 @@ mod tests {
         // Portrait input keeps the aspect the other way around.
         let out = small_blur(&img(100, 400, 0), 64);
         assert_eq!((out.width, out.height), (16, 64));
-        // Configurable long side (VV_BLUR_PX) is honored.
+        // The code honors the configurable long side (VV_BLUR_PX).
         let out = small_blur(&img(800, 200, 0), 256);
         assert_eq!((out.width, out.height), (256, 64));
         // Degenerate 1xN input still yields at least 1px on each side.

@@ -1,7 +1,9 @@
-// Pixel/coordinate math lives in f32 (raylib's units) and indices in
-// usize/u32. The casts between them are inherent to that boundary, and
-// every value here (window pixels, texture dimensions) is far below
-// f32's exact-integer range, so the pedantic cast lints are noise.
+// Pixel and coordinate math lives in f32 (raylib units) and indices in
+// usize and u32.
+// The casts between them belong to that boundary.
+// Every value here (window pixels, texture dimensions) stays far below
+// the f32 exact-integer range.
+// The pedantic cast lints are therefore noise.
 #![allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
@@ -11,15 +13,18 @@
     clippy::similar_names
 )]
 
-//! versatile-viewer's reusable core: image decoding, RGBA helpers and the
-//! modules behind the grid, loader and gimmicks.
+//! The reusable core of versatile-viewer.
+//! It holds image decoding, RGBA helpers and the modules behind the grid,
+//! loader and gimmicks.
 //!
-//! Decoding dispatches by sniffed content, not file name: JPEG XL (pure-Rust
-//! jxl-oxide, with progressive streaming support in [`loader`]) vs the common
-//! formats via the `image` crate. [`downscale_rgba`] and [`upload_rgba`] are
-//! the shared pixel/texture choke points. The binary in `main.rs` wires these
-//! pieces into the window and event loop; unit tests and doctests here keep
-//! the pure helpers honest.
+//! Decoding dispatches by sniffed content, not by file name.
+//! JPEG XL decodes with pure-Rust jxl-oxide and streams progressively in
+//! [`loader`].
+//! The common formats decode with the `image` crate.
+//! [`downscale_rgba`] and [`upload_rgba`] are the shared pixel and texture
+//! choke points.
+//! The binary in `main.rs` wires these pieces into the window and event loop.
+//! The unit tests and doctests here keep the pure helpers honest.
 
 pub mod blurbg;
 pub mod grid;
@@ -33,10 +38,10 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use raylib::{consts::PixelFormat, prelude::*};
 
-/// An RGBA8 pixel buffer plus its dimensions.
+/// An RGBA8 pixel buffer and its dimensions.
 ///
-/// Decoded images, downscaled buffers and thumbnails all share this type;
-/// `data` is row-major, 4 bytes per pixel.
+/// Decoded images, downscaled buffers and thumbnails all share this type.
+/// `data` is row-major with 4 bytes per pixel.
 #[derive(Clone)]
 pub struct DecodedImage {
     pub width: u32,
@@ -59,12 +64,13 @@ fn decode_jxl(path: &Path) -> Result<DecodedImage> {
     fb_to_rgba(&render.image_all_channels())
 }
 
-/// Convert a jxl-oxide framebuffer (f32 samples, 1–4 interleaved channels)
-/// to RGBA8.
+/// Convert a jxl-oxide framebuffer to RGBA8.
+/// The framebuffer holds f32 samples and 1 to 4 interleaved channels.
 ///
-/// Grayscale (1 channel) is replicated into R/G/B; gray+alpha (2 channels)
-/// additionally takes alpha from channel 1. RGB (3 channels) gets alpha = 1,
-/// RGBA (4 channels) is taken as-is.
+/// The code replicates grayscale (1 channel) into R, G and B.
+/// Gray plus alpha (2 channels) also takes alpha from channel 1.
+/// RGB (3 channels) gets alpha = 1.
+/// The code takes RGBA (4 channels) as is.
 pub(crate) fn fb_to_rgba(fb: &jxl_oxide::FrameBuffer) -> Result<DecodedImage> {
     let width = fb.width() as u32;
     let height = fb.height() as u32;
@@ -116,11 +122,12 @@ fn decode_common(path: &Path) -> Result<DecodedImage> {
     })
 }
 
-/// Decide the decoder by file content, not the file name.
+/// Decide the decoder by file content, not by the file name.
 ///
-/// The 2-byte magic is sniffed first (JXL codestream vs the common formats),
-/// and the .jxl extension only acts as a tiebreaker for unknown magic (JXL
-/// container files start with a box header, not the codestream magic).
+/// The code sniffs the 2-byte magic first (JXL codestream against the
+/// common formats).
+/// The .jxl extension only acts as a tiebreaker for unknown magic.
+/// JXL container files start with a box header, not the codestream magic.
 fn is_jxl(path: &Path) -> bool {
     match file_magic(path) {
         Some([0xff, 0x0a]) => true, // raw JXL codestream
@@ -131,7 +138,8 @@ fn is_jxl(path: &Path) -> bool {
     }
 }
 
-/// First two bytes of the file; None on a missing/short file.
+/// The first two bytes of the file.
+/// The function returns None for a missing or short file.
 fn file_magic(path: &Path) -> Option<[u8; 2]> {
     use std::io::Read;
     let mut magic = [0u8; 2];
@@ -141,10 +149,11 @@ fn file_magic(path: &Path) -> Option<[u8; 2]> {
         .map(|()| magic)
 }
 
-/// Magics the image crate can decode (`with_guessed_format` sniffs the full
-/// header; this only needs to steer files away from the JXL decoder).
-// The magic table is kept flat and grouped by format on purpose; clippy's
-// nested suggestion reorders it into a byte soup.
+/// The magics the image crate can decode.
+/// `with_guessed_format` sniffs the full header.
+/// This function only needs to steer files away from the JXL decoder.
+// The magic table stays flat and grouped by format on purpose.
+// The clippy nested suggestion reorders it into a byte soup.
 #[allow(clippy::unnested_or_patterns)]
 const fn is_common_magic(m: [u8; 2]) -> bool {
     let [a, b] = m;
@@ -162,12 +171,12 @@ const fn is_common_magic(m: [u8; 2]) -> bool {
     )
 }
 
-/// Decode an image file, dispatching by content-sniffed format.
+/// Decode an image file and dispatch by content-sniffed format.
 ///
 /// # Errors
 ///
-/// Errors when the file cannot be opened, sniffed or decoded (missing
-/// file, garbage bytes, unsupported content).
+/// The function errors when it cannot open, sniff or decode the file
+/// (missing file, garbage bytes, unsupported content).
 pub fn decode_image(path: &Path) -> Result<DecodedImage> {
     if is_jxl(path) {
         decode_jxl(path)
@@ -177,15 +186,19 @@ pub fn decode_image(path: &Path) -> Result<DecodedImage> {
     .with_context(|| format!("failed to decode {}", path.display()))
 }
 
-/// Longest texture side we upload. Desktop GL hardware ranges from 4096
-/// to 16384; this is the safe middle (raylib does not expose the real
-/// limit). Anything larger is downscaled here instead of failing the load.
+/// The longest texture side the code uploads.
+/// Desktop GL hardware ranges from 4096 to 16384.
+/// This is the safe middle value.
+/// raylib does not expose the real limit.
+/// The code downscales anything larger here instead of failing the load.
 const MAX_TEXTURE_SIDE: u32 = 8192;
 
 /// Downscale an RGBA8 buffer so its long side is at most `long_side`.
 ///
-/// Below the cap the buffer is returned unchanged — never upscaled. Zero
-/// dimensions are clamped to 1, and the output aspect matches the input.
+/// Below the cap the function returns the buffer unchanged.
+/// It never upscales.
+/// The function clamps zero dimensions to 1.
+/// The output aspect matches the input.
 ///
 /// # Examples
 ///
@@ -201,7 +214,7 @@ const MAX_TEXTURE_SIDE: u32 = 8192;
 /// assert_eq!((img.width, img.height), (2, 2));
 /// assert_eq!(img.data.len(), 4 * 2 * 2);
 ///
-/// // Over it: aspect preserved, long side exactly the cap.
+/// // Over it: the aspect stays and the long side equals the cap.
 /// let img = DecodedImage {
 ///     width: 200,
 ///     height: 100,
@@ -211,7 +224,7 @@ const MAX_TEXTURE_SIDE: u32 = 8192;
 /// assert_eq!((img.width, img.height), (100, 50));
 /// assert_eq!(img.data.len(), 4 * 100 * 50);
 ///
-/// // Degenerate zero dimensions are clamped, the buffer untouched.
+/// // The function clamps degenerate zero dimensions, and the buffer stays.
 /// let img = DecodedImage {
 ///     width: 0,
 ///     height: 0,
@@ -224,8 +237,8 @@ const MAX_TEXTURE_SIDE: u32 = 8192;
 ///
 /// # Panics
 ///
-/// Panics if `image.data` does not hold exactly `width * height * 4` bytes
-/// (and a downscale is actually needed).
+/// The function panics if `image.data` does not hold exactly
+/// `width * height * 4` bytes and a downscale is necessary.
 #[must_use]
 pub fn downscale_rgba(image: DecodedImage, long_side: u32) -> DecodedImage {
     let DecodedImage {
@@ -257,14 +270,15 @@ pub fn downscale_rgba(image: DecodedImage, long_side: u32) -> DecodedImage {
 
 /// Upload a raw RGBA8 buffer as a GPU texture.
 ///
-/// Must be called on the main thread (GL context lives there). The buffer
-/// is only borrowed for the upload; the `ffi::Image` wrapper is forgotten so
-/// raylib never frees the caller's Vec.
+/// Call this function on the main thread, where the GL context lives.
+/// The function only borrows the buffer for the upload.
+/// It forgets the `ffi::Image` wrapper, so raylib never frees the caller
+/// `Vec`.
 ///
 /// # Errors
 ///
-/// Errors when the GL texture upload fails (no current context, driver
-/// refusal).
+/// The function errors when the GL texture upload fails (no current context,
+/// driver refusal).
 pub fn upload_rgba(
     rl: &mut RaylibHandle,
     thread: &RaylibThread,
@@ -272,8 +286,9 @@ pub fn upload_rgba(
     width: u32,
     height: u32,
 ) -> Result<Texture2D> {
-    // Oversized images (huge panoramas) would fail the GL upload; clamp
-    // them to the safe side limit here, in the single choke point.
+    // Oversized images (huge panoramas) fail the GL upload.
+    // The code clamps them to the safe side limit here, in the single
+    // choke point.
     let owned;
     let (rgba, width, height) = if width.max(height) > MAX_TEXTURE_SIDE {
         owned = downscale_rgba(
@@ -324,10 +339,11 @@ mod tests {
     fn is_jxl_detects_codestream_magic() {
         let tmp = tempfile::TempDir::new().unwrap();
         let bare = tmp.path().join("bare");
-        // Raw codestream starts with 0xFF 0x0A — JXL even without extension.
+        // A raw codestream starts with 0xFF 0x0A, so it is JXL even without
+        // an extension.
         std::fs::write(&bare, [0xffu8, 0x0a, 0x01, 0x02]).unwrap();
         assert!(is_jxl(&bare));
-        // PNG magic — not a codestream, even without an extension.
+        // PNG magic is not a codestream, even without an extension.
         std::fs::write(&bare, [0x89u8, b'P', 0x4e, 0x47]).unwrap();
         assert!(!is_jxl(&bare));
     }
@@ -359,7 +375,8 @@ mod tests {
 
     #[test]
     fn fb_to_rgba_replicates_grayscale() {
-        // 1 channel (grayscale): gray sample goes to R, G and B; alpha = 255.
+        // 1 channel (grayscale): the gray sample goes to R, G and B.
+        // The code sets alpha = 255.
         let mut fb = jxl_oxide::FrameBuffer::new(2, 1, 1);
         fb.buf_mut()[..2].copy_from_slice(&[0.0, 0.5]);
         let img = fb_to_rgba(&fb).unwrap();
@@ -369,7 +386,8 @@ mod tests {
 
     #[test]
     fn fb_to_rgba_gray_alpha_takes_alpha() {
-        // 2 channels (gray + alpha): gray replicated, alpha from channel 1.
+        // 2 channels (gray + alpha): the code replicates the gray value and
+        // takes alpha from channel 1.
         let mut fb = jxl_oxide::FrameBuffer::new(1, 1, 2);
         fb.buf_mut()[..2].copy_from_slice(&[1.0, 0.5]);
         let img = fb_to_rgba(&fb).unwrap();
@@ -408,8 +426,9 @@ mod tests {
     #[test]
     fn decode_image_reads_grid_filter_formats() {
         // Every format the grid filter accepts (grid.rs is_image_path) must
-        // actually decode — the filter and the image-crate features must stay
-        // in sync (see the Cargo.toml comment).
+        // decode.
+        // The filter and the image-crate features must stay in sync (see
+        // the Cargo.toml comment).
         let dir = TempDir::new().unwrap();
         let dir = dir.path();
         for (ext, format) in [

@@ -1,7 +1,9 @@
-// Pixel/coordinate math lives in f32 (raylib's units) and indices in
-// usize/u32. The casts between them are inherent to that boundary, and
-// every value here (window pixels, texture dimensions) is far below
-// f32's exact-integer range, so the pedantic cast lints are noise.
+// Pixel and coordinate math lives in f32 (raylib units) and indices in
+// usize and u32.
+// The casts between them belong to that boundary.
+// Every value here (window pixels, texture dimensions) stays far below
+// the f32 exact-integer range.
+// The pedantic cast lints are therefore noise.
 #![allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
@@ -11,17 +13,22 @@
     clippy::similar_names
 )]
 
-//! versatile-viewer — image viewer (JXL first-class, plus PNG/JPEG) with a
-//! directory thumbnail grid. q quits; ESC/Enter toggle grid ↔ image view.
+//! versatile-viewer is an image viewer with JXL as a first-class format plus
+//! PNG and JPEG.
+//! It shows a directory thumbnail grid.
+//! q quits.
+//! ESC and Enter toggle between the grid and the image view.
 //!
 //! Usage: versatile-viewer <image-path-or-directory>
 //!
-//! Env gimmicks: `VV_DEBUG`=1 traces input events; `VV_SLOW_STREAM`=1 slows the
-//! JXL stream; `VV_BLUR_BG`=1 draws a blurred copy of the viewed image as the
-//! image-view background (scaled to cover the window, GPU-upscaled).
-//! `VV_BG_DIM`=0..1 sets its brightness (default 0.6); `VV_BLUR_PX` sets the
-//! blur resolution — the tiny texture's long side, default 128, fewer =
-//! blurrier.
+//! Env gimmicks.
+//! `VV_DEBUG`=1 traces input events.
+//! `VV_SLOW_STREAM`=1 slows the JXL stream.
+//! `VV_BLUR_BG`=1 draws a blurred copy of the viewed image as the image-view
+//! background, scaled to cover the window and upscaled by the GPU.
+//! `VV_BG_DIM`=0..1 sets its brightness (default 0.6).
+//! `VV_BLUR_PX` sets the blur resolution, the long side of the tiny texture.
+//! The default is 128, and fewer pixels give a blurrier result.
 
 use std::{
     env, fs,
@@ -47,21 +54,22 @@ use versatile_viewer::{
     upload_rgba,
 };
 
-/// Fraction of its remaining distance to the window center that the
-/// zoomed image point (and the cursor riding it) drifts over one zoom
-/// ease; shares the ease's exponential time constant.
+/// The fraction of the remaining distance to the window center that the
+/// zoomed image point (and the cursor riding it) drifts over one zoom ease.
+/// It shares the exponential time constant of the ease.
 const ZOOM_ANCHOR_DRIFT: f32 = 0.25;
 
 /// Target pan that centers the fill view on the image point under `mouse`.
 ///
-/// Both axes are clamped to `[-|offset|, |offset|]`: outside that interval a
-/// window edge would expose background, so a cursor near the image edge just
-/// pans as far as coverage allows.
+/// The code clamps both axes to `[-|offset|, |offset|]`.
+/// Outside that interval a window edge exposes background.
+/// A cursor near the image edge therefore pans only as far as coverage
+/// allows.
 fn aim_fill_pan(st: &ViewState, mouse: Vector2, win_w: f32, win_h: f32) -> Vector2 {
     let target = (win_w / st.img_w).max(win_h / st.img_h);
     let cur = st.view_scale.unwrap_or(target);
-    // Mouse position in image coordinates at the current scale (offset =
-    // window top-left of the unpanned image).
+    // Mouse position in image coordinates at the current scale.
+    // The offset is the window top-left of the unpanned image.
     let img_x = (mouse.x - (win_w - st.img_w * cur) / 2.0 - st.pan.x) / cur;
     let img_y = (mouse.y - (win_h - st.img_h * cur) / 2.0 - st.pan.y) / cur;
     let off_x = (win_w - st.img_w * target) / 2.0;
@@ -72,73 +80,82 @@ fn aim_fill_pan(st: &ViewState, mouse: Vector2, win_w: f32, win_h: f32) -> Vecto
     }
 }
 
-/// How the image is scaled to the window. Scale is recomputed every frame,
-/// so resizing always stays correct.
+/// How the code scales the image to the window.
+/// The code recomputes the scale every frame, so resizing always stays
+/// correct.
 #[derive(Clone, Copy, PartialEq)]
 enum ZoomMode {
-    /// Fit down to the window, centered; never upscaled (default).
+    /// Fit down to the window, centered.
+    /// The code never upscales here (default).
     FitDown,
-    /// Fit all sides: scale up or down until the image first touches a
-    /// border (Shift+W).
+    /// Fit all sides.
+    /// The code scales up or down until the image first touches a border
+    /// (Shift+W).
     FitAll,
     /// Fit to the window width (e).
     FitWidth,
     /// Fit to the window height (Shift+E).
     FitHeight,
-    /// Fill the window: scale until the image covers every side (t);
-    /// the shorter relative dimension overflows and is cropped.
+    /// Fill the window.
+    /// The code scales until the image covers every side (t).
+    /// The shorter relative dimension overflows and is cropped.
     Fill,
-    /// Free zoom factor, set with +/- (multiples of the last fit scale).
+    /// The free zoom factor, set with +/- as multiples of the last fit scale.
     Free(f32),
 }
 
-/// Viewer screen: thumbnail grid or single image.
+/// The viewer screen: thumbnail grid or single image.
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
     Grid,
     Image,
 }
 
-/// Image-view state: what is shown and how it is framed.
+/// The image-view state: what the code shows and how it frames it.
 struct ViewState {
     mode: Mode,
-    /// Grid entry open in image mode, by stable id (None on a single-file
+    /// The grid entry open in image mode, by stable id (None on a single-file
     /// launch).
     open_id: Option<u64>,
-    /// Id of the grid entry whose full-res texture the view currently
-    /// holds; it goes back when leaving image mode or switching entries.
+    /// The id of the grid entry whose full-res texture the view holds now.
+    /// The texture goes back when the code leaves image mode or switches
+    /// entries.
     view_from_grid: Option<u64>,
-    /// Texture currently shown in image mode.
+    /// The texture shown in image mode now.
     view_tex: Option<Texture2D>,
     view_loading: bool,
-    /// When the current load started (`rl.get_time`()); the "decoding..."
-    /// indicator only appears once the load exceeds 1 s.
+    /// The start time of the current load (`rl.get_time()`).
+    /// The "decoding..." indicator only appears after the load exceeds 1 s.
     view_loading_since: f64,
-    /// Full-resolution image dimensions (0 until known).
+    /// The full-resolution image dimensions (0 until known).
     img_w: f32,
     img_h: f32,
     zoom: ZoomMode,
-    /// On-screen pan offset, eased toward `target_pan` each frame.
+    /// The on-screen pan offset, eased toward `target_pan` each frame.
     pan: Vector2,
     target_pan: Vector2,
-    /// On-screen scale, eased toward the target scale each frame.
+    /// The on-screen scale, eased toward the target scale each frame.
     view_scale: Option<f32>,
-    /// Window-space point the running zoom eases around: captured from the
-    /// mouse position when a zoom step starts (+/- or wheel). None falls back
-    /// to the window center (e.g. easing still running from an earlier step).
+    /// The window-space point the running zoom eases around.
+    /// The code captures it from the mouse position when a zoom step starts
+    /// (+/- or wheel).
+    /// None falls back to the window center, for example when an ease still
+    /// runs from an earlier step.
     zoom_anchor: Option<Vector2>,
-    /// `a` toggles nearest-neighbor filtering (pixelated) for pixel
-    /// peeping; default smooth (bilinear).
+    /// `a` toggles nearest-neighbor filtering (pixelated) for pixel peeping.
+    /// The default is smooth (bilinear).
     pixelated: bool,
-    /// Streaming loader for the open image; drop cancels the worker.
+    /// The streaming loader for the open image.
+    /// A drop cancels the worker.
     loader: Option<Loader>,
-    /// `VV_BLUR_BG` background (None when the gimmick is off). Declared after
-    /// `rl` (via `ViewState`) so it drops and unloads before the window.
+    /// The `VV_BLUR_BG` background (None when the gimmick is off).
+    /// The code declares it after `rl` (via `ViewState`) so it drops and
+    /// unloads before the window.
     blur_bg: Option<BlurBg>,
 }
 
 impl ViewState {
-    /// Reset fit/pan state for a freshly shown image.
+    /// Reset the fit and pan state for a freshly shown image.
     fn reset_view(&mut self) {
         // Freshly shown images open fit-all (Shift+W behavior): upscale or
         // downscale until the image first touches a window border.
@@ -150,9 +167,10 @@ impl ViewState {
     }
 }
 
-/// Show a new RGBA8 frame in image view. When a texture with the same
-/// dimensions already exists (progressive previews of the same image), its
-/// pixels are updated in place instead of reallocating a GPU texture.
+/// Show a new RGBA8 frame in image view.
+/// When a texture with the same dimensions exists (progressive previews of
+/// the same image), the function updates its pixels in place instead of
+/// reallocating a GPU texture.
 fn show_frame(
     rl: &mut RaylibHandle,
     thread: &RaylibThread,
@@ -175,10 +193,11 @@ fn show_frame(
     Ok(())
 }
 
-/// Texture filter for the image view: bilinear by default (good for
-/// photos), `a` toggles nearest-neighbor (pixelated) for 1:1 pixel
-/// peeping. Grid thumbs always stay bilinear (heavily downscaled;
-/// nearest would alias badly).
+/// Set the texture filter for the image view.
+/// The default is bilinear, which suits photos.
+/// `a` toggles nearest-neighbor (pixelated) for 1:1 pixel peeping.
+/// Grid thumbs always stay bilinear, because they are heavily downscaled and
+/// nearest aliases badly.
 fn apply_view_filter(thread: &RaylibThread, tex: &Texture2D, pixelated: bool) {
     tex.set_texture_filter(
         thread,
@@ -191,9 +210,10 @@ fn apply_view_filter(thread: &RaylibThread, tex: &Texture2D, pixelated: bool) {
 }
 
 /// Upload a tiny blurred copy as the image-view background (`VV_BLUR_BG`
-/// gimmick). `tag` identifies the source image (grid entry id; None for a
-/// single-file launch) so grid crossfades can skip redundant transitions.
-/// No-op when the gimmick is off or the copy is missing.
+/// gimmick).
+/// `tag` identifies the source image (grid entry id, or None for a
+/// single-file launch), so grid crossfades can skip redundant transitions.
+/// The function does nothing when the gimmick is off or the copy is missing.
 fn attach_blur_bg(
     blur_bg: &mut Option<BlurBg>,
     rl: &mut RaylibHandle,
@@ -206,9 +226,10 @@ fn attach_blur_bg(
     }
 }
 
-/// Put the viewed texture back into its grid entry (if it came from one)
-/// and clear the view texture. Called when leaving image mode or switching
-/// to another grid entry.
+/// Put the viewed texture back into its grid entry, if it came from one, and
+/// clear the view texture.
+/// The code calls this when leaving image mode or switching to another grid
+/// entry.
 fn put_back_view(
     grid: &mut Option<Grid>,
     view_from_grid: &mut Option<u64>,
@@ -225,21 +246,22 @@ fn put_back_view(
     *view_tex = None;
 }
 
-/// Make the entry at index `idx` the open image. Three paths, shared by
-/// grid-open, prev/next navigation and the decode-landed takeover:
-/// 1. its full-res texture was kept for it (keep-set): show instantly;
-/// 2. a decode is in flight (`queued`): show "decoding" and wait for the
-///    decode-landed takeover in a later frame;
-/// 3. otherwise: start the streaming loader (JXL: blurry preview fast).
+/// Make the entry at index `idx` the open image.
+/// Three paths share this code: grid-open, prev/next navigation and the
+/// decode-landed takeover.
+/// 1. The code kept the full-res texture for it (keep-set): show at once.
+/// 2. A decode is in flight (`queued`): show "decoding" and wait for the
+///    decode-landed takeover in a later frame.
+/// 3. Otherwise: start the streaming loader (JXL: blurry preview fast).
 ///
-/// On paths 2 and 3 the draw loop shows the entry's thumb (whole image,
-/// aspect preserved) as a placeholder, so n/p navigation never flashes
-/// black while a decode catches up.
+/// On paths 2 and 3 the draw loop shows the entry thumb (whole image,
+/// aspect preserved) as a placeholder.
+/// n/p navigation then never flashes black while a decode catches up.
 ///
-/// With `set_scale_now`, the initial fit scale is set immediately because
-/// the caller's frame skips the per-frame scale math (it ran earlier).
-/// `win` is the window size in pixels, matching the window-space
-/// [`Vector2`] used elsewhere in the image view.
+/// With `set_scale_now`, the code sets the initial fit scale at once,
+/// because the caller frame skips the per-frame scale math (it ran earlier).
+/// `win` is the window size in pixels.
+/// It matches the window-space [`Vector2`] used elsewhere in the image view.
 fn show_entry(
     st: &mut ViewState,
     grid: &mut Grid,
@@ -283,10 +305,11 @@ fn show_entry(
         st.view_tex = None;
         st.view_loading = true;
         st.view_loading_since = rl.get_time();
-        // Whenever the entry's thumb exists, the decode that produced it
-        // also recorded the full dimensions — set them now so the draw
-        // loop can show the thumb as a placeholder at the final transform
-        // (instead of a black frame) while the full-res decode catches up.
+        // Whenever the entry thumb exists, the decode that produced it
+        // also recorded the full dimensions.
+        // Set them now, so the draw loop can show the thumb as a placeholder
+        // at the final transform (instead of a black frame) while the
+        // full-res decode catches up.
         if w > 0 {
             st.img_w = w as f32;
             st.img_h = h as f32;
@@ -299,10 +322,10 @@ fn show_entry(
         }
         st.loader = if queued || thumb {
             // A grid decode for this entry is in flight, or the entry has
-            // a thumb and the missing full-res decode was (or will be)
-            // dispatched by the keep-set refill: wait for the
-            // decode-landed takeover instead of decoding the file twice
-            // in a streaming worker.
+            // a thumb and the keep-set refill dispatched (or will dispatch)
+            // the missing full-res decode.
+            // Wait for the decode-landed takeover instead of decoding the
+            // file twice in a streaming worker.
             None
         } else {
             let preview_px = rl.get_screen_width().max(rl.get_screen_height()) as u32;
@@ -316,14 +339,15 @@ fn show_entry(
 fn tilde_path(path: &Path) -> String {
     if let Some(home) = std::env::var_os("HOME") {
         let home = Path::new(&home);
-        // Skip the pathological HOME=/ case (everything would collapse) and
+        // Skip the pathological HOME=/ case (everything collapses) and
         // an unset-but-empty value.
         if home.as_os_str().is_empty() || home == Path::new("/") {
             return path.display().to_string();
         }
         if let Ok(rest) = path.strip_prefix(home) {
-            // strip_prefix yields a relative remainder ("pics"), so the
-            // separator must be re-added; $HOME itself maps to plain "~".
+            // strip_prefix yields a relative remainder ("pics"), so the code
+            // adds the separator back.
+            // A path equal to $HOME maps to plain "~".
             return if rest.as_os_str().is_empty() {
                 "~".to_string()
             } else {
@@ -334,11 +358,11 @@ fn tilde_path(path: &Path) -> String {
     path.display().to_string()
 }
 
-/// Window title pieces shared by both launch modes.
+/// The window title pieces shared by both launch modes.
 const SEP: &str = " – ";
 const APP: &str = "versatile-viewer";
 
-/// Title for the image view of a single file: name, dir, app.
+/// The title for the image view of a single file: name, dir, app.
 fn image_title(img_path: &Path) -> String {
     let abs = fs::canonicalize(img_path).unwrap_or_else(|_| img_path.to_path_buf());
     let file = abs.file_name().map_or_else(
@@ -349,7 +373,7 @@ fn image_title(img_path: &Path) -> String {
     format!("{file}{SEP}{}{SEP}{APP}", tilde_path(dir))
 }
 
-/// Title for the grid over a directory with `n` images.
+/// The title for the grid over a directory with `n` images.
 fn grid_title(dir_path: &Path, n: usize) -> String {
     format!(
         "({n} image{plural}){SEP}{}{SEP}{APP}",
@@ -358,9 +382,9 @@ fn grid_title(dir_path: &Path, n: usize) -> String {
     )
 }
 
-/// Initial window title for the launch mode: image view vs. grid view.
+/// The initial window title for the launch mode: image view or grid view.
 fn window_title(path: &Path, dir_grid: Option<&Grid>) -> String {
-    // Make the path absolute (resolving `.` and symlinks) so the title is
+    // Make the path absolute (resolving `.` and symlinks), so the title is
     // meaningful regardless of the launch cwd.
     let abs: PathBuf = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     match dir_grid {
@@ -369,8 +393,8 @@ fn window_title(path: &Path, dir_grid: Option<&Grid>) -> String {
     }
 }
 
-// The event loop is one long state machine by design; splitting it
-// would scatter the frame-order invariants across call sites.
+// The event loop is one long state machine by design.
+// Splitting it scatters the frame-order invariants across call sites.
 #[allow(clippy::too_many_lines)]
 fn main() -> Result<()> {
     let arg = env::args()
@@ -379,8 +403,9 @@ fn main() -> Result<()> {
     let path = Path::new(&arg);
 
     // Directory launch: list the directory before opening the window (the
-    // title shows the image count) — no GL involved yet. Single-file launch:
-    // no grid.
+    // title shows the image count).
+    // No GL is involved yet.
+    // Single-file launch: no grid.
     let dir_grid = if path.is_dir() {
         Some(Grid::from_dir(path)?)
     } else if path.is_file() {
@@ -389,16 +414,17 @@ fn main() -> Result<()> {
         bail!("no such file or directory: {}", path.display());
     };
 
-    // Single-image launch: decode before opening the window so it can be
-    // sized to the image. Directory launch: fixed default window size.
+    // Single-image launch: decode before opening the window, so the window
+    // can be sized to the image.
+    // Directory launch: fixed default window size.
     let single_decoded = if dir_grid.is_none() {
         Some(decode_image(path)?)
     } else {
         None
     };
     // Blur-background source for a single-file launch: computed while the
-    // RGBA buffer is still around (before the window/GL context exists);
-    // uploaded once the window is open.
+    // RGBA buffer still exists (before the window and GL context exist).
+    // The code uploads it once the window is open.
     let single_blur = if dir_grid.is_none() && blurbg::enabled() {
         let d = single_decoded.as_ref().expect("single file decoded");
         Some(blurbg::small_blur(d, blurbg::blur_px()))
@@ -413,33 +439,40 @@ fn main() -> Result<()> {
         .size(win0_w, win0_h)
         .title(&window_title(path, dir_grid.as_ref()))
         .resizable()
-        // Vsync on: the compositor/driver paces us to the monitor's refresh
-        // rate, eliminating tearing (most visible during the zoom ease).
-        // This replaces set_target_fps below — a software 60 FPS cap would
-        // fight a non-60 Hz monitor (judder) and add input latency.
+        // Vsync on: the compositor or driver paces the frame loop to the
+        // monitor refresh rate and removes tearing (most visible during the
+        // zoom ease).
+        // This replaces set_target_fps below.
+        // A software 60 FPS cap fights a non-60 Hz monitor (judder) and
+        // adds input latency.
         .vsync()
         .build();
-    // WM_CLASS: raylib derives it from the creation title (full path —
-    // unusable for window rules); stamp "vv" on X11, no-op on Wayland.
+    // WM_CLASS: raylib derives it from the creation title (the full path,
+    // which is not useful for window rules).
+    // The code stamps "vv" on X11 and does nothing on Wayland.
     #[cfg(target_os = "linux")]
-    // SAFETY: handle only read; valid while the window is open.
+    // SAFETY: the code only reads the handle.
+    // The handle stays valid while the window is open.
     unsafe {
         wmclass::set_class(rl.get_window_handle());
     }
-    // We quit via the q key handling ourselves (set_exit_key would make ESC
-    // close the window outright instead of returning to the grid).
+    // The code quits through the q key handling.
+    // set_exit_key makes ESC close the window outright instead of
+    // returning to the grid.
     rl.set_exit_key(None);
     // Explicit default-arrow cursor while the mouse hovers the window.
     rl.set_mouse_cursor(MouseCursor::MOUSE_CURSOR_ARROW);
 
-    // VV_BLUR_BG gimmick: blurred copy of the viewed image behind it. Declared
-    // after `rl` so it drops (and unloads its texture) before the window.
+    // VV_BLUR_BG gimmick: a blurred copy of the viewed image behind it.
+    // The code declares it after `rl`, so it drops (and unloads its texture)
+    // before the window.
     // Take the grid AFTER the window exists: it holds GPU textures, and
-    // being declared after `rl` it is dropped (and unloaded) BEFORE the
-    // window closes — both on normal exit and on panic unwinding.
+    // because the code declares it after `rl`, it drops (and unloads) BEFORE
+    // the window closes, on normal exit and on panic unwinding.
     let mut grid = dir_grid;
-    // Image-view state: what is shown and how it is framed. Its Loader field
-    // drops (and cancels the worker) before the window closes, like `grid`.
+    // Image-view state: what is shown and how it is framed.
+    // Its Loader field drops (and cancels the worker) before the window
+    // closes, like `grid`.
     let mut st = ViewState {
         mode: if grid.is_none() {
             Mode::Image
@@ -497,12 +530,12 @@ fn main() -> Result<()> {
         );
     }
 
-    // Window title: grid mode / single-file launch keep the launch title;
-    // image view rewrites it per open entry (reset when open_id changes).
+    // Window title: grid mode and single-file launch keep the launch title.
+    // Image view rewrites it per open entry (reset when open_id changes).
     let launch_title = window_title(path, grid.as_ref());
     let mut title_open_id: Option<u64> = None;
 
-    // Set when the viewer should exit entirely.
+    // Set when the viewer exits entirely.
     let mut quit = false;
     // VV_DEBUG=1: trace grid open/return events to stderr.
     let debug = std::env::var_os("VV_DEBUG").is_some();
@@ -513,29 +546,34 @@ fn main() -> Result<()> {
     // Auto-repeat state for image-mode prev/next (xset r rate values).
     let mut rep_nav_fwd = keyrepeat::RepeatState::default();
     let mut rep_nav_back = keyrepeat::RepeatState::default();
-    // Previous frame's window size: self-tracked resize detection (see the
+    // Previous frame window size: self-tracked resize detection (see the
     // `resized` computation in the loop).
     let mut last_win: Option<(f32, f32)> = None;
     // True while an image-view drag has the pointer captured (DisableCursor:
-    // hidden + locked, unbounded virtual deltas — the drag cannot hit a
-    // screen edge). Released on mouse-up; the pointer then reappears exactly
-    // where the drag started (GLFW restores the pre-capture position).
+    // hidden and locked, unbounded virtual deltas, so the drag cannot hit a
+    // screen edge).
+    // The code releases it on mouse-up.
+    // The pointer then reappears exactly where the drag started (GLFW
+    // restores the pre-capture position).
     let mut pointer_captured = false;
-    // Window position where the current (or last) drag grabbed the pointer;
-    // raylib's EnableCursor does not reliably restore it, so we warp back
-    // explicitly on release.
+    // Window position where the current (or last) drag grabbed the pointer.
+    // The raylib EnableCursor does not reliably restore it, so the code warps
+    // back explicitly on release.
     let mut grab_pos = Vector2::ZERO;
     // Virtual cursor position while captured (grab_pos + accumulated raw
-    // deltas; raylib's own virtual position is unreliable to interpret).
+    // deltas).
+    // The raylib virtual position is unreliable to interpret.
     let mut drag_virtual = Vector2::ZERO;
     // Post-drag pointer restore, re-checked for a few frames: X11 warps are
-    // async, and GLFW's own EnableCursor re-warp can land after ours and
-    // recenter the cursor. We warp again until the position sticks.
+    // async, and the GLFW EnableCursor re-warp can land after ours and
+    // recenter the cursor.
+    // The code warps again until the position sticks.
     let mut pending_restore: Option<Vector2> = None;
     let mut restore_tries = 0u32;
     // `f` held captures the pointer like a left-drag (hold = pan, cursor
-    // hidden). A tap (no pointer travel) runs the `f` action on release
-    // instead, so a press and a press-and-hold can be told apart.
+    // hidden).
+    // A tap (no pointer travel) runs the `f` action on release instead, so
+    // the code can tell a press and a press-and-hold apart.
     let mut f_capture = false;
 
     while !rl.window_should_close() && !quit {
@@ -558,8 +596,9 @@ fn main() -> Result<()> {
                     prev_down[k as usize] = down;
                 }
             }
-            // Frames longer than a key tap can swallow IsKeyPressed edge
-            // detection entirely (press+release between two polls); log them.
+            // Frames longer than a key tap can swallow the IsKeyPressed edge
+            // detection entirely (press+release between two polls).
+            // The code logs them.
             let ft = rl.get_frame_time();
             if ft > 0.1 {
                 eprintln!("vv: slow frame {ft:.0} ms");
@@ -567,9 +606,10 @@ fn main() -> Result<()> {
         }
         let win_w = rl.get_screen_width() as f32;
         let win_h = rl.get_screen_height() as f32;
-        // Post-drag restore: verify the warp landed where we sent it; if a
-        // competing re-warp (GLFW/WM/XWayland) moved it, snap again. Gives
-        // up after a few tries so a user moving the mouse is never pinned.
+        // Post-drag restore: verify the warp landed where the code sent it.
+        // If a competing re-warp (GLFW, WM, XWayland) moved it, snap again.
+        // The code gives up after a few tries so a user moving the mouse is
+        // never pinned.
         if let Some(target) = pending_restore {
             let cur = rl.get_mouse_position();
             let settled = (cur.x - target.x).abs() < 1.0 && (cur.y - target.y).abs() < 1.0;
@@ -586,16 +626,18 @@ fn main() -> Result<()> {
                 restore_tries += 1;
             }
         }
-        // Resize detection done ourselves: `is_window_resized()` can miss a
-        // WM-reflow resize that lands around the time the window becomes
-        // visible (tiling WMs shrink the freshly spawned window into its
-        // tile), so the fit ease glides "out of nowhere". Any size difference
-        // from the previous frame counts as a resize frame.
+        // The code does the resize detection itself.
+        // `is_window_resized()` can miss a WM-reflow resize that lands around
+        // the time the window becomes visible (tiling WMs shrink the freshly
+        // spawned window into its tile), so the fit ease glides "out of
+        // nowhere".
+        // Any size difference from the previous frame counts as a resize
+        // frame.
         let resized = last_win != Some((win_w, win_h));
         last_win = Some((win_w, win_h));
 
-        // Dynamic window title: follow the open image in image view; back
-        // to the launch title in grid mode.
+        // Dynamic window title: follow the open image in image view.
+        // Back to the launch title in grid mode.
         if st.open_id != title_open_id {
             title_open_id = st.open_id;
             let title = st
@@ -611,10 +653,11 @@ fn main() -> Result<()> {
             rl.set_window_title(&thread, &title);
         }
 
-        // Prefetch priority: in grid mode the selected entry's neighbors
-        // (left/right/up/down); in image mode the previous/next entries.
+        // Prefetch priority: in grid mode the neighbors of the selected
+        // entry (left, right, up, down).
+        // In image mode the previous and next entries.
         // While the image view still waits for its own decode, only the
-        // open entry may decode and the rest of the queue is paused, so
+        // open entry decodes and the code pauses the rest of the queue, so
         // the visible image gets all the cores.
         // load_pending drains finished decodes (texture uploads happen here,
         // on the main thread) and dispatches new ones to the rayon pool.
@@ -653,12 +696,12 @@ fn main() -> Result<()> {
             g.load_pending(&mut rl, &thread, &priority, scan_start, scan);
         }
 
-        // Image mode: drain the streaming loader first; texture uploads need
-        // the main thread.
+        // Image mode: drain the streaming loader first.
+        // Texture uploads need the main thread.
         if st.mode == Mode::Image {
             let mut open_failed = false;
-            // Waiting on a grid decode (no streaming loader for this open):
-            // when its texture lands, take it over as the view.
+            // Waiting on a grid decode (no streaming loader for this open).
+            // When its texture lands, the code takes it over as the view.
             if st.view_tex.is_none() && st.loader.is_none() && st.open_id.is_some() {
                 let id = st.open_id.expect("checked above");
                 match grid
@@ -667,9 +710,9 @@ fn main() -> Result<()> {
                 {
                     Some((g, i)) => {
                         if g.entries[i].full.is_some() {
-                            // Decode landed: its full-res texture was kept
-                            // for the open entry (keep set) — show_entry
-                            // takes it over.
+                            // Decode landed: the code kept its full-res
+                            // texture for the open entry (keep set), and
+                            // show_entry takes it over.
                             show_entry(
                                 &mut st,
                                 g,
@@ -680,11 +723,12 @@ fn main() -> Result<()> {
                                 false,
                             );
                         }
-                        // else: the decode is still in flight or awaiting
-                        // dispatch (thumb-only keep-set entry; the open
-                        // entry is always in the keep set, so it will be
-                        // dispatched) — the thumb placeholder covers the
-                        // wait and the decode-landed takeover swaps it in.
+                        // else: the decode is still in flight or awaits
+                        // dispatch (thumb-only keep-set entry, and the keep set
+                        // always holds the open entry, so the code dispatches
+                        // it).
+                        // The thumb placeholder covers the wait and the
+                        // decode-landed takeover swaps it in.
                     }
                     None => open_failed = true, // entry vanished (decode failed)
                 }
@@ -693,8 +737,8 @@ fn main() -> Result<()> {
                 while let Some(msg) = loader.try_recv() {
                     match msg {
                         Ok(DecodeMsg::Header { width, height }) => {
-                            // Dimensions known: fit-down immediately (the
-                            // ease block only runs from the next frame on).
+                            // Dimensions known: fit down at once (the ease
+                            // block only runs from the next frame on).
                             st.img_w = width as f32;
                             st.img_h = height as f32;
                             st.zoom = ZoomMode::FitAll;
@@ -758,8 +802,9 @@ fn main() -> Result<()> {
             }
             if open_failed {
                 st.loader = None; // cancel the worker
-                // Keep the entry: mark it failed so its cell stays visible
-                // (dimmed, error glyph) instead of silently vanishing.
+                // Keep the entry: mark it as failed, so its cell stays
+                // visible (dimmed, error glyph) instead of vanishing
+                // silently.
                 if let Some(id) = st.open_id.take() {
                     grid.as_mut()
                         .unwrap()
@@ -773,9 +818,9 @@ fn main() -> Result<()> {
         }
 
         if st.mode == Mode::Grid {
-            // Grid navigation: h/j/k/l + arrows move the selection,
-            // Enter opens the selected image, q quits (ESC is inert here;
-            // the grid is the home view).
+            // Grid navigation: h/j/k/l and the arrows move the selection,
+            // Enter opens the selected image, q quits (ESC is inert here,
+            // because the grid is the home view).
             match grid.as_mut().unwrap().handle_input(&mut rl, win_w, win_h) {
                 Some(GridAction::Open(i)) => {
                     if debug {
@@ -796,23 +841,27 @@ fn main() -> Result<()> {
             }
         } else {
             // Image mode.
-            // Drain the raw key/char queues every frame (same rationale as
-            // grid.rs handle_input): is_key_pressed misses a press+release
-            // pair that lands inside one frame — easy here while frames
-            // stall on texture uploads or decode. Leftover queue entries
-            // would otherwise leak into grid mode and act there (e.g. a
-            // missed Enter immediately reopening the just-viewed image).
-            // State queries (is_key_down panning, is_key_pressed W/E/=/-)
-            // are unaffected: the queue is separate from the key snapshot.
-            // Enter/ESC return to the grid when one exists (nsxiv-like:
-            // Enter toggles between grid and the open image); q quits,
-            // ESC never quits the program (inert in single-file launches,
-            // where there is no grid to return to). Space/Backspace switch
-            // to the next/previous image (nsxiv-style nav; Space/n next,
-            // Backspace/p previous; arrows and h/j/k/l stay panning).
-            // Nav keys auto-repeat while held, at the X server's rate
-            // (xset r rate; keyrepeat::settings). g/G jump to the
-            // first/last image.
+            // Drain the raw key and char queues every frame (same rationale
+            // as grid.rs handle_input).
+            // is_key_pressed misses a press+release pair that lands inside
+            // one frame, and this is easy here while frames stall on texture
+            // uploads or decode.
+            // Leftover queue entries otherwise leak into grid mode and act
+            // there (for example a missed Enter that reopens the
+            // just-viewed image at once).
+            // State queries (is_key_down panning, is_key_pressed W/E/=/-) are
+            // unaffected: the queue is separate from the key snapshot.
+            // Enter and ESC return to the grid when one exists (nsxiv-like:
+            // Enter toggles between the grid and the open image).
+            // q quits, and ESC never quits the program (inert in single-file
+            // launches, where there is no grid to return to).
+            // Space and Backspace switch to the next or previous image
+            // (nsxiv-style nav, with n or Space for next and p or
+            // Backspace for previous, while the arrows and h/j/k/l stay
+            // panning).
+            // Nav keys auto-repeat while held, at the X server rate
+            // (xset r rate, from keyrepeat::settings).
+            // g/G jump to the first or last image.
             let mut enter = false;
             let mut quit_pressed = false;
             let mut pixelated_toggle = false;
@@ -846,11 +895,12 @@ fn main() -> Result<()> {
                 }
             }
             // `f` pan-drag: the press edge captures the pointer exactly like
-            // a left-drag (cursor hidden, unbounded virtual deltas); the
-            // release ends it and restores the pointer to the grab point.
-            // Travel marks it a hold (no tap action); otherwise the release
-            // runs the `f` action at the grab point. Auto-repeat re-fires
-            // the press edge while held, hence the `!pointer_captured` guard.
+            // a left-drag (cursor hidden, unbounded virtual deltas).
+            // The release ends it and restores the pointer to the grab point.
+            // Travel marks it a hold, with no tap action.
+            // Otherwise the release runs the `f` action at the grab point.
+            // Auto-repeat re-fires the press edge while held, hence the
+            // `!pointer_captured` guard.
             let mut f_click: Option<Vector2> = None;
             if f_key && !pointer_captured {
                 grab_pos = rl.get_mouse_position();
@@ -864,7 +914,8 @@ fn main() -> Result<()> {
             }
             // `!is_key_down` also covers a press+release landing inside one
             // frame (the pressed queue records the press, but there is no
-            // release edge to observe — without this the capture would stick).
+            // release edge to observe).
+            // Without this the capture sticks.
             if f_capture && !rl.is_key_down(KeyboardKey::KEY_F) {
                 // Fold in this frame's motion before the lock is released
                 // (the drag block below no longer runs once capture ends).
@@ -888,8 +939,8 @@ fn main() -> Result<()> {
                     );
                 }
             }
-            // Auto-repeat: the initial press fires immediately (edge from
-            // the queue above), holding fires at the X server's repeat rate
+            // Auto-repeat: the initial press fires at once (edge from the
+            // queue above), and the hold fires at the X server repeat rate
             // after its delay.
             let now = rl.get_time();
             let (delay, rate) = keyrepeat::settings();
@@ -912,7 +963,7 @@ fn main() -> Result<()> {
             } else {
                 None
             };
-            // g/G: jump to the first/last image (as a nav delta).
+            // g/G: jump to the first or last image (as a nav delta).
             if (jump_first || jump_last)
                 && let Some(cur) = st
                     .open_id
@@ -923,8 +974,9 @@ fn main() -> Result<()> {
                 nav = Some(t as i64 - cur as i64);
             }
             // Some input setups (IMEs, unusual X11 input methods) deliver
-            // Enter as a character event ('\n'/'\r'); accept both. This
-            // drain also covers the +/- zoom chars for every frame, so
+            // Enter as a character event ('\n'/ '\r').
+            // The code accepts both.
+            // This drain also covers the +/- zoom chars for every frame, so
             // nothing piles up while the header has not arrived yet.
             let mut zoom_in_char = false;
             let mut zoom_out_char = false;
@@ -941,22 +993,24 @@ fn main() -> Result<()> {
             if quit_pressed {
                 quit = true; // single-file launch: no grid to fall back to
             }
-            // `a`: toggle smooth (bilinear, default) vs pixelated
-            // (nearest-neighbor) filtering for the shown texture; the flag
-            // is re-applied to every texture that arrives later.
+            // `a`: toggle smooth (bilinear, default) against pixelated
+            // (nearest-neighbor) filtering for the shown texture.
+            // The code re-applies the flag to every texture that arrives
+            // later.
             if pixelated_toggle {
                 st.pixelated = !st.pixelated;
                 if let Some(tex) = &st.view_tex {
                     apply_view_filter(&thread, tex, st.pixelated);
                 }
             }
-            // `f` tap action (needs known geometry; the hit test uses the
-            // drawn image rect — offset + pan at the on-screen scale):
-            // cursor over the background returns to the grid (ESC-like);
-            // over an image that covers the whole window it zooms out
-            // (recentred, like t's zoom-out half); otherwise it zooms into
-            // fill view aimed at the cursor (like t's zoom-in half). Fires
-            // on the key release, and only when the hold did not pan.
+            // `f` tap action: it needs known geometry, and the hit test uses
+            // the drawn image rect (offset + pan at the on-screen scale).
+            // A cursor over the background returns to the grid (ESC-like).
+            // A cursor over an image that covers the whole window zooms out
+            // (recentred, like the zoom-out half of t).
+            // Otherwise it zooms into fill view aimed at the cursor (like the
+            // zoom-in half of t).
+            // It fires on the key release, and only when the hold did not pan.
             let mut f_open_grid = false;
             let mut f_zoom = false;
             if let Some(m) = f_click
@@ -990,7 +1044,7 @@ fn main() -> Result<()> {
             }
             if return_to_grid {
                 // Leaving image view mid-drag: give the pointer back before
-                // the grid's click handling needs a visible cursor.
+                // the grid click handling needs a visible cursor.
                 if pointer_captured {
                     rl.enable_cursor();
                     rl.set_mouse_position(grab_pos);
@@ -1016,11 +1070,12 @@ fn main() -> Result<()> {
                 st.view_loading_since = 0.0;
             }
 
-            // Prev/next while viewing (only with a grid to navigate). A
-            // ready texture swaps in the same frame; a decode in flight is
-            // waited on (auto-swap when it lands); otherwise the streaming
-            // loader takes over. The new entry's own neighbors are prefetched
-            // via the priority list at the top of the loop.
+            // Prev/next while viewing (only with a grid to navigate).
+            // A ready texture swaps in the same frame.
+            // A decode in flight is waited on (auto-swap when it lands).
+            // Otherwise the streaming loader takes over.
+            // The priority list at the top of the loop prefetches the
+            // neighbors of the new entry.
             if !return_to_grid && let Some(delta) = nav {
                 let cur = st
                     .open_id
@@ -1044,7 +1099,8 @@ fn main() -> Result<()> {
                 }
             }
 
-            // Keyboard shortcuts. Capital W / capital E arrive as W/E + shift.
+            // Keyboard shortcuts. Capital W and capital E arrive as W/E plus
+            // shift.
             if rl.is_key_pressed(KeyboardKey::KEY_W) {
                 st.zoom = if shift {
                     ZoomMode::FitAll
@@ -1060,11 +1116,12 @@ fn main() -> Result<()> {
                 };
                 st.target_pan = Vector2::ZERO;
             } else if rl.is_key_pressed(KeyboardKey::KEY_T) || f_zoom {
-                // t: two-state toggle — whole image visible (fit-all) vs
-                // window completely covered (fill). Distinct for any
-                // image/window combination, unlike a fit-width/fit-height
-                // cycle. f (f_zoom) always zooms in: it only reaches here
-                // when the cursor is on a not-yet-covering image.
+                // t: two-state toggle, whole image visible (fit-all) against
+                // window completely covered (fill).
+                // This stays distinct for any image and window combination,
+                // unlike a fit-width/fit-height cycle.
+                // f (f_zoom) always zooms in: it only reaches here when the
+                // cursor is on a not-yet-covering image.
                 if f_zoom {
                     st.zoom = ZoomMode::Fill;
                 } else if st.zoom == ZoomMode::Fill {
@@ -1074,7 +1131,8 @@ fn main() -> Result<()> {
                 }
                 // Zoom-in lands with the image point under the mouse at the
                 // window center, clamped so the window never shows
-                // background; zoom-out recentres.
+                // background.
+                // Zoom-out recentres.
                 if st.zoom == ZoomMode::Fill && st.img_w > 0.0 && st.view_scale.is_some() {
                     st.target_pan = aim_fill_pan(&st, rl.get_mouse_position(), win_w, win_h);
                 } else {
@@ -1082,26 +1140,28 @@ fn main() -> Result<()> {
                 }
             }
 
-            // Before the header arrives the image dimensions are unknown;
-            // skip all scale/pan math (it divides by img_w/img_h).
+            // Before the header arrives the image dimensions are unknown.
+            // The code skips all scale and pan math (it divides by
+            // img_w/img_h).
             if st.img_w > 0.0 {
-                // Scale for the current mode (fit modes recompute every frame, so
-                // resizing stays correct).
+                // Scale for the current mode (fit modes recompute every
+                // frame, so resizing stays correct).
                 let target_scale = match st.zoom {
                     ZoomMode::FitDown => (win_w / st.img_w).min(win_h / st.img_h).min(1.0),
                     ZoomMode::FitAll => (win_w / st.img_w).min(win_h / st.img_h),
                     ZoomMode::FitWidth => win_w / st.img_w,
                     ZoomMode::FitHeight => win_h / st.img_h,
                     // Cover: the larger ratio wins, so the image fills the
-                    // window and the other axis is cropped.
+                    // window and the code crops the other axis.
                     ZoomMode::Fill => (win_w / st.img_w).max(win_h / st.img_h),
                     ZoomMode::Free(scale) => scale,
                 };
 
-                // Ease the on-screen scale toward the target so zoom steps animate
-                // smoothly (~95% of the way after 150 ms; snap when close enough).
-                // On a window resize, snap instead: the new fit target should
-                // track the window edge instantly, not glide after it.
+                // Ease the on-screen scale toward the target, so zoom steps
+                // animate smoothly (~95% of the way after 150 ms) and snap
+                // when close enough.
+                // On a window resize, snap instead: the new fit target tracks
+                // the window edge at once, and does not glide after it.
                 let prev_scale = st.view_scale;
                 let alpha = 1.0 - (-rl.get_frame_time() / 0.05).exp();
                 st.view_scale = Some(match st.view_scale {
@@ -1117,10 +1177,12 @@ fn main() -> Result<()> {
                     }
                 });
 
-                // Free zoom: +/- steps the scale up/down by 25%, starting from the
-                // scale currently on screen. Detected two ways: the keycode of the
-                // US-layout =/- keys (incl. numpad) and the typed character, which
-                // covers non-US layouts where '+' lives on another physical key.
+                // Free zoom: +/- steps the scale up or down by 25%, starting
+                // from the scale currently on screen.
+                // The code detects it two ways: the keycode of the US-layout
+                // =/- keys (including numpad) and the typed character, which
+                // covers non-US layouts where '+' lives on another physical
+                // key.
                 let zoom_in = rl.is_key_pressed(KeyboardKey::KEY_EQUAL)
                     || rl.is_key_pressed(KeyboardKey::KEY_KP_ADD)
                     || zoom_in_char;
@@ -1130,13 +1192,13 @@ fn main() -> Result<()> {
                 if zoom_in || zoom_out {
                     let factor = if zoom_in { 1.25 } else { 1.0 / 1.25 };
                     st.zoom = ZoomMode::Free((target_scale * factor).clamp(0.01, 100.0));
-                    // Keyboard zoom centers on the picture, not the cursor:
+                    // Keyboard zoom centers on the picture, not the cursor.
                     // None falls back to the window center anchor.
                     st.zoom_anchor = None;
                 }
-                // Mouse wheel zooms free-mode with the same 25% steps, anchored
-                // at the cursor: while the scale eases, the image point under
-                // the mouse stays put.
+                // Mouse wheel zooms free-mode with the same 25% steps,
+                // anchored at the cursor: while the scale eases, the image
+                // point under the mouse stays put.
                 let wheel = rl.get_mouse_wheel_move();
                 if wheel != 0.0 {
                     let factor = 1.25f32.powf(wheel);
@@ -1144,18 +1206,21 @@ fn main() -> Result<()> {
                     st.zoom_anchor = Some(rl.get_mouse_position());
                 }
                 // Left-drag pans: the image follows the cursor (grab-style).
-                // No easing while the cursor drives the pan — the drag delta
-                // is already per-frame, and piling the 50 ms pan ease on top
-                // of vsync's display latency reads as lag (same-frame input,
-                // no interpolation: chart-action 9a5394b lesson). Keyboard
-                // panning below keeps its glide. Only meaningful once
-                // dimensions are known.
+                // No easing while the cursor drives the pan.
+                // The drag delta is already per-frame, and piling the 50 ms
+                // pan ease on top of the vsync display latency reads as lag
+                // (same-frame input, no interpolation: chart-action 9a5394b
+                // lesson).
+                // The keyboard panning below keeps its glide.
+                // It only makes sense once the dimensions are known.
                 //
                 // Infinite drag: while the button is held the pointer is
                 // captured, so it neither disappears at the screen edge nor
-                // blocks there — panning continues with virtual deltas no
-                // matter how far the physical mouse travels. Mouse-up shows
-                // it again at the position where the drag began.
+                // blocks there.
+                // Panning continues with virtual deltas no matter how far
+                // the physical mouse travels.
+                // Mouse-up shows the pointer again at the position where the
+                // drag began.
                 let drag_pressed = rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT);
                 let drag_released = rl.is_mouse_button_released(MouseButton::MOUSE_BUTTON_LEFT);
                 if drag_pressed && !pointer_captured {
@@ -1185,13 +1250,14 @@ fn main() -> Result<()> {
                     restore_tries = 0;
                     pointer_captured = false;
                 }
-                // Any captured pointer (left-drag or held `f`) pans: the
-                // virtual deltas drive both the same way.
+                // Any captured pointer (left-drag or held `f`) pans.
+                // The virtual deltas drive both the same way.
                 let dragging = pointer_captured;
                 if dragging {
                     let delta = rl.get_mouse_delta();
-                    // Virtual cursor follows physical travel 1:1 (debug
-                    // crosshair); the pan gets the 2× speedup.
+                    // The virtual cursor follows physical travel 1:1 (debug
+                    // crosshair).
+                    // The pan gets the 2x speedup.
                     drag_virtual.x += delta.x;
                     drag_virtual.y += delta.y;
                     st.target_pan.x += delta.x * 2.0;
@@ -1199,15 +1265,17 @@ fn main() -> Result<()> {
                 }
 
                 // Mouse-anchored zoom (free zoom only): while the on-screen
-                // scale eases, shift the pan each frame so the image point under
-                // the anchor (the cursor when the step started, else the window
-                // center) stays fixed. offset = center + pan, so keeping
-                // the anchor's image point put gives
+                // scale eases, shift the pan each frame so the image point
+                // under the anchor (the cursor when the step started, else
+                // the window center) stays fixed.
+                // offset = center + pan, so keeping the anchor image point
+                // put gives
                 //   offset' = anchor - (anchor - offset) * (scale'/scale).
-                // Gimmick: after each frame's anchor step, the image and the
-                // cursor slide TOGETHER a little toward the window center, so
-                // zooming gently recenters while the cursor stays glued to the
-                // same image point (image moves, pointer rides along).
+                // Gimmick: after each frame anchor step, the image and the
+                // cursor slide TOGETHER a little toward the window center.
+                // Zooming then gently recenters while the cursor stays glued
+                // to the same image point (the image moves, the pointer rides
+                // along).
                 let scale = st.view_scale.unwrap();
                 if matches!(st.zoom, ZoomMode::Free(_))
                     && let Some(s_old) = prev_scale
@@ -1226,20 +1294,21 @@ fn main() -> Result<()> {
                     let oy = ay - (ay - (win_h - st.img_h * s_old) / 2.0 - st.pan.y) * r;
                     st.pan.x = ox - (win_w - st.img_w * scale) / 2.0;
                     st.pan.y = oy - (win_h - st.img_h * scale) / 2.0;
-                    // Drift shares the ease's exponential time constant: by
-                    // the time the scale has covered its remaining distance,
-                    // the pair has covered ZOOM_ANCHOR_DRIFT of its own.
+                    // The drift shares the exponential time constant of the
+                    // ease: by the time the scale covers its remaining
+                    // distance, the pair covers ZOOM_ANCHOR_DRIFT of its own.
                     let d = (center - a) * (alpha * ZOOM_ANCHOR_DRIFT);
                     st.pan.x += d.x;
                     st.pan.y += d.y;
                     if !keyboard_zoom {
                         st.zoom_anchor = Some(a + d);
                     }
-                    // Pin the target too, so pan easing doesn't fight the anchor.
+                    // Pin the target too, so the pan easing does not fight
+                    // the anchor.
                     st.target_pan.x = st.pan.x;
                     st.target_pan.y = st.pan.y;
                     // Ride the pointer along with the drifted image point
-                    // (never while a drag has it captured; keyboard zoom
+                    // (never while a drag has it captured, and keyboard zoom
                     // leaves the cursor wherever it is).
                     if !keyboard_zoom && !pointer_captured {
                         if debug {
@@ -1249,12 +1318,14 @@ fn main() -> Result<()> {
                     }
                 }
 
-                // Vim-style panning (h/j/k/l + arrow keys); held keys move the
-                // target offset, the on-screen pan eases after it (same exponential
-                // easing as zoom), so taps glide and holds scroll smoothly.
-                // Input read before begin_drawing borrows rl mutably.
-                // Per-second speed: matches the old 3%-of-window-per-frame pace
-                // (3% × 60 fps = 180% per second), now frame-time aware.
+                // Vim-style panning (h/j/k/l and arrow keys).
+                // Held keys move the target offset, and the on-screen pan
+                // eases after it (the same exponential easing as zoom), so
+                // taps glide and holds scroll smoothly.
+                // The code reads input before begin_drawing borrows rl
+                // mutably.
+                // Per-second speed: matches the old 3%-of-window-per-frame
+                // pace (3% x 60 fps = 180% per second), now frame-time aware.
                 let speed = win_w.max(win_h) * 1.8 * rl.get_frame_time();
                 let pan_left =
                     rl.is_key_down(KeyboardKey::KEY_H) || rl.is_key_down(KeyboardKey::KEY_LEFT);
@@ -1276,8 +1347,8 @@ fn main() -> Result<()> {
                 if pan_down {
                     st.target_pan.y -= speed;
                 }
-                // On a resize frame, snap pan too so it doesn't glide after the
-                // new fit offset (matches the scale snap above).
+                // On a resize frame, snap pan too, so it does not glide after
+                // the new fit offset (matches the scale snap above).
                 if resized {
                     st.pan = st.target_pan;
                 }
@@ -1287,7 +1358,7 @@ fn main() -> Result<()> {
                     y: st.pan.y + (st.target_pan.y - st.pan.y) * pan_alpha,
                 };
                 // While dragging, skip the ease entirely: the image sticks to
-                // the cursor (only the zoom-anchor shift above may touch pan).
+                // the cursor (only the zoom-anchor shift above touches pan).
                 if dragging {
                     st.pan = st.target_pan;
                 }
@@ -1302,8 +1373,8 @@ fn main() -> Result<()> {
         }
 
         // VV_BLUR_BG in grid mode: the background follows the selected
-        // entry with a slow crossfade (starts as soon as the entry's
-        // blurred copy has been decoded by the grid workers).
+        // entry with a slow crossfade (starts as soon as the grid workers
+        // decode the blurred copy of the entry).
         if st.mode == Mode::Grid
             && let (Some(bg), Some(g)) = (st.blur_bg.as_mut(), grid.as_ref())
             && let Some(e) = g.entries.get(g.selected)
@@ -1312,27 +1383,29 @@ fn main() -> Result<()> {
             bg.transition(&mut rl, &thread, data, e.id);
         }
 
-        // Whether the "decoding..." indicator should show this frame: only
-        // once the load has taken over a second; brief loads would otherwise
-        // flash the text for a few frames. Computed before begin_drawing
-        // (rl is mutably borrowed by the draw handle).
+        // Whether the "decoding..." indicator shows this frame: only after
+        // the load passes one second.
+        // Brief loads otherwise flash the text for a few frames.
+        // The code computes it before begin_drawing (rl is mutably borrowed
+        // by the draw handle).
         let show_decoding = st.view_loading && rl.get_time() - st.view_loading_since > 1.0;
 
         let mut d = rl.begin_drawing(&thread);
         d.clear_background(Color::BLACK);
 
         if st.mode == Mode::Grid {
-            // VV_BLUR_BG gimmick: blurred background follows the selection
-            // (crossfading; no-op when the gimmick is off). Drawn before
-            // the grid so fades run under the thumbnails.
+            // VV_BLUR_BG gimmick: the blurred background follows the
+            // selection (crossfading, and a no-op when the gimmick is off).
+            // The code draws it before the grid, so the fades run under the
+            // thumbnails.
             if let Some(bg) = &mut st.blur_bg {
                 bg.draw(&mut d, win_w, win_h);
             }
             grid.as_ref().unwrap().draw(&mut d, win_w, win_h);
         } else {
             // VV_BLUR_BG gimmick: blurred copy of the image, scaled to
-            // cover the whole window (fit on the narrower side; the other
-            // axis overflows and is cropped) behind the sharp image.
+            // cover the whole window (fit on the narrower side, with the other
+            // axis overflowing and cropped) behind the sharp image.
             if let Some(bg) = &mut st.blur_bg {
                 bg.draw(&mut d, win_w, win_h);
             }
@@ -1340,12 +1413,12 @@ fn main() -> Result<()> {
                 let dw = st.img_w * st.view_scale.unwrap();
                 let dh = st.img_h * st.view_scale.unwrap();
 
-                // Source rect in texture pixels — NOT the logical image
-                // size: uploads clamp oversized textures to
-                // MAX_TEXTURE_SIDE (and streaming previews to the screen
-                // size), so the texture can be smaller than st.img_w/h.
-                // A src rect larger than the texture produces UVs > 1,
-                // which raylib's repeat wrap renders as a tiled mosaic.
+                // Source rect in texture pixels, NOT the logical image size.
+                // Uploads clamp oversized textures to MAX_TEXTURE_SIDE (and
+                // streaming previews to the screen size), so the texture can
+                // be smaller than st.img_w/h.
+                // A src rect larger than the texture produces UVs > 1, which
+                // the raylib repeat wrap renders as a tiled mosaic.
                 let src = Rectangle {
                     x: 0.0,
                     y: 0.0,
@@ -1365,11 +1438,11 @@ fn main() -> Result<()> {
                 && let Some(i) = g.index_of(id)
                 && let Some(tex) = g.entries.get(i).and_then(|e| e.texture.as_ref())
             {
-                // No full-res frame yet (decode in flight): show the
-                // entry's thumb instead of flashing black. The thumb is
-                // the whole image downscaled with the aspect preserved,
-                // so it maps 1:1 onto the image rect and the later swap
-                // to the full-res texture is pixel-aligned.
+                // No full-res frame yet (decode in flight): show the entry
+                // thumb instead of flashing black.
+                // The thumb is the whole image downscaled with the aspect
+                // preserved, so it maps 1:1 onto the image rect and the later
+                // swap to the full-res texture is pixel-aligned.
                 let scale = st
                     .view_scale
                     .unwrap_or((win_w / st.img_w).min(win_h / st.img_h));
@@ -1389,7 +1462,7 @@ fn main() -> Result<()> {
                 };
                 d.draw_texture_pro(tex, src, dest, Vector2::ZERO, 0.0, Color::WHITE);
             }
-            // Threshold check happens above, before begin_drawing.
+            // The threshold check happens above, before begin_drawing.
             if show_decoding {
                 let msg = "decoding...";
                 let tw = d.measure_text(msg, 20);
@@ -1402,9 +1475,11 @@ fn main() -> Result<()> {
                 );
             }
             // VV_DEBUG: while the pointer is captured, draw a crosshair at
-            // the virtual cursor position (clamped to the window) — the real
-            // cursor is hidden, and this shows where vv thinks it is. Plus a
-            // ring at the grab point, so a wrong restore is visible.
+            // the virtual cursor position (clamped to the window).
+            // The real cursor is hidden, and this shows where vv thinks it
+            // is.
+            // The code also draws a ring at the grab point, so a wrong
+            // restore is visible.
             if debug && pointer_captured {
                 let vx = drag_virtual.x.clamp(0.0, win_w);
                 let vy = drag_virtual.y.clamp(0.0, win_h);

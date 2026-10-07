@@ -1,23 +1,28 @@
-//! Directory thumbnail grid: square center-crop thumbnails that fill the
-//! whole window (unlike nsxiv's fixed thumbnail sizes), with a white border
-//! on the selection.
+//! Directory thumbnail grid.
+//! Square center-crop thumbnails fill the whole window, unlike the fixed
+//! thumbnail sizes of nsxiv.
+//! A white border marks the selection.
 //!
-//! +/- zoom the thumbnails (same 25% steps as the image-view free zoom).
-//! The default zoom fills the window exactly (largest possible square
-//! thumbs); zooming out re-fits with more, smaller thumbnails — still an
-//! exact fill; zooming in grows the thumbs past that maximum, so the grid
-//! overflows vertically and scrolls (mouse wheel; the selection is kept on
-//! screen while navigating).
+//! +/- zoom the thumbnails (the same 25% steps as the image-view free zoom).
+//! The default zoom fills the window exactly with the largest possible square
+//! thumbs.
+//! Zooming out re-fits with more, smaller thumbnails and still fills exactly.
+//! Zooming in grows the thumbs past that maximum, so the grid overflows
+//! vertically and scrolls with the mouse wheel.
+//! The code keeps the selection on screen while navigating.
 //!
-//! Decoding runs on the shared rayon pool (several files decode in
-//! parallel); the main thread only drains finished decodes and uploads
-//! textures (which needs the GL context). Jobs are dispatched
-//! priority-first: the neighbors of whatever is on screen (grid selection,
-//! or the open image in image view) decode before the rest; while the open
-//! image is still decoding in image view, everything else is paused, so it
-//! gets all the cores. This keeps frame times short, so key taps are never
-//! swallowed by decode stalls, and makes the neighbors ready to open
-//! instantly.
+//! Decoding runs on the shared rayon pool, so several files decode in
+//! parallel.
+//! The main thread only drains finished decodes and uploads textures.
+//! Texture uploads need the GL context.
+//! The code dispatches jobs priority-first.
+//! The neighbors of whatever is on screen (grid selection, or the open image
+//! in image view) decode before the rest.
+//! While the open image still decodes in image view, the code pauses
+//! everything else, so the open image gets all the cores.
+//! This keeps frame times short.
+//! Decode stalls then never swallow key taps.
+//! The neighbors are ready to open at once.
 
 use std::{
     cell::RefCell,
@@ -36,15 +41,16 @@ use crate::{
 
 const MARGIN: f32 = 8.0;
 const GAP: f32 = 8.0;
-/// Grid zoom step for +/- (same 25% steps as the image-view free zoom).
+/// Grid zoom step for +/- (the same 25% steps as the image-view free zoom).
 const GRID_ZOOM_STEP: f32 = 1.25;
-/// Lower bound for the thumbnail side when zooming the grid out.
+/// Lower bound for the thumbnail side when the grid zooms out.
 const GRID_MIN_SIDE: f32 = 32.0;
-/// Maximum number of decodes in flight at once (jobs run in parallel on the
-/// shared rayon pool; jxl-oxide parallelizes each decode further inside).
-/// One job per logical core, at least 2: JPEG/PNG decodes via the `image`
-/// crate are single-threaded per file, so the cap decides how many cores
-/// actually work on a large directory.
+/// The maximum number of decodes in flight at once.
+/// Jobs run in parallel on the shared rayon pool.
+/// jxl-oxide parallelizes each decode further inside.
+/// The code allows one job per logical core, at least 2.
+/// JPEG and PNG decodes through the `image` crate use one thread per file.
+/// The cap therefore decides how many cores work on a large directory.
 fn max_inflight() -> usize {
     use std::sync::OnceLock;
     static N: OnceLock<usize> = OnceLock::new();
@@ -55,34 +61,40 @@ fn max_inflight() -> usize {
     })
 }
 
-/// Long side of the thumbnail texture stored per grid entry: the whole
-/// image, aspect preserved (the square crop for grid cells happens at
-/// draw time). The full-resolution decode is downscaled to this on the
-/// decode worker and the full-size texture kept only for a small keep-set
-/// (the selection or open entry plus its prefetched neighbors), so VRAM
-/// stays bounded on large directories. The image view also shows the
-/// thumb as a full-frame placeholder while a decode catches up, so it
-/// must cover the whole image, not just its center square.
+/// Long side of the thumbnail texture stored per grid entry.
+/// The thumbnail holds the whole image with the aspect preserved.
+/// The square crop for grid cells happens at draw time.
+/// The decode worker downscales the full-resolution decode to this size.
+/// The code keeps the full-size texture only for a small keep-set: the
+/// selection or open entry plus its prefetched neighbors.
+/// VRAM therefore stays bounded on large directories.
+/// The image view also shows the thumb as a full-frame placeholder while a
+/// decode catches up.
+/// The thumbnail must cover the whole image, not only its center square.
 const THUMB_LONG_SIDE: u32 = 1024;
 
-/// A finished background decode, matched to an entry by its unique id
-/// (indices shift when entries come and go; ids never do).
+/// A finished background decode, matched to an entry by its unique id.
+/// Indices shift when entries come and go.
+/// Ids never shift.
 struct DecodeResult {
     id: u64,
     res: anyhow::Result<DecodeOk>,
 }
 
-/// Successful decode payload: the thumbnail plus the untouched full-resolution
-/// image. The main thread uploads the thumb for every entry but uploads the
-/// full texture only for keep-set entries (selection/open + prefetched
-/// neighbors), dropping the rest. The buffers live only until the next frame
-/// drains them, bounded by `max_inflight()`.
+/// Successful decode payload: the thumbnail and the untouched
+/// full-resolution image.
+/// The main thread uploads the thumb for every entry.
+/// It uploads the full texture only for keep-set entries (selection or open
+/// plus prefetched neighbors) and drops the rest.
+/// The buffers live only until the next frame drains them, bounded by
+/// `max_inflight()`.
 struct DecodeOk {
-    /// Whole image, aspect preserved, long side [`THUMB_LONG_SIDE`].
+    /// The whole image with the aspect preserved, long side
+    /// [`THUMB_LONG_SIDE`].
     thumb: DecodedImage,
-    /// Tiny blurred copy for the `VV_BLUR_BG` gimmick (None when off).
+    /// The tiny blurred copy for the `VV_BLUR_BG` gimmick (None when off).
     blur: Option<DecodedImage>,
-    /// Untouched full-resolution image.
+    /// The untouched full-resolution image.
     full: DecodedImage,
 }
 
@@ -92,46 +104,51 @@ struct Layout {
     cols: usize,
     cell_w: f32,
     cell_h: f32,
-    /// Square thumbnail side drawn inside each cell.
+    /// The square thumbnail side drawn inside each cell.
     side: f32,
-    /// Total content height (rows + gaps + margins), for scrolling.
+    /// The total content height (rows + gaps + margins), for scrolling.
     content_h: f32,
 }
 
-/// Cache key for [`Grid::layout`]: entry count + bit patterns of window size
-/// and zoom.
+/// Cache key for [`Grid::layout`]: entry count and bit patterns of the window
+/// size and zoom.
 type LayoutKey = (usize, u32, u32, u32);
 
-/// One grid cell: the image file plus its uploaded full-resolution texture
-/// (thumbs are drawn by cropping a center square, so a resize never needs a
-/// re-decode; the GPU scales it down every frame).
+/// One grid cell: the image file and its uploaded full-resolution texture.
+/// The code draws thumbs by cropping a center square, so a resize never
+/// needs a re-decode.
+/// The GPU scales the texture down every frame.
 pub struct GridEntry {
     pub path: PathBuf,
-    /// Full-resolution image dimensions (as decoded; not the thumb's).
+    /// Full-resolution image dimensions (as decoded, not the thumb's).
     pub width: u32,
     pub height: u32,
-    /// Thumbnail texture (whole image, aspect preserved, long side
-    /// `THUMB_LONG_SIDE`) — what the grid cell draws (center-cropped at
-    /// draw time) and what the image view shows as a placeholder while a
-    /// decode catches up. Full-resolution textures live in `full` only
-    /// for a small keep-set, so VRAM stays bounded on large directories.
+    /// The thumbnail texture (the whole image with the aspect preserved,
+    /// long side `THUMB_LONG_SIDE`).
+    /// The grid cell draws this texture center-cropped at draw time.
+    /// The image view shows it as a placeholder while a decode catches up.
+    /// Full-resolution textures live in `full` only for a small keep-set,
+    /// so VRAM stays bounded on large directories.
     pub texture: Option<Texture2D>,
-    /// Full-resolution texture; kept only for the selection/open entry and
-    /// its prefetched neighbors (see `load_pending`), so opening them is
-    /// instant. Dropped as soon as the entry leaves that set.
+    /// The full-resolution texture.
+    /// The code keeps it only for the selection or open entry and its
+    /// prefetched neighbors (see `load_pending`), so opening them is instant.
+    /// It drops as soon as the entry leaves that set.
     pub full: Option<Texture2D>,
-    /// Unique, stable id used to match async decode results.
+    /// A unique, stable id used to match async decode results.
     pub id: u64,
     /// A decode job for this entry is queued or in flight.
     pub queued: bool,
-    /// Set when the decode (or texture upload) failed; the cell stays
-    /// visible as a dimmed error square instead of silently vanishing.
+    /// Set when the decode (or texture upload) failed.
+    /// The cell stays visible as a dimmed error square instead of vanishing.
     pub failed: Option<String>,
-    /// Texture currently held by the image view (taken out of the grid); it
-    /// is put back when the view is done, and never re-dispatched meanwhile.
+    /// The texture the image view holds now (taken out of the grid).
+    /// The grid puts it back when the view ends and never re-dispatches it
+    /// in between.
     pub viewing: bool,
-    /// Tiny blurred copy for the `VV_BLUR_BG` background (kept when the
-    /// texture is out in the image view; the view clones it).
+    /// The tiny blurred copy for the `VV_BLUR_BG` background.
+    /// The grid keeps it while the texture is out in the image view.
+    /// The view clones it.
     pub blur: Option<DecodedImage>,
 }
 
@@ -150,30 +167,32 @@ pub struct Grid {
     result_rx: Receiver<DecodeResult>,
     inflight: usize,
     /// Auto-repeat state for the four direction keys (h/j/k/l + arrows),
-    /// indexed [left, right, up, down] (xset r rate values).
+    /// indexed [left, right, up, down], from the xset r rate values.
     rep_dir: [crate::keyrepeat::RepeatState; 4],
-    /// Thumbnail size zoom (1.0 = exact-fill default; +/- steps it).
+    /// Thumbnail size zoom (1.0 = exact-fill default, and +/- steps it).
     zoom: f32,
-    /// Vertical scroll offset (only used when zoomed in past the exact fill).
+    /// The vertical scroll offset, used only when zoomed in past the exact
+    /// fill.
     scroll: f32,
-    /// Cached layout, keyed by (entry count, window size, zoom) — recomputed
-    /// only when any of those change, since the layout math is O(n). Borrowed
-    /// interiorly because `draw` takes &self.
+    /// The cached layout, keyed by (entry count, window size, zoom).
+    /// The code recomputes it only when one of those changes, because the
+    /// layout math is O(n).
+    /// The field uses interior mutability because `draw` takes &self.
     layout_cache: RefCell<Option<(LayoutKey, Layout)>>,
-    /// `VV_BLUR_BG` gimmick on? Read once; decode workers compute the tiny
-    /// `VV_BLUR_BG` gimmick settings, read once: decode workers compute the
-    /// tiny blurred copy only when enabled, at this texture long side.
+    /// The `VV_BLUR_BG` gimmick settings, read once.
+    /// Decode workers compute the tiny blurred copy only when enabled, at
+    /// this texture long side.
     blur_enabled: bool,
     blur_px: u32,
 }
 
 impl Grid {
-    /// List the images in a directory (sorted by file name) and spawn the
+    /// List the images in a directory (sorted by file name) and start the
     /// background decode worker.
     ///
     /// # Errors
     ///
-    /// Errors when the directory cannot be read.
+    /// The function errors when it cannot read the directory.
     pub fn from_dir(dir: &Path) -> Result<Grid> {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
             .with_context(|| format!("failed to read directory {}", dir.display()))?
@@ -219,14 +238,16 @@ impl Grid {
         })
     }
 
-    /// Drain finished background decodes (uploading textures, which needs
-    /// the main thread) and hand out new jobs: `priority` indices first
-    /// (neighbors of what is on screen), then a wraparound scan from
-    /// `scan_start`. With `scan` false only `priority` entries are
-    /// dispatched and the rest of the queue is paused — the image view
-    /// sets this while the open image is still decoding, so the visible
-    /// image gets all the cores. Runs every frame; never blocks. Entries
-    /// whose texture is currently held by the image view are skipped.
+    /// Drain finished background decodes, which upload textures on the main
+    /// thread, and hand out new jobs.
+    /// The code dispatches `priority` indices first (neighbors of what is on
+    /// screen), then a wraparound scan from `scan_start`.
+    /// With `scan` false it dispatches only `priority` entries and pauses the
+    /// rest of the queue.
+    /// The image view sets this while the open image still decodes, so the
+    /// visible image gets all the cores.
+    /// The function runs every frame and never blocks.
+    /// It skips entries whose texture the image view holds now.
     pub fn load_pending(
         &mut self,
         rl: &mut RaylibHandle,
@@ -235,10 +256,10 @@ impl Grid {
         scan_start: usize,
         scan: bool,
     ) {
-        // Ids that should hold a full-resolution texture: the entry the
+        // Ids that hold a full-resolution texture: the entry the
         // scan starts at (the selection or the open image) plus the
-        // prefetch priorities (its neighbors). Everything else stores only
-        // the square thumbnail.
+        // prefetch priorities (its neighbors).
+        // Everything else stores only the square thumbnail.
         let keep: HashSet<u64> = priority
             .iter()
             .filter_map(|&i| self.entries.get(i).map(|e| e.id))
@@ -253,10 +274,11 @@ impl Grid {
         self.dispatch(priority, scan_start, scan, &keep);
     }
 
-    /// Step 1 of [`Self::load_pending`]: apply finished decodes. Failed
-    /// decodes mark their entry as failed (the cell stays visible, dimmed,
-    /// with an error glyph) instead of splicing it out, so the grid count
-    /// never lies. Textures upload here because that needs the main thread.
+    /// Step 1 of [`Self::load_pending`]: apply finished decodes.
+    /// A failed decode marks its entry as failed (the cell stays visible,
+    /// dimmed, with an error glyph) instead of deleting it, so the grid count
+    /// never lies.
+    /// Textures upload here because that needs the main thread.
     fn drain_results(&mut self, rl: &mut RaylibHandle, thread: &RaylibThread, keep: &HashSet<u64>) {
         while let Ok(res) = self.result_rx.try_recv() {
             self.inflight -= 1;
@@ -284,8 +306,8 @@ impl Grid {
                                 ) {
                                     Ok(ft) => e.full = Some(ft),
                                     Err(err) => {
-                                        // Non-fatal: the thumb still shows;
-                                        // opening falls back to streaming.
+                                        // Non-fatal: the thumb still shows.
+                                        // Opening falls back to streaming.
                                         eprintln!(
                                             "vv: {}: {err:#} (full-res texture skipped)",
                                             e.path.display()
@@ -303,11 +325,11 @@ impl Grid {
                     }
                 }
                 Ok(DecodeOk { full, .. }) => {
-                    // Re-decode of a thumb-only entry (keep-set refill):
-                    // the thumb already exists, so only the full-res
-                    // texture is wanted — and only if the entry is still
-                    // in the keep set (it may have been navigated away
-                    // from meanwhile).
+                    // Re-decode of a thumb-only entry (keep-set refill).
+                    // The thumb already exists, so the code wants only the
+                    // full-res texture, and only if the entry still stays
+                    // in the keep set (the selection possibly moved on
+                    // meanwhile).
                     self.entries[i].queued = false;
                     if keep.contains(&res.id)
                         && let Some(e) = self.entries.get_mut(i)
@@ -336,8 +358,9 @@ impl Grid {
         self.selected = self.selected.min(self.entries.len().saturating_sub(1));
 
         // Evict full-res textures from entries that left the keep set (the
-        // selection/open entry and its neighbors moved on). Thumb textures
-        // stay; the GPU context lives on this thread so unloading is safe.
+        // selection or open entry and its neighbors moved on).
+        // Thumb textures stay.
+        // The GPU context lives on this thread, so unloading is safe.
         for e in &mut self.entries {
             if e.full.is_some() && !keep.contains(&e.id) {
                 drop(e.full.take());
@@ -345,14 +368,16 @@ impl Grid {
         }
     }
 
-    /// Step 2 of [`Self::load_pending`]: dispatch new jobs. `priority`
-    /// indices first (the selection's or the open image's neighbors), then a
-    /// wraparound scan from `scan_start`. Jobs run on the shared rayon pool,
-    /// so several decodes proceed in parallel; each sends its result back
-    /// over the channel for `drain_results` to upload. The per-entry checks
-    /// below (texture present, queued, viewing) make revisiting a priority
-    /// index in the wraparound harmless, so no extra dedup bookkeeping is
-    /// needed — O(1) per entry.
+    /// Step 2 of [`Self::load_pending`]: dispatch new jobs.
+    /// The code dispatches `priority` indices first (the selection or the
+    /// open image neighbors), then a wraparound scan from `scan_start`.
+    /// Jobs run on the shared rayon pool, so several decodes proceed in
+    /// parallel.
+    /// Each job sends its result back over the channel for `drain_results` to
+    /// upload.
+    /// The per-entry checks below (texture present, queued, viewing) make
+    /// revisiting a priority index in the wraparound harmless.
+    /// The code needs no extra dedup bookkeeping: O(1) per entry.
     fn dispatch(&mut self, priority: &[usize], scan_start: usize, scan: bool, keep: &HashSet<u64>) {
         let n = self.entries.len();
         let start = scan_start.min(n);
@@ -370,11 +395,12 @@ impl Grid {
             if e.queued || e.viewing || e.failed.is_some() {
                 continue;
             }
-            // Decode when there is no thumb yet. Re-decode a thumb-only
-            // entry when it is in the keep set but its full-res texture is
-            // missing (its decode drained while outside the keep set, so
-            // the full texture was dropped then). Thumb-only entries
-            // outside the keep set are never re-decoded.
+            // Decode when there is no thumb yet.
+            // Re-decode a thumb-only entry when it stays in the keep set but
+            // its full-res texture is missing (its decode drained outside
+            // the keep set, so the code dropped the full texture then).
+            // The code never re-decodes thumb-only entries outside the keep
+            // set.
             if e.texture.is_some() && !(keep.contains(&e.id) && e.full.is_none()) {
                 continue;
             }
@@ -391,8 +417,8 @@ impl Grid {
                     let thumb = crate::downscale_rgba(full.clone(), THUMB_LONG_SIDE);
                     DecodeOk { thumb, blur, full }
                 });
-                // Receiver gone (grid dropped): result is discarded and the
-                // job simply ends.
+                // Receiver gone (grid dropped): the code discards the
+                // result and the job simply ends.
                 let _ = tx.send(DecodeResult { id, res });
             });
         }
@@ -409,14 +435,15 @@ impl Grid {
         cache.as_ref().expect("just cached").1
     }
 
-    /// Grid index of the entry with this stable id (ids stay stable for
-    /// the grid's lifetime; indices do not).
+    /// The grid index of the entry with this stable id.
+    /// The ids stay stable for the grid lifetime, and the indices do not.
     pub fn index_of(&self, id: u64) -> Option<usize> {
         self.entries.iter().position(|e| e.id == id)
     }
 
     /// Mark the entry with this stable id as failed (e.g. a streaming load
-    /// that errored mid-way). The cell stays, dimmed, with an error glyph.
+    /// that errored in the middle).
+    /// The cell stays, dimmed, with an error glyph.
     pub fn mark_failed(&mut self, id: u64, err: String) {
         if let Some(e) = self.entries.iter_mut().find(|e| e.id == id) {
             e.queued = false;
@@ -424,9 +451,10 @@ impl Grid {
         }
     }
 
-    /// Indices of the grid neighbors of `sel` — left, right, up, down, in
-    /// that order — as prefetch priority. Needs the window size for the
-    /// column count. Duplicates and out-of-range indices are skipped.
+    /// The indices of the grid neighbors of `sel` (left, right, up, down, in
+    /// that order), as prefetch priority.
+    /// The function needs the window size for the column count.
+    /// It skips duplicates and out-of-range indices.
     pub fn prefetch_neighbors(&self, sel: usize, win_w: f32, win_h: f32) -> Vec<usize> {
         let n = self.entries.len();
         if n == 0 {
@@ -450,9 +478,10 @@ impl Grid {
         v
     }
 
-    /// Scroll the selection into view. Used when the selection was set (or
-    /// the layout changed) from outside the navigation code — e.g. when
-    /// returning to the grid from image view, or after a +/- zoom step.
+    /// Scroll the selection into view.
+    /// The code uses this when it sets the selection (or the layout changed)
+    /// from outside the navigation code, for example when returning to the
+    /// grid from image view, or after a +/- zoom step.
     pub fn ensure_visible(&mut self, win_w: f32, win_h: f32) {
         if self.entries.is_empty() {
             return;
@@ -471,14 +500,17 @@ impl Grid {
         self.scroll = self.scroll.clamp(0.0, scroll_max);
     }
 
-    /// Grid navigation: h/j/k/l + arrows move the selection (auto-repeat
-    /// while held, at the X server's rate — xset r rate), g/G jump to the
-    /// first/last image, Enter opens the selected image, q quits. ESC is
-    /// inert here (grid is the home view).
+    /// Grid navigation.
+    /// h/j/k/l and the arrows move the selection, with auto-repeat while
+    /// held at the X server rate (xset r rate).
+    /// g/G jump to the first or last image.
+    /// Enter opens the selected image and q quits.
+    /// ESC does nothing here, because the grid is the home view.
     ///
     /// `None` means no action this frame.
-    // One frame's input pipeline (queue drain, repeat, zoom, scroll,
-    // navigation, mouse) is intentionally linear; see main() too.
+    // One frame input pipeline (queue drain, repeat, zoom, scroll,
+    // navigation, mouse) is intentionally linear.
+    // See main() too.
     #[allow(clippy::too_many_lines)]
     pub fn handle_input(
         &mut self,
@@ -489,13 +521,15 @@ impl Grid {
         if self.entries.is_empty() {
             return None;
         }
-        // Drain the raw key queue instead of is_key_pressed(). A press whose
-        // release lands within the same frame is invisible to is_key_pressed
-        // (raylib snapshots current->previous key state once per frame, so a
-        // press+release pair between two polls nets out to 0->0), which is
-        // easy to hit here: frames stall on full-res texture uploads, and a
-        // crisp Enter tap fits inside one. GetKeyPressed()/GetCharPressed()
-        // queue every press event during the poll, so nothing is lost.
+        // Drain the raw key queue instead of is_key_pressed().
+        // A press whose release lands within the same frame is invisible to
+        // is_key_pressed (raylib snapshots the current and previous key
+        // state once per frame, so a press+release pair between two polls
+        // nets out to 0->0).
+        // This case is easy to hit here: frames stall on full-res texture
+        // uploads, and a crisp Enter tap fits inside one.
+        // GetKeyPressed() and GetCharPressed() queue every press event
+        // during the poll, so nothing is lost.
         let mut enter = false;
         let mut quit = false;
         let mut left = false;
@@ -531,10 +565,13 @@ impl Grid {
             }
         }
         // Some input setups (IMEs, unusual X11 input methods) deliver Enter
-        // as a character event ('\n'/'\r') instead of (or in addition to) a
-        // key-press event; accept both. This drain also covers the +/- zoom
-        // characters, so nothing piles up. The queue is drained every frame,
-        // so unmatched chars never accumulate.
+        // as a character event ('\n'/ '\r') instead of, or in addition to, a
+        // key-press event.
+        // The code accepts both.
+        // This drain also covers the +/- zoom characters, so nothing piles
+        // up.
+        // The code drains the queue every frame, so unmatched chars never
+        // accumulate.
         while let Some(c) = rl.get_char_pressed() {
             match c {
                 '\n' | '\r' => enter = true,
@@ -544,8 +581,9 @@ impl Grid {
             }
         }
         // Auto-repeat for the direction keys: the initial press fires
-        // immediately (edge from the queue above); holding fires at the X
-        // server's repeat rate after its delay (xset r rate values).
+        // at once (edge from the queue above).
+        // Holding fires at the X server repeat rate after its delay (xset r
+        // rate values).
         let now = rl.get_time();
         let (delay, rate) = crate::keyrepeat::settings();
         let down_left = rl.is_key_down(KeyboardKey::KEY_H) || rl.is_key_down(KeyboardKey::KEY_LEFT);
@@ -558,12 +596,13 @@ impl Grid {
         let right = rep[1].tick(right, down_right, now, delay, rate);
         let up = rep[2].tick(up, down_up, now, delay, rate);
         let down = rep[3].tick(down, down_down, now, delay, rate);
-        // +/- zoom the thumbnails (same 25% steps and key detection as the
-        // image-view free zoom: the US-layout =/- keycodes, numpad included,
-        // plus the typed character for non-US layouts). The default zoom is
-        // the exact-fill layout; zooming out re-fits with more, smaller
-        // thumbnails (still an exact fill); zooming in overflows the window
-        // vertically and enables scrolling.
+        // +/- zoom the thumbnails (the same 25% steps and key detection as
+        // the image-view free zoom: the US-layout =/- keycodes, numpad
+        // included, plus the typed character for non-US layouts).
+        // The default zoom is the exact-fill layout.
+        // Zooming out re-fits with more, smaller thumbnails (still an exact
+        // fill).
+        // Zooming in overflows the window vertically and enables scrolling.
         let n = self.entries.len();
         let mut follow = false;
         if zoom_in || zoom_out {
@@ -593,7 +632,7 @@ impl Grid {
         let mut sel = self.selected;
         // h/l wrap between rows: l on a row's rightmost element moves to the
         // next row's first element, h on the leftmost moves back to the end of
-        // the previous row (never past the first/last element).
+        // the previous row (never past the first or last element).
         if left {
             if sel.is_multiple_of(cols) {
                 if sel > 0 {
@@ -619,7 +658,8 @@ impl Grid {
         if down && sel + cols < n {
             sel += cols;
         }
-        // g/G: jump to the first/last image (overrides held direction keys).
+        // g/G: jump to the first or last image (overrides held direction
+        // keys).
         if jump_first {
             sel = 0;
         }
@@ -628,7 +668,8 @@ impl Grid {
         }
         self.selected = sel;
         // Keep the selection on screen after it moved or the layout changed
-        // under it (+/- zoom); manual wheel scrolling is left untouched.
+        // under it (+/- zoom).
+        // The code leaves manual wheel scrolling untouched.
         if self.selected != old_sel || follow {
             self.ensure_visible(win_w, win_h);
         }
@@ -638,10 +679,11 @@ impl Grid {
         if quit {
             return Some(GridAction::Quit);
         }
-        // Mouse: click selects a cell; clicking the already-selected cell
-        // opens it (first click selects, second opens — nsxiv-style).
+        // Mouse: a click selects a cell.
+        // Clicking the already-selected cell opens it (first click selects,
+        // second opens, in the nsxiv style).
         // `f` opens the cell under the cursor directly (a double-click
-        // without the clicking: select + open in one step).
+        // without the clicking: select and open in one step).
         if rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
             && let Some(idx) = self.cell_at(rl.get_mouse_position(), win_w, win_h)
         {
@@ -659,11 +701,11 @@ impl Grid {
         None
     }
 
-    /// Grid cell under the window-space point, if any.
+    /// The grid cell under the window-space point, if any.
     fn cell_at(&self, m: Vector2, win_w: f32, win_h: f32) -> Option<usize> {
         let l = self.layout(win_w, win_h);
         let (cw, ch) = (l.cell_w, l.cell_h);
-        // Grid coordinates: content is drawn at MARGIN + col*(cw+GAP)
+        // Grid coordinates: the code draws content at MARGIN + col*(cw+GAP)
         // minus scroll, so add scroll back to the cursor position.
         let (mx, my) = (m.x - MARGIN, m.y + self.scroll - MARGIN);
         let col = (mx / (cw + GAP)).floor();
@@ -713,8 +755,8 @@ impl Grid {
                 height: side,
             };
             if let Some(tex) = &e.texture {
-                // The thumb texture keeps the image's aspect ratio; the
-                // square cell shows its center crop (draw-time crop, so a
+                // The thumb texture keeps the aspect ratio of the image.
+                // The square cell shows its center crop (draw-time crop, so a
                 // resize never needs a re-decode).
                 let tw = tex.width() as f32;
                 let th = tex.height() as f32;
@@ -727,8 +769,8 @@ impl Grid {
                 };
                 d.draw_texture_pro(tex, src, thumb, Vector2::ZERO, 0.0, Color::WHITE);
             } else if e.failed.is_some() {
-                // Decode failed: dim red placeholder with an error glyph —
-                // the file stays visible instead of silently vanishing.
+                // Decode failed: dim red placeholder with an error glyph.
+                // The file stays visible instead of vanishing silently.
                 d.draw_rectangle_rec(thumb, Color::new(72, 26, 26, 255));
                 let msg = "!";
                 let tw = d.measure_text(msg, 24);
@@ -750,7 +792,8 @@ impl Grid {
     }
 }
 
-/// Is this path likely an image we can decode? (Grid directory filter.)
+/// Do the code most likely decode this path as an image? (Grid directory
+/// filter.)
 fn is_image_path(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
         matches!(
@@ -760,10 +803,12 @@ fn is_image_path(path: &Path) -> bool {
     })
 }
 
-/// Largest exact-fill square thumbnail side for `n` entries in an
-/// `aw` x `ah` available area: the best over all column counts (ties prefer
-/// the column count whose cells are closest to square, i.e. least empty
-/// space). This is also the zoom-1.0 reference size for +/- zooming.
+/// The largest exact-fill square thumbnail side for `n` entries in an
+/// `aw` x `ah` available area.
+/// The code takes the best over all column counts.
+/// Ties prefer the column count whose cells stay closest to square, that is,
+/// the least empty space.
+/// This is also the zoom-1.0 reference size for +/- zooming.
 fn best_fill_side(n: usize, aw: f32, ah: f32) -> f32 {
     let n = n.max(1);
     let mut best_score = (f32::NEG_INFINITY, 0.0f32);
@@ -783,21 +828,24 @@ fn best_fill_side(n: usize, aw: f32, ah: f32) -> f32 {
 
 /// Compute the grid layout for `n` entries at zoom `zoom` (1.0 = default):
 /// how many columns, the cell size, the square thumbnail side, and the total
-/// content height (which may exceed the window when zoomed in; the caller
-/// scrolls by the excess).
+/// content height.
+/// The content height can exceed the window when zoomed in, and the caller
+/// scrolls by the excess.
 ///
 /// At the default zoom the layout is the exact fill described in
-/// [`best_fill_side`]: cells divide the available space, so the grid spans
-/// the whole window in both dimensions.
+/// [`best_fill_side`].
+/// Cells divide the available space, so the grid spans the whole window in
+/// both dimensions.
 ///
 /// Zooming out shrinks the target thumbnail side and picks the column count
-/// whose fill-derived side lands closest to it — the grid still spans the
-/// window exactly, now with more (smaller) thumbnails.
+/// whose fill-derived side lands closest to it.
+/// The grid still spans the window exactly, now with more smaller thumbnails.
 ///
 /// Zooming in grows the target side past the largest exact-fill size, so the
-/// rows no longer fit vertically: cells stay square at the target side
-/// (columns stretch a little so the grid still spans the width), rows
-/// overflow, and the caller scrolls.
+/// rows no longer fit vertically.
+/// Cells stay square at the target side and columns stretch a little so the
+/// grid still spans the width.
+/// Rows overflow and the caller scrolls.
 fn grid_layout_at(n: usize, win_w: f32, win_h: f32, zoom: f32) -> Layout {
     let n = n.max(1);
     let aw = (win_w - 2.0 * MARGIN).max(1.0);
@@ -808,7 +856,8 @@ fn grid_layout_at(n: usize, win_w: f32, win_h: f32, zoom: f32) -> Layout {
     if target <= base {
         // Exact fill: pick the column count whose fill-derived side is
         // closest to the target (at zoom 1.0 this reproduces the exact-fill
-        // optimum; ties prefer the least empty space, i.e. the smaller
+        // optimum).
+        // Ties prefer the least empty space, that is, the smaller
         // max(cw, ch)).
         let mut best = (1usize, aw, ah);
         let mut best_key = (f32::INFINITY, f32::INFINITY);
@@ -834,7 +883,8 @@ fn grid_layout_at(n: usize, win_w: f32, win_h: f32, zoom: f32) -> Layout {
         }
     } else {
         // Overflow: square cells at the target side, as many columns as fit
-        // the width; the rows scroll vertically.
+        // the width.
+        // The rows scroll vertically.
         let target = target.min(aw.min(ah));
         let cols = (((aw + GAP) / (target + GAP)).floor() as usize).clamp(1, n);
         let cw = ((aw - (cols - 1) as f32 * GAP) / cols as f32).max(target);
@@ -885,7 +935,7 @@ mod tests {
 
     #[test]
     fn grid_layout_default_spans_full_window() {
-        // At the default zoom, cells are sized to divide the available
+        // At the default zoom, the code sizes cells to divide the available
         // space, so the grid must span the whole window in both dimensions
         // and the content height must equal the window height.
         for (n, win_w, win_h) in [(1, 100.0, 100.0), (7, 1200.0, 700.0), (100, 1600.0, 900.0)] {
@@ -911,8 +961,8 @@ mod tests {
 
     #[test]
     fn grid_layout_zoom_out_keeps_exact_fill_with_smaller_thumbs() {
-        // 9 images in a 640x640 window: default is 3x3 with ~208px thumbs;
-        // zooming out must shrink the thumbs, add columns, and still span
+        // 9 images in a 640x640 window: default is 3x3 with ~208px thumbs.
+        // Zooming out must shrink the thumbs, add columns, and still span
         // the window exactly (no scrolling).
         let default = grid_layout_at(9, 640.0, 640.0, 1.0);
         let l = grid_layout_at(9, 640.0, 640.0, 0.8);
@@ -965,8 +1015,8 @@ mod tests {
             std::fs::write(dir.join(format!("{i:02}.png")), b"").unwrap();
         }
         let grid = Grid::from_dir(dir).unwrap();
-        // Square window: 9 images lay out as a 3x3 grid, so index 4's
-        // neighbors are 3 (left), 5 (right), 1 (up), 7 (down).
+        // Square window: 9 images lay out as a 3x3 grid, so index 4 has
+        // neighbors 3 (left), 5 (right), 1 (up), 7 (down).
         assert_eq!(grid.prefetch_neighbors(4, 640.0, 640.0), vec![3, 5, 1, 7]);
         // Top-left corner: only right (1) and down (3) exist.
         assert_eq!(grid.prefetch_neighbors(0, 640.0, 640.0), vec![1, 3]);
@@ -987,11 +1037,11 @@ mod tests {
     fn from_dir_lists_images_sorted_ignores_others() {
         let dir = TempDir::new().unwrap();
         let dir = dir.path();
-        // Tiny valid PNG (1x1 red) via the image crate.
+        // Tiny valid PNG (1x1 red) through the image crate.
         let png = image::DynamicImage::new_rgb8(1, 1);
         png.save(dir.join("b.png")).unwrap();
         std::fs::write(dir.join("a.txt"), "not an image").unwrap();
-        std::fs::write(dir.join("c.png"), "invalid png content").unwrap(); // listed, decode fails later
+        std::fs::write(dir.join("c.png"), "invalid png content").unwrap(); // listed, the decode fails later
         std::fs::write(dir.join(".hidden.png"), "dotfile").unwrap(); // skipped
 
         let grid = Grid::from_dir(dir).unwrap();

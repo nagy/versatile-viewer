@@ -1,22 +1,28 @@
-//! Auto-repeat for keys the viewer handles manually (nav keys, grid moves).
+//! Auto-repeat for the keys the viewer handles manually (nav keys, grid
+//! moves).
 //!
-//! Raylib reports key presses as edges only: `IsKeyPressed` fires once per
-//! physical press (GLFW repeat events are discarded), so holding a key
-//! does nothing. This module reimplements the X server's auto-repeat on
-//! top of `IsKeyDown`, using the very same delay/rate values `xset r rate`
-//! configures (read once from `xset q`); falls back to the Xorg defaults
-//! (660 ms delay, 20 repeats/s) when they cannot be read (Wayland, no X).
+//! Raylib reports key presses as edges only.
+//! `IsKeyPressed` fires once per physical press.
+//! Raylib discards GLFW repeat events.
+//! Holding a key then does nothing.
+//! This module reimplements the X server auto-repeat on top of
+//! `IsKeyDown`.
+//! It uses the same delay and rate values that `xset r rate` configures.
+//! The module reads these values once from `xset q`.
+//! It falls back to the Xorg defaults (660 ms delay, 20 repeats/s) when it
+//! cannot read them (Wayland, no X).
 
 use std::{process::Command, sync::OnceLock};
 
-/// (initial delay in seconds, repeat rate in repeats per second). Read
-/// once, on first use.
+/// The initial delay in seconds and the repeat rate in repeats per second.
+/// The function reads these values once, on first use.
 pub fn settings() -> (f32, f32) {
     static CACHE: OnceLock<(f32, f32)> = OnceLock::new();
     *CACHE.get_or_init(|| xset_settings().unwrap_or((0.66, 20.0)))
 }
 
-/// Per-key auto-repeat state. Feed once per frame with `tick`.
+/// Per-key auto-repeat state.
+/// Feed it once per frame with `tick`.
 #[derive(Clone, Copy, Default)]
 pub struct RepeatState {
     held: bool,
@@ -26,25 +32,28 @@ pub struct RepeatState {
 impl RepeatState {
     /// Feed this key's state once per frame.
     ///
-    /// `edge`: the key was pressed this frame (from the raw event queue —
-    /// `IsKeyPressed` can miss taps that fit inside one frame); `down`: the
-    /// key is currently held; `now`: `rl.get_time`(). Returns true exactly
-    /// when the action should fire: on the initial press, then every 1/rate
-    /// seconds once the hold outlasts the delay.
+    /// `edge`: the raw event queue reports the key press this frame.
+    /// `IsKeyPressed` can miss taps that fit inside one frame.
+    /// `down`: the key is held now.
+    /// `now`: the value from `rl.get_time()`.
+    /// The function returns true exactly when the action fires.
+    /// It fires on the initial press.
+    /// It then fires every 1/rate seconds after the hold outlasts the delay.
     ///
     /// # Examples
     ///
     /// ```
     /// # use versatile_viewer::keyrepeat::RepeatState;
     /// let mut st = RepeatState::default();
-    /// // Initial press fires immediately.
+    /// // The initial press fires immediately.
     /// assert!(st.tick(true, true, 0.0, 0.66, 20.0));
-    /// // Repeats wait out the delay (660 ms), then fire every 1/rate
-    /// // (50 ms at 20/s), scheduled from the last fire — not from `now`.
+    /// // Repeats wait out the delay (660 ms), then fire every 1/rate (50 ms
+    /// // at 20/s).
+    /// // The schedule starts at the last fire, not at `now`.
     /// assert!(!st.tick(false, true, 0.65, 0.66, 20.0));
     /// assert!(st.tick(false, true, 0.67, 0.66, 20.0));
     /// assert!(st.tick(false, true, 0.72, 0.66, 20.0));
-    /// // Release stops repeats; a fresh edge fires again.
+    /// // Release stops the repeats. A fresh edge fires again.
     /// assert!(!st.tick(false, false, 0.8, 0.66, 20.0));
     /// assert!(st.tick(true, true, 1.0, 0.66, 20.0));
     /// ```
@@ -59,8 +68,9 @@ impl RepeatState {
             return false;
         }
         if now >= self.next {
-            // Schedule relative to the last fire (not to `now`) so repeats
-            // stay at the configured rate; never fire twice in one frame.
+            // Schedule relative to the last fire (not to `now`).
+            // The repeats then stay at the configured rate.
+            // The code never fires twice in one frame.
             self.next = (self.next + 1.0 / f64::from(rate).max(0.001)).max(now);
             return true;
         }
@@ -68,8 +78,9 @@ impl RepeatState {
     }
 }
 
-/// Ask the X server for its keyboard auto-repeat settings: the same values
-/// shown (and set) by `xset q` / `xset r rate delay rate`.
+/// Ask the X server for its keyboard auto-repeat settings.
+/// The command `xset q` shows these values.
+/// The command `xset r rate delay rate` sets them.
 fn xset_settings() -> Option<(f32, f32)> {
     let out = Command::new("xset").arg("q").output().ok()?;
     if !out.status.success() {
@@ -92,8 +103,8 @@ fn xset_settings() -> Option<(f32, f32)> {
     }
 }
 
-/// First integer after `key` on this line
-/// ("    auto repeat delay:  660    repeat rate:  20" -> 660).
+/// The first integer after `key` on this line.
+/// "    auto repeat delay:  660    repeat rate:  20" becomes 660.
 fn num_after(line: &str, key: &str) -> Option<f32> {
     let rest = line.split_once(key)?.1;
     let num: String = rest
@@ -134,9 +145,9 @@ mod tests {
 
     #[test]
     fn repeat_never_fires_without_an_edge() {
-        // Without an observed press edge (edge missed entirely) the key is
-        // not considered held, so no repeat fires — the first edge starts
-        // the cycle.
+        // Without an observed press edge the key does not count as held.
+        // No repeat then fires.
+        // The first edge starts the cycle.
         let mut st = RepeatState::default();
         assert!(!st.tick(false, true, 0.0, 0.66, 20.0));
         assert!(!st.tick(false, true, 10.0, 0.66, 20.0));
