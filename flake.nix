@@ -32,9 +32,9 @@
         let
           craneLib = crane.mkLib pkgs;
 
-          # System libraries raylib-sys compiles against and the final binary
-          # links at runtime (X11 / GL family). jxl-oxide is pure Rust, so no
-          # libjxl here.
+          # The system libraries that raylib-sys compiles against.
+          # The final binary links them at runtime (X11 / GL family).
+          # jxl-oxide is pure Rust, so there is no libjxl here.
           libInputs = [
             pkgs.libGL
             pkgs.libx11
@@ -45,8 +45,9 @@
             pkgs.libxinerama
           ];
 
-          # Native tools needed by the raylib-sys crate: it compiles the
-          # vendored raylib with CMake and generates bindings with bindgen.
+          # The native tools that the raylib-sys crate needs.
+          # It compiles the vendored raylib with CMake.
+          # It generates bindings with bindgen.
           nativeBuildInputs = [
             pkgs.pkg-config
             pkgs.cmake
@@ -54,7 +55,7 @@
             pkgs.makeWrapper
           ];
 
-          # Env needed by bindgen / clang.
+          # The environment that bindgen and clang need.
           env = {
             LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
             BINDGEN_EXTRA_CLANG_ARGS = lib.concatStringsSep " " [
@@ -63,16 +64,19 @@
             ];
           };
 
-          # rpath link-args so the binary finds the system libs at runtime.
+          # rpath link arguments, so the binary finds the system libraries at
+          # runtime.
           rpathFlags = lib.concatStringsSep " " (
             map (p: "-C link-arg=-Wl,-rpath,${p}") (lib.splitString ":" (lib.makeLibraryPath libInputs))
           );
 
-          # Source as seen by cargo: everything tracked by git.
+          # The source as cargo sees it.
+          # This is everything tracked by git.
           src = craneLib.cleanCargoSource ./.;
 
-          # Cargo.lock has no network access during the build; fetch deps
-          # first, then feed them to cargo through the registry cache.
+          # Cargo.lock has no network access during the build.
+          # Fetch the dependencies first.
+          # Then feed them to cargo through the registry cache.
           cargoArtifacts = craneLib.buildDepsOnly {
             inherit src nativeBuildInputs;
             buildInputs = libInputs;
@@ -86,21 +90,25 @@
               env
               ;
             buildInputs = libInputs;
-            # raylib dlopens libGL at runtime (it is not in DT_NEEDED), and
+            # raylib dlopens libGL at runtime, and libGL is not in DT_NEEDED.
             # Nix's fixup step shrinks RUNPATH down to only the DT_NEEDED
-            # libs. autoPatchelfHook runs in postFixup (after shrink), so
-            # appendRunpaths survives and bakes the dirs into the final
-            # DT_RUNPATH, making the binary self-contained. Same idiom as
-            # nixpkgs' raylib package.
+            # libraries.
+            # autoPatchelfHook runs in postFixup, after shrink.
+            # appendRunpaths thus survives and bakes the directories into the
+            # final DT_RUNPATH.
+            # The binary is then self-contained.
+            # This is the same idiom as nixpkgs' raylib package.
             nativeBuildInputs = nativeBuildInputs ++ [ pkgs.autoPatchelfHook ];
             appendRunpaths = [ (lib.makeLibraryPath libInputs) ];
             meta.description = "A fast image viewer. nsxiv meets mpv. JPEG XL first-class.";
           };
 
-          # Static rustdoc HTML (what `cargo doc` writes to ./target/doc/)
-          # installed under $out/share/doc. Reuses the same cargoArtifacts,
-          # so only doc crates compile; --no-deps (crane's default) keeps
-          # third-party crates out of the search index. Browse offline:
+          # Static rustdoc HTML installed under $out/share/doc.
+          # This is what `cargo doc` writes to ./target/doc/.
+          # It reuses the same cargoArtifacts, so only doc crates compile.
+          # --no-deps (crane's default) keeps third-party crates out of the
+          # search index.
+          # Browse offline:
           # nix run nixpkgs#python3 -- -m http.server -d <doc-out>/share/doc
           docs = craneLib.cargoDoc {
             inherit
@@ -113,8 +121,9 @@
             meta.description = "Versatile-viewer API documentation";
           };
 
-          # Doctests: code blocks in doc comments compiled and run against
-          # the library (`cargo test --doc`), same artifact set as above.
+          # Doctests compile and run the code blocks in doc comments against
+          # the library (`cargo test --doc`).
+          # They use the same artifact set as above.
           doctests = craneLib.cargoDocTest {
             inherit
               src
@@ -126,12 +135,13 @@
             meta.description = "Versatile-viewer doctests";
           };
 
-          # Lint gate: warnings are errors, every target included. Same
-          # clippy/cargo from nixpkgs as the devshell, so `nix flake check`
-          # and a plain `cargo clippy` agree instead of drifting with the
-          # toolchain the developer happens to have on PATH. `all = "deny"`
-          # in Cargo.toml only applies under clippy, so without this check
-          # the build/test/cargoDoc paths never see a lint error at all.
+          # Lint gate: warnings are errors and every target is included.
+          # This uses the same clippy and cargo from nixpkgs as the devshell.
+          # `nix flake check` and a plain `cargo clippy` then agree.
+          # They do not drift with the toolchain on the developer's PATH.
+          # `all = "deny"` in Cargo.toml only applies under clippy.
+          # Without this check the build, test and cargoDoc paths never see a
+          # lint error at all.
           clippy = craneLib.cargoClippy {
             inherit
               src
