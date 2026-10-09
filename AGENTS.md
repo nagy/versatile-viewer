@@ -16,6 +16,8 @@ The binary name is `vv`.
   Keep the crate features in sync.
 - Dispatch decode on sniffed content.
   Do not dispatch decode on the file name.
+- Public error types derive `derive_more::{Display, Error}`.
+  Private helpers keep `anyhow`.
 
 ## Build
 

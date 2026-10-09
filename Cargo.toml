@@ -25,6 +25,10 @@ raylib = "6"
 # Work pool for parallel background decodes (grid prefetch); jxl-oxide also
 # uses rayon internally for single-image decode (its default feature).
 rayon = "1"
+derive_more = { version = "2.1.1", default-features = false, features = [
+  "display",
+  "error",
+] }
 
 # X11 WM_CLASS setup (XSetClassHint); Linux only, links the same libX11
 # raylib's X11 backend already pulls in.

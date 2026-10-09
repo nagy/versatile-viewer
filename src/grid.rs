@@ -114,6 +114,21 @@ struct Layout {
 /// size and zoom.
 type LayoutKey = (usize, u32, u32, u32);
 
+/// Why a grid entry failed to load.
+///
+/// The code keeps the failed entry visible as a dimmed cell with an error
+/// glyph, so the grid count never lies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, derive_more::Display, derive_more::Error)]
+#[error(ignore)]
+pub enum DecodeFailure {
+    /// The background decode failed (bad bytes, unsupported content, I/O).
+    #[display("decode failed")]
+    Decode,
+    /// The GL texture upload failed (no context, driver refusal).
+    #[display("texture upload failed")]
+    TextureUpload,
+}
+
 /// One grid cell: the image file and its uploaded full-resolution texture.
 /// The code draws thumbs by cropping a center square, so a resize never
 /// needs a re-decode.
@@ -141,7 +156,7 @@ pub struct GridEntry {
     pub queued: bool,
     /// Set when the decode (or texture upload) failed.
     /// The cell stays visible as a dimmed error square instead of vanishing.
-    pub failed: Option<String>,
+    pub failed: Option<DecodeFailure>,
     /// The texture the image view holds now (taken out of the grid).
     /// The grid puts it back when the view ends and never re-dispatches it
     /// in between.
@@ -320,7 +335,7 @@ impl Grid {
                             eprintln!("vv: {}: {err:#}", self.entries[i].path.display());
                             let e = &mut self.entries[i];
                             e.queued = false;
-                            e.failed = Some(format!("{err:#}"));
+                            e.failed = Some(DecodeFailure::TextureUpload);
                         }
                     }
                 }
@@ -339,7 +354,7 @@ impl Grid {
                             Ok(ft) => e.full = Some(ft),
                             Err(err) => {
                                 eprintln!("vv: {}: {err:#}", e.path.display());
-                                e.failed = Some(format!("{err:#}"));
+                                e.failed = Some(DecodeFailure::TextureUpload);
                             }
                         }
                     }
@@ -351,7 +366,7 @@ impl Grid {
                     );
                     let e = &mut self.entries[i];
                     e.queued = false;
-                    e.failed = Some(format!("decode failed: {err}"));
+                    e.failed = Some(DecodeFailure::Decode);
                 }
             }
         }
@@ -444,7 +459,7 @@ impl Grid {
     /// Mark the entry with this stable id as failed (e.g. a streaming load
     /// that errored in the middle).
     /// The cell stays, dimmed, with an error glyph.
-    pub fn mark_failed(&mut self, id: u64, err: String) {
+    pub fn mark_failed(&mut self, id: u64, err: DecodeFailure) {
         if let Some(e) = self.entries.iter_mut().find(|e| e.id == id) {
             e.queued = false;
             e.failed = Some(err);
@@ -916,9 +931,9 @@ mod tests {
         let mut grid = Grid::from_dir(dir).unwrap();
         assert_eq!(grid.entries.len(), 1);
         let id = grid.entries[0].id;
-        grid.mark_failed(id, "boom".to_string());
+        grid.mark_failed(id, DecodeFailure::Decode);
         assert_eq!(grid.entries.len(), 1, "failed entry stays in the grid");
-        assert_eq!(grid.entries[0].failed.as_deref(), Some("boom"));
+        assert_eq!(grid.entries[0].failed, Some(DecodeFailure::Decode));
         assert!(!grid.entries[0].queued);
     }
 

@@ -48,7 +48,7 @@ use versatile_viewer::{
     DecodedImage,
     blurbg::{self, BlurBg},
     decode_image,
-    grid::{Grid, GridAction},
+    grid::{DecodeFailure, Grid, GridAction},
     keyrepeat,
     loader::{DecodeMsg, Loader},
     upload_rgba,
@@ -808,7 +808,7 @@ fn main() -> Result<()> {
                 if let Some(id) = st.open_id.take() {
                     grid.as_mut()
                         .unwrap()
-                        .mark_failed(id, "decoding failed".to_string());
+                        .mark_failed(id, DecodeFailure::Decode);
                 }
                 st.view_from_grid = None;
                 st.mode = Mode::Grid;
