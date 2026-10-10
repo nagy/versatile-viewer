@@ -17,7 +17,7 @@ The binary name is `vv`.
 - Dispatch decode on sniffed content.
   Do not dispatch decode on the file name.
 - Public error types derive `derive_more::{Display, Error, From}` (feature `from` on).
-  Each module owns its error enum: `src/error.rs` (`DecodeError`, `UploadError`), `src/grid.rs` (`GridError`), `src/loader.rs` (`LoadError`).
+  Each module owns its error enum: `src/error.rs` (`DecodeError`, `UploadError`), `src/grid.rs` (`GridError`), `src/loader.rs` (`LoadError`), `src/mcp.rs` (`SpawnError`).
   `main.rs` keeps `anyhow`.
 - Wrap raw pixel and window primitives in the `src/dim.rs` newtypes (`ImgW`, `ImgH`, `WinW`, `WinH`, `LongSide`, `PreviewPx`, `Delay`, `Rate`).
   Public API boundaries take the newtype, not the bare primitive.
@@ -45,9 +45,31 @@ ESC never quits.
 - X11 WM_CLASS is `vv` (res_name + res_class) — `src/wmclass.rs`.
   Wayland is a no-op.
 
+## MCP
+
+- `vv --mcp <path>` also serves the Model Context Protocol on stdio, from `src/mcp.rs`.
+  The `--mcp` flag accepts either argument order.
+  The viewer window stays interactive.
+- The server pins revision `2026-07-28` and serves that revision only.
+  The revision is stateless: no `initialize` handshake, no session, and the client context rides in the per-request `io.modelcontextprotocol/*` `_meta` fields.
+  An older client fails fast on `UnsupportedProtocolVersion`.
+- The server is a husk: tools capability advertised, empty tool list, no resources, no prompts.
+  Deprecated `logging` is not advertised.
+- stdout carries protocol frames only.
+  Every diagnostic goes to stderr, and `main.rs` redirects the raylib trace log to stderr before the server starts.
+  The module never writes to stdout outside the transport.
+- The server runs a tokio current-thread runtime on a background thread.
+  A start or run failure prints to stderr and never stops the viewer.
+- Client config: `{ "command": "vv", "args": ["--mcp", "/path/to/images"] }`.
+- Adding a tool means one `TOOLS` entry plus one `call_tool` arm.
+  The naming rule (`vv_<action>`), the four hint rules, and the planned tool set live in the `src/mcp.rs` module docstring.
+- Tests: unit tests in `src/mcp.rs` drive the server over an in-memory duplex stream.
+  `tests/mcp_stdio.rs` drives the real stdin and stdout of a child process.
+
 ## Next
 
 - Add video playback (mpv inspiration).
   The backend is TBD.
+- Add the first MCP tool (`vv_show_image`), per the tool rules in `src/mcp.rs`.
 
 Module internals live in each `src/*.rs` `//!` docstring.

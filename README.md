@@ -16,11 +16,32 @@ that fills the window, decoded in parallel on a background pool.
 
 ```sh
 nix run . -- <image-path-or-directory>   # single image or directory grid
+nix run . -- --mcp <image-path-or-directory>   # the same, plus MCP on stdio
 ```
 
 Requires the usual X11/GL runtime libraries; the Nix build bakes them in
 via rpath, so the result is self-contained. Outside Nix:
 `cargo build --release` against a system raylib works too.
+
+## MCP
+
+`vv --mcp <path>` also serves the [Model Context Protocol] on stdio, so an
+agent can drive the viewer. The window stays interactive.
+
+[Model Context Protocol]: https://modelcontextprotocol.io/specification/2026-07-28
+
+```json
+{ "command": "vv", "args": ["--mcp", "/path/to/images"] }
+```
+
+The server pins spec revision `2026-07-28`, which is stateless: there is no
+`initialize` handshake and no session. Each request carries its protocol
+version and client capabilities in the `io.modelcontextprotocol/*` `_meta`
+fields, and `server/discover` replaces the handshake.
+
+At present the server is a husk. It advertises the tools capability with an
+empty tool list, and no resources or prompts. Every diagnostic goes to stderr,
+because stdout carries protocol frames only.
 
 ## Keys
 

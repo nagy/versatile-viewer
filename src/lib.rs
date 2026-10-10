@@ -23,6 +23,8 @@
 //! The common formats decode with the `image` crate.
 //! [`downscale_rgba`] and [`upload_rgba`] are the shared pixel and texture
 //! choke points.
+//! [`mcp`] serves the Model Context Protocol on stdio when the binary starts
+//! with `--mcp`.
 //! The binary in `main.rs` wires these pieces into the window and event loop.
 //! The unit tests and doctests here keep the pure helpers honest.
 
@@ -32,6 +34,7 @@ pub mod error;
 pub mod grid;
 pub mod keyrepeat;
 pub mod loader;
+pub mod mcp;
 #[cfg(target_os = "linux")]
 pub mod wmclass;
 

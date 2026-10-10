@@ -19,9 +19,8 @@
 //! q quits.
 //! ESC and Enter toggle between the grid and the image view.
 //!
-//! Usage: versatile-viewer <image-path-or-directory>
+//! Usage: `vv [--mcp] <image-path-or-directory>`
 //!
-//! Env gimmicks.
 //! `VV_DEBUG`=1 traces input events.
 //! `VV_SLOW_STREAM`=1 slows the JXL stream.
 //! `VV_BLUR_BG`=1 draws a blurred copy of the viewed image as the image-view
@@ -29,6 +28,9 @@
 //! `VV_BG_DIM`=0..1 sets its brightness (default 0.6).
 //! `VV_BLUR_PX` sets the blur resolution, the long side of the tiny texture.
 //! The default is 128, and fewer pixels give a blurrier result.
+//!
+//! `vv --mcp <path>` also serves the Model Context Protocol on stdio.
+//! The viewer window stays interactive; the server owns stdin and stdout.
 
 use std::{
     env, fs,
@@ -52,7 +54,7 @@ use versatile_viewer::{
     grid::{DecodeFailure, Grid, GridAction},
     keyrepeat,
     loader::{DecodeMsg, Loader},
-    upload_rgba,
+    mcp, upload_rgba,
 };
 
 /// The fraction of the remaining distance to the window center that the
@@ -394,13 +396,38 @@ fn window_title(path: &Path, dir_grid: Option<&Grid>) -> String {
     }
 }
 
+/// Start the MCP stdio server once, in the background.
+///
+/// The server owns stdin and stdout, so raylib must not write its trace log
+/// there. The code redirects the trace log to stderr instead.
+///
+/// The whole program is single-threaded at this point.
+fn start_mcp() -> Result<()> {
+    raylib::core::callbacks::set_trace_log_callback(|_level, text| {
+        eprintln!("vv: raylib: {text}");
+    })
+    .context("failed to redirect the raylib trace log")?;
+    mcp::spawn().context("failed to start the MCP server")
+}
+
 // The event loop is one long state machine by design.
 // Splitting it scatters the frame-order invariants across call sites.
 #[allow(clippy::too_many_lines)]
 fn main() -> Result<()> {
-    let arg = env::args()
-        .nth(1)
-        .context("usage: versatile-viewer <image-path-or-directory>")?;
+    // `--mcp` may come before or after the path, so the path is the first
+    // argument that is not the flag.
+    let mut mcp = false;
+    let mut args = env::args().skip(1);
+    let arg = loop {
+        match args.next() {
+            Some(flag) if flag == "--mcp" => mcp = true,
+            Some(path) => break path,
+            None => bail!("usage: vv [--mcp] <image-path-or-directory>"),
+        }
+    };
+    if mcp {
+        start_mcp()?;
+    }
     let path = Path::new(&arg);
 
     // Directory launch: list the directory before opening the window (the
