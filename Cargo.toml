@@ -28,6 +28,7 @@ rayon = "1"
 derive_more = { version = "2.1.1", default-features = false, features = [
   "display",
   "error",
+  "from",
 ] }
 
 # X11 WM_CLASS setup (XSetClassHint); Linux only, links the same libX11

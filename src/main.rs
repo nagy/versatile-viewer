@@ -45,9 +45,10 @@ use raylib::{
 #[cfg(target_os = "linux")]
 use versatile_viewer::wmclass;
 use versatile_viewer::{
-    DecodedImage,
+    DecodedImage, UploadError,
     blurbg::{self, BlurBg},
     decode_image,
+    dim::{ImgH, ImgW, PreviewPx, WinH, WinW},
     grid::{DecodeFailure, Grid, GridAction},
     keyrepeat,
     loader::{DecodeMsg, Loader},
@@ -176,12 +177,12 @@ fn show_frame(
     thread: &RaylibThread,
     view_tex: &mut Option<Texture2D>,
     rgba: &[u8],
-    width: u32,
-    height: u32,
+    width: ImgW,
+    height: ImgH,
     pixelated: bool,
-) -> Result<()> {
+) -> Result<(), UploadError> {
     match view_tex {
-        Some(tex) if tex.width() == width as i32 && tex.height() == height as i32 => {
+        Some(tex) if tex.width() == width.get() as i32 && tex.height() == height.get() as i32 => {
             tex.update_texture(rgba)?;
         }
         _ => {
@@ -261,16 +262,16 @@ fn put_back_view(
 /// With `set_scale_now`, the code sets the initial fit scale at once,
 /// because the caller frame skips the per-frame scale math (it ran earlier).
 /// `win` is the window size in pixels.
-/// It matches the window-space [`Vector2`] used elsewhere in the image view.
 fn show_entry(
     st: &mut ViewState,
     grid: &mut Grid,
     idx: usize,
     rl: &mut RaylibHandle,
     thread: &RaylibThread,
-    win: Vector2,
+    win: (WinW, WinH),
     set_scale_now: bool,
 ) {
+    let (win_w, win_h) = (win.0.get(), win.1.get());
     let (id, tex, w, h, path, queued, thumb, blur) = {
         let e = &mut grid.entries[idx];
         (
@@ -292,12 +293,12 @@ fn show_entry(
         st.view_from_grid = Some(id);
         apply_view_filter(thread, &tex, st.pixelated);
         st.view_tex = Some(tex);
-        st.img_w = w as f32;
-        st.img_h = h as f32;
+        st.img_w = w.as_f32();
+        st.img_h = h.as_f32();
         st.loader = None;
         st.view_loading = false;
         if set_scale_now {
-            st.view_scale = Some((win.x / st.img_w).min(win.y / st.img_h));
+            st.view_scale = Some((win_w / st.img_w).min(win_h / st.img_h));
         }
         attach_blur_bg(&mut st.blur_bg, rl, thread, blur.as_ref(), st.open_id);
     } else {
@@ -310,11 +311,11 @@ fn show_entry(
         // Set them now, so the draw loop can show the thumb as a placeholder
         // at the final transform (instead of a black frame) while the
         // full-res decode catches up.
-        if w > 0 {
-            st.img_w = w as f32;
-            st.img_h = h as f32;
+        if w.get() > 0 {
+            st.img_w = w.as_f32();
+            st.img_h = h.as_f32();
             if set_scale_now {
-                st.view_scale = Some((win.x / st.img_w).min(win.y / st.img_h));
+                st.view_scale = Some((win_w / st.img_w).min(win_h / st.img_h));
             }
         } else {
             st.img_w = 0.0; // dimensions arrive with the header/texture
@@ -328,8 +329,8 @@ fn show_entry(
             // file twice in a streaming worker.
             None
         } else {
-            let preview_px = rl.get_screen_width().max(rl.get_screen_height()) as u32;
-            Some(Loader::start(path, preview_px))
+            let win_w = rl.get_screen_width().max(rl.get_screen_height()) as u32;
+            Some(Loader::start(path, PreviewPx::new(win_w)))
         };
         attach_blur_bg(&mut st.blur_bg, rl, thread, blur.as_ref(), st.open_id);
     }
@@ -431,9 +432,9 @@ fn main() -> Result<()> {
     } else {
         None
     };
-    let (win0_w, win0_h) = single_decoded
-        .as_ref()
-        .map_or((1024, 768), |d| (d.width as i32, d.height as i32));
+    let (win0_w, win0_h) = single_decoded.as_ref().map_or((1024, 768), |d| {
+        (d.width.get() as i32, d.height.get() as i32)
+    });
 
     let (mut rl, thread) = raylib::init()
         .size(win0_w, win0_h)
@@ -518,7 +519,10 @@ fn main() -> Result<()> {
     // A one-image directory skips the grid: jump straight into that image
     // (ESC still returns to the grid view).
     if grid.as_ref().is_some_and(|g| g.entries.len() == 1) {
-        let win = Vector2::new(rl.get_screen_width() as f32, rl.get_screen_height() as f32);
+        let win = (
+            WinW::new(rl.get_screen_width() as f32),
+            WinH::new(rl.get_screen_height() as f32),
+        );
         show_entry(
             &mut st,
             grid.as_mut().unwrap(),
@@ -685,7 +689,7 @@ fn main() -> Result<()> {
             }
         } else if let Some(g) = grid.as_ref() {
             (
-                g.prefetch_neighbors(g.selected, win_w, win_h),
+                g.prefetch_neighbors(g.selected, WinW::new(win_w), WinH::new(win_h)),
                 g.selected,
                 true,
             )
@@ -719,7 +723,7 @@ fn main() -> Result<()> {
                                 i,
                                 &mut rl,
                                 &thread,
-                                Vector2::new(win_w, win_h),
+                                (WinW::new(win_w), WinH::new(win_h)),
                                 false,
                             );
                         }
@@ -739,8 +743,8 @@ fn main() -> Result<()> {
                         Ok(DecodeMsg::Header { width, height }) => {
                             // Dimensions known: fit down at once (the ease
                             // block only runs from the next frame on).
-                            st.img_w = width as f32;
-                            st.img_h = height as f32;
+                            st.img_w = width.as_f32();
+                            st.img_h = height.as_f32();
                             st.zoom = ZoomMode::FitAll;
                             st.pan = Vector2::ZERO;
                             st.target_pan = Vector2::ZERO;
@@ -768,8 +772,8 @@ fn main() -> Result<()> {
                         Ok(DecodeMsg::Done { image, blur }) => {
                             // Non-JXL formats only learn dimensions here.
                             if st.img_w == 0.0 {
-                                st.img_w = image.width as f32;
-                                st.img_h = image.height as f32;
+                                st.img_w = image.width.as_f32();
+                                st.img_h = image.height.as_f32();
                                 st.zoom = ZoomMode::FitAll;
                                 st.pan = Vector2::ZERO;
                                 st.target_pan = Vector2::ZERO;
@@ -821,7 +825,11 @@ fn main() -> Result<()> {
             // Grid navigation: h/j/k/l and the arrows move the selection,
             // Enter opens the selected image, q quits (ESC is inert here,
             // because the grid is the home view).
-            match grid.as_mut().unwrap().handle_input(&mut rl, win_w, win_h) {
+            match grid
+                .as_mut()
+                .unwrap()
+                .handle_input(&mut rl, (WinW::new(win_w), WinH::new(win_h)))
+            {
                 Some(GridAction::Open(i)) => {
                     if debug {
                         eprintln!("vv: enter pressed -> open idx {i}");
@@ -832,7 +840,7 @@ fn main() -> Result<()> {
                         i,
                         &mut rl,
                         &thread,
-                        Vector2::new(win_w, win_h),
+                        (WinW::new(win_w), WinH::new(win_h)),
                         true,
                     );
                 }
@@ -1063,7 +1071,7 @@ fn main() -> Result<()> {
                 {
                     g.selected = i;
                     // Scrolled (zoomed-in) grids: bring it back on screen.
-                    g.ensure_visible(win_w, win_h);
+                    g.ensure_visible(WinW::new(win_w), WinH::new(win_h));
                 }
                 st.loader = None; // cancels a still-running stream
                 st.view_loading = false;
@@ -1092,7 +1100,7 @@ fn main() -> Result<()> {
                             j,
                             &mut rl,
                             &thread,
-                            Vector2::new(win_w, win_h),
+                            (WinW::new(win_w), WinH::new(win_h)),
                             true,
                         );
                     }
@@ -1399,15 +1407,17 @@ fn main() -> Result<()> {
             // The code draws it before the grid, so the fades run under the
             // thumbnails.
             if let Some(bg) = &mut st.blur_bg {
-                bg.draw(&mut d, win_w, win_h);
+                bg.draw(&mut d, WinW::new(win_w), WinH::new(win_h));
             }
-            grid.as_ref().unwrap().draw(&mut d, win_w, win_h);
+            grid.as_ref()
+                .unwrap()
+                .draw(&mut d, (WinW::new(win_w), WinH::new(win_h)));
         } else {
             // VV_BLUR_BG gimmick: blurred copy of the image, scaled to
             // cover the whole window (fit on the narrower side, with the other
             // axis overflowing and cropped) behind the sharp image.
             if let Some(bg) = &mut st.blur_bg {
-                bg.draw(&mut d, win_w, win_h);
+                bg.draw(&mut d, WinW::new(win_w), WinH::new(win_h));
             }
             if let Some(texture) = &st.view_tex {
                 let dw = st.img_w * st.view_scale.unwrap();

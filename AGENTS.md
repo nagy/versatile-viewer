@@ -16,8 +16,11 @@ The binary name is `vv`.
   Keep the crate features in sync.
 - Dispatch decode on sniffed content.
   Do not dispatch decode on the file name.
-- Public error types derive `derive_more::{Display, Error}`.
-  Private helpers keep `anyhow`.
+- Public error types derive `derive_more::{Display, Error, From}` (feature `from` on).
+  Each module owns its error enum: `src/error.rs` (`DecodeError`, `UploadError`), `src/grid.rs` (`GridError`), `src/loader.rs` (`LoadError`).
+  `main.rs` keeps `anyhow`.
+- Wrap raw pixel and window primitives in the `src/dim.rs` newtypes (`ImgW`, `ImgH`, `WinW`, `WinH`, `LongSide`, `PreviewPx`, `Delay`, `Rate`).
+  Public API boundaries take the newtype, not the bare primitive.
 
 ## Build
 

@@ -22,17 +22,43 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
+use derive_more::{Display, Error, From};
 use jxl_oxide::{InitializeResult, JxlImage};
 
-use crate::{DecodedImage, blurbg, decode_common, downscale_rgba, fb_to_rgba, is_jxl};
+use crate::{
+    DecodedImage, blurbg, decode_common,
+    dim::{ImgH, ImgW, LongSide, PreviewPx},
+    downscale_rgba,
+    error::DecodeError,
+    fb_to_rgba, is_jxl,
+};
 
-/// Convert a jxl-oxide error into an anyhow error.
+/// A failed streaming load.
+#[derive(Debug, Display, Error, From)]
+pub enum LoadError {
+    /// A file open or read failed.
+    #[display("file i/o failed")]
+    Io(std::io::Error),
+    /// The JPEG XL decoder rejected the bytes.
+    #[display("jxl-oxide: {_0}")]
+    Jxl(
+        #[from]
+        #[error(source)]
+        Box<dyn std::error::Error + Send + Sync + 'static>,
+    ),
+    /// The decode failed before the header completed.
+    #[display("file ended before the image header was complete")]
+    Incomplete,
+    /// A single-step decode failed.
+    #[display("decode failed")]
+    Decode(#[from] DecodeError),
+}
+
+/// Convert a jxl-oxide error into a [`LoadError`].
 /// The input is a bare boxed trait object.
 /// The function consumes the box.
-/// anyhow accepts `Box<dyn Error + Send + Sync>`.
-fn jxl_err(e: Box<dyn std::error::Error + Send + Sync + 'static>) -> anyhow::Error {
-    anyhow::Error::from_boxed(e).context("jxl-oxide")
+fn jxl_err(e: Box<dyn std::error::Error + Send + Sync + 'static>) -> LoadError {
+    LoadError::from(e)
 }
 
 /// Normal read chunk size.
@@ -57,13 +83,14 @@ const SLOW_DRIBBLE_MAX: usize = 256 * 1024;
 /// The type carries only successes.
 /// A decode failure arrives as an [`Err`] through the same channel.
 /// [`Loader::try_recv`] can then return both as one
-/// `Result<DecodeMsg, anyhow::Error>`.
+/// `Result<DecodeMsg, LoadError>`.
 /// The `?` operator composes this result.
+#[derive(Debug)]
 pub enum DecodeMsg {
     /// The JXL header is parsed.
     /// The code knows the final dimensions, with the orientation applied.
     /// No pixel data arrives yet.
-    Header { width: u32, height: u32 },
+    Header { width: ImgW, height: ImgH },
     /// A progressive preview of the still-loading frame.
     /// The buffer is full-size RGBA8 and stays blurry until the end.
     /// The worker sends a preview at most every `PREVIEW_INTERVAL`.
@@ -82,9 +109,10 @@ pub enum DecodeMsg {
 
 /// Handle for one image load in flight.
 /// Drop the handle to cancel the load.
+#[derive(Debug)]
 pub struct Loader {
     cancel: Arc<AtomicBool>,
-    rx: Receiver<Result<DecodeMsg, anyhow::Error>>,
+    rx: Receiver<Result<DecodeMsg, LoadError>>,
 }
 
 impl Loader {
@@ -93,7 +121,7 @@ impl Loader {
     /// The screen never shows more pixels than that.
     /// Full-size RGBA every `PREVIEW_INTERVAL` wastes allocations.
     #[must_use]
-    pub fn start(path: PathBuf, preview_px: u32) -> Loader {
+    pub fn start(path: PathBuf, preview_px: PreviewPx) -> Loader {
         let (tx, rx) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
@@ -117,7 +145,7 @@ impl Loader {
                 // Cancelled: send nothing, just drop the channel.
                 Ok(None) => {}
                 Err(err) => {
-                    let _ = tx.send(Err(anyhow::anyhow!("{err:#}")));
+                    let _ = tx.send(Err(err));
                 }
             }
         });
@@ -127,7 +155,7 @@ impl Loader {
     /// Poll the next queued message.
     /// The function does not block.
     #[must_use]
-    pub fn try_recv(&self) -> Option<Result<DecodeMsg, anyhow::Error>> {
+    pub fn try_recv(&self) -> Option<Result<DecodeMsg, LoadError>> {
         self.rx.try_recv().ok()
     }
 }
@@ -148,11 +176,11 @@ impl Drop for Loader {
 fn stream(
     path: &Path,
     cancel: &AtomicBool,
-    tx: &Sender<Result<DecodeMsg, anyhow::Error>>,
+    tx: &Sender<Result<DecodeMsg, LoadError>>,
     blur_enabled: bool,
-    blur_px: u32,
-    preview_px: u32,
-) -> Result<Option<DecodeMsg>> {
+    blur_px: LongSide,
+    preview_px: PreviewPx,
+) -> Result<Option<DecodeMsg>, LoadError> {
     if !is_jxl(path) {
         // No progressive data for common formats: one full decode.
         let image = decode_common(path)?;
@@ -160,8 +188,7 @@ fn stream(
         return Ok(Some(DecodeMsg::Done { image, blur }));
     }
 
-    let mut file =
-        std::fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let mut file = std::fs::File::open(path)?;
     let slow = std::env::var_os("VV_SLOW_STREAM").is_some();
     let mut buf = vec![0u8; CHUNK];
     // `try_init` consumes the uninit image.
@@ -194,8 +221,8 @@ fn stream(
                     InitializeResult::NeedMoreData(u) => uninit = Some(u),
                     InitializeResult::Initialized(img) => {
                         let msg = DecodeMsg::Header {
-                            width: img.width(),
-                            height: img.height(),
+                            width: ImgW::new(img.width()),
+                            height: ImgH::new(img.height()),
                         };
                         let _ = tx.send(Ok(msg));
                         image = Some(img);
@@ -227,7 +254,7 @@ fn stream(
                     // smaller).
                     // The code caps the long side so a 50 MP image does not
                     // allocate ~200 MB of RGBA per preview.
-                    let image = downscale_rgba(image, preview_px);
+                    let image = downscale_rgba(image, LongSide::new(preview_px.get()));
                     let blur = blur_enabled.then(|| blurbg::small_blur(&image, blur_px));
                     let _ = tx.send(Ok(DecodeMsg::Preview { image, blur }));
                     last_preview = Some(Instant::now());
@@ -247,12 +274,9 @@ fn stream(
         }
     }
 
-    let mut img = image.context("file ended before the image header was complete")?;
+    let mut img = image.ok_or(LoadError::Incomplete)?;
     img.finalize().map_err(jxl_err)?;
-    let render = img
-        .render_frame(0)
-        .map_err(jxl_err)
-        .with_context(|| format!("failed to render {}", path.display()))?;
+    let render = img.render_frame(0).map_err(jxl_err)?;
     let image = fb_to_rgba(&render.image_all_channels())?;
     let blur = blur_enabled.then(|| blurbg::small_blur(&image, blur_px));
     Ok(Some(DecodeMsg::Done { image, blur }))
@@ -264,9 +288,9 @@ fn stream(
 /// Regular files normally fill the whole buffer.
 /// Short reads are also correct.
 /// The next loop iteration reads more data then.
-fn read_chunk(file: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
+fn read_chunk(file: &mut std::fs::File, buf: &mut [u8]) -> Result<usize, LoadError> {
     use std::io::Read;
-    file.read(buf)
+    file.read(buf).map_err(LoadError::Io)
 }
 
 #[cfg(test)]
@@ -280,7 +304,7 @@ mod tests {
     }
 
     /// Poll the loader until a message arrives or `timeout` goes by.
-    fn wait(loader: &Loader, timeout: Duration) -> Option<Result<DecodeMsg, anyhow::Error>> {
+    fn wait(loader: &Loader, timeout: Duration) -> Option<Result<DecodeMsg, LoadError>> {
         let start = Instant::now();
         while start.elapsed() < timeout {
             if let Some(msg) = loader.try_recv() {
@@ -294,18 +318,21 @@ mod tests {
     #[test]
     fn downscale_rgba_caps_long_side_and_never_upscales() {
         let img = |w: u32, h: u32, v: u8| DecodedImage {
-            width: w,
-            height: h,
+            width: ImgW::new(w),
+            height: ImgH::new(h),
             data: vec![v; (w * h * 4) as usize],
         };
         // Above the cap: 800x200 with cap 64 -> 64x16, RGBA8 length matches.
-        let out = downscale_rgba(img(800, 200, 7), 64);
-        assert_eq!((out.width, out.height), (64, 16));
-        assert_eq!(out.data.len(), (out.width * out.height * 4) as usize);
+        let out = downscale_rgba(img(800, 200, 7), LongSide::new(64));
+        assert_eq!((out.width, out.height), (ImgW::new(64), ImgH::new(16)));
+        assert_eq!(
+            out.data.len(),
+            (out.width.get() * out.height.get() * 4) as usize
+        );
         // Below the cap: returned untouched.
         let src = img(32, 16, 7);
-        let out = downscale_rgba(src.clone(), 64);
-        assert_eq!((out.width, out.height), (32, 16));
+        let out = downscale_rgba(src.clone(), LongSide::new(64));
+        assert_eq!((out.width, out.height), (ImgW::new(32), ImgH::new(16)));
         assert_eq!(out.data, src.data);
     }
 
@@ -318,7 +345,7 @@ mod tests {
         let path = dir.join("img.png");
         image::DynamicImage::new_rgb8(4, 3).save(&path).unwrap();
 
-        let loader = Loader::start(path, 512);
+        let loader = Loader::start(path, PreviewPx::new(512));
         let mut saw_header_or_preview = false;
         let done;
         loop {
@@ -336,7 +363,7 @@ mod tests {
             }
         }
         assert!(!saw_header_or_preview);
-        assert_eq!((done.width, done.height), (4, 3));
+        assert_eq!((done.width, done.height), (ImgW::new(4), ImgH::new(3)));
         assert_eq!(done.data.len(), 4 * 3 * 4);
     }
 
@@ -349,7 +376,7 @@ mod tests {
         let path = dir.join("x.jxl");
         std::fs::write(&path, b"not really jxl").unwrap();
 
-        let loader = Loader::start(path, 512);
+        let loader = Loader::start(path, PreviewPx::new(512));
         loop {
             match wait(&loader, Duration::from_secs(10)).expect("loader timed out") {
                 Err(_) => break,
@@ -367,7 +394,7 @@ mod tests {
         let path = dir.join("truncated.jxl");
         std::fs::write(&path, [0xffu8, 0x0a, 0x01, 0x02]).unwrap();
 
-        let loader = Loader::start(path, 512);
+        let loader = Loader::start(path, PreviewPx::new(512));
         loop {
             match wait(&loader, Duration::from_secs(10)).expect("loader timed out") {
                 Err(_) => break,
@@ -388,7 +415,7 @@ mod tests {
         let path = dir.join("img.png");
         image::DynamicImage::new_rgb8(16, 16).save(&path).unwrap();
 
-        let loader = Loader::start(path, 512);
+        let loader = Loader::start(path, PreviewPx::new(512));
         drop(loader);
         std::thread::sleep(Duration::from_millis(50));
         // Nothing to assert beyond "no panic, no hang".

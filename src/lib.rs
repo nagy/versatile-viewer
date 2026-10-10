@@ -27,6 +27,8 @@
 //! The unit tests and doctests here keep the pure helpers honest.
 
 pub mod blurbg;
+pub mod dim;
+pub mod error;
 pub mod grid;
 pub mod keyrepeat;
 pub mod loader;
@@ -35,31 +37,26 @@ pub mod wmclass;
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
 use raylib::{consts::PixelFormat, prelude::*};
 
-/// An RGBA8 pixel buffer and its dimensions.
-///
-/// Decoded images, downscaled buffers and thumbnails all share this type.
-/// `data` is row-major with 4 bytes per pixel.
-#[derive(Clone)]
+use crate::dim::{ImgH, ImgW, LongSide};
+pub use crate::error::{DecodeError, UploadError};
+
+/// Holds the decoded image data.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedImage {
-    pub width: u32,
-    pub height: u32,
+    /// The image width, in pixels.
+    pub width: ImgW,
+    /// The image height, in pixels.
+    pub height: ImgH,
     /// RGBA8, row-major, 4 bytes per pixel.
     pub data: Vec<u8>,
 }
 
 /// Decode a JPEG XL file with jxl-oxide (pure Rust).
-fn decode_jxl(path: &Path) -> Result<DecodedImage> {
-    let image = jxl_oxide::JxlImage::builder()
-        .open(path)
-        .map_err(|e| anyhow::anyhow!("jxl-oxide: {e}"))
-        .context("failed to open file")?;
-    let render = image
-        .render_frame(0)
-        .map_err(|e| anyhow::anyhow!("jxl-oxide: {e}"))
-        .context("failed to render frame")?;
+fn decode_jxl(path: &Path) -> Result<DecodedImage, DecodeError> {
+    let image = jxl_oxide::JxlImage::builder().open(path)?;
+    let render = image.render_frame(0)?;
 
     fb_to_rgba(&render.image_all_channels())
 }
@@ -71,16 +68,21 @@ fn decode_jxl(path: &Path) -> Result<DecodedImage> {
 /// Gray plus alpha (2 channels) also takes alpha from channel 1.
 /// RGB (3 channels) gets alpha = 1.
 /// The code takes RGBA (4 channels) as is.
-pub(crate) fn fb_to_rgba(fb: &jxl_oxide::FrameBuffer) -> Result<DecodedImage> {
-    let width = fb.width() as u32;
-    let height = fb.height() as u32;
+///
+/// # Errors
+///
+/// The function errors when the framebuffer holds an unexpected channel
+/// count.
+pub(crate) fn fb_to_rgba(fb: &jxl_oxide::FrameBuffer) -> Result<DecodedImage, DecodeError> {
+    let width = ImgW::new(fb.width() as u32);
+    let height = ImgH::new(fb.height() as u32);
     let channels = fb.channels();
     let samples = fb.buf();
     if !matches!(channels, 1..=4) {
-        bail!("unexpected channel count from jxl-oxide: {channels}");
+        return Err(DecodeError::Channels(channels as u32));
     }
 
-    let mut rgba = vec![0u8; width as usize * height as usize * 4];
+    let mut rgba = vec![0u8; width.get() as usize * height.get() as usize * 4];
     for (dst, src) in rgba
         .as_chunks_mut::<4>()
         .0
@@ -109,15 +111,15 @@ const fn to_u8(v: f32) -> u8 {
 }
 
 /// Decode common formats (PNG, JPEG, ...) with the `image` crate.
-fn decode_common(path: &Path) -> Result<DecodedImage> {
+fn decode_common(path: &Path) -> Result<DecodedImage, DecodeError> {
     let rgba = image::ImageReader::open(path)?
         .with_guessed_format()?
         .decode()?
         .into_rgba8();
     let (width, height) = rgba.dimensions();
     Ok(DecodedImage {
-        width,
-        height,
+        width: ImgW::new(width),
+        height: ImgH::new(height),
         data: rgba.into_raw(),
     })
 }
@@ -177,13 +179,12 @@ const fn is_common_magic(m: [u8; 2]) -> bool {
 ///
 /// The function errors when it cannot open, sniff or decode the file
 /// (missing file, garbage bytes, unsupported content).
-pub fn decode_image(path: &Path) -> Result<DecodedImage> {
+pub fn decode_image(path: &Path) -> Result<DecodedImage, DecodeError> {
     if is_jxl(path) {
         decode_jxl(path)
     } else {
         decode_common(path)
     }
-    .with_context(|| format!("failed to decode {}", path.display()))
 }
 
 /// The longest texture side the code uploads.
@@ -204,34 +205,35 @@ const MAX_TEXTURE_SIDE: u32 = 8192;
 ///
 /// ```
 /// # use versatile_viewer::{DecodedImage, downscale_rgba};
+/// # use versatile_viewer::dim::{ImgH, ImgW, LongSide};
 /// // Below the cap: returned unchanged.
 /// let img = DecodedImage {
-///     width: 2,
-///     height: 2,
+///     width: ImgW::new(2),
+///     height: ImgH::new(2),
 ///     data: vec![0; 4 * 2 * 2],
 /// };
-/// let img = downscale_rgba(img, 8);
-/// assert_eq!((img.width, img.height), (2, 2));
+/// let img = downscale_rgba(img, LongSide::new(8));
+/// assert_eq!((img.width.get(), img.height.get()), (2, 2));
 /// assert_eq!(img.data.len(), 4 * 2 * 2);
 ///
 /// // Over it: the aspect stays and the long side equals the cap.
 /// let img = DecodedImage {
-///     width: 200,
-///     height: 100,
+///     width: ImgW::new(200),
+///     height: ImgH::new(100),
 ///     data: vec![0; 4 * 200 * 100],
 /// };
-/// let img = downscale_rgba(img, 100);
-/// assert_eq!((img.width, img.height), (100, 50));
+/// let img = downscale_rgba(img, LongSide::new(100));
+/// assert_eq!((img.width.get(), img.height.get()), (100, 50));
 /// assert_eq!(img.data.len(), 4 * 100 * 50);
 ///
 /// // The function clamps degenerate zero dimensions, and the buffer stays.
 /// let img = DecodedImage {
-///     width: 0,
-///     height: 0,
+///     width: ImgW::new(0),
+///     height: ImgH::new(0),
 ///     data: Vec::new(),
 /// };
-/// let img = downscale_rgba(img, 8);
-/// assert_eq!((img.width, img.height), (1, 1));
+/// let img = downscale_rgba(img, LongSide::new(8));
+/// assert_eq!((img.width.get(), img.height.get()), (1, 1));
 /// assert!(img.data.is_empty());
 /// ```
 ///
@@ -240,30 +242,31 @@ const MAX_TEXTURE_SIDE: u32 = 8192;
 /// The function panics if `image.data` does not hold exactly
 /// `width * height * 4` bytes and a downscale is necessary.
 #[must_use]
-pub fn downscale_rgba(image: DecodedImage, long_side: u32) -> DecodedImage {
+pub fn downscale_rgba(image: DecodedImage, long_side: LongSide) -> DecodedImage {
     let DecodedImage {
         width,
         height,
         data,
     } = image;
-    let (width, height) = (width.max(1), height.max(1));
+    let (width, height) = (width.get().max(1), height.get().max(1));
     let m = width.max(height);
-    if m <= long_side.max(1) {
+    let long_side = long_side.get().max(1);
+    if m <= long_side {
         return DecodedImage {
-            width,
-            height,
+            width: ImgW::new(width),
+            height: ImgH::new(height),
             data,
         };
     }
-    let scale = long_side.max(1) as f32 / m as f32;
+    let scale = long_side as f32 / m as f32;
     let nw = ((width as f32 * scale).round() as u32).max(1);
     let nh = ((height as f32 * scale).round() as u32).max(1);
     let img: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
         image::ImageBuffer::from_raw(width, height, data).expect("rgba matches dimensions");
     let small = image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle);
     DecodedImage {
-        width: nw,
-        height: nh,
+        width: ImgW::new(nw),
+        height: ImgH::new(nh),
         data: small.into_raw(),
     }
 }
@@ -283,21 +286,21 @@ pub fn upload_rgba(
     rl: &mut RaylibHandle,
     thread: &RaylibThread,
     rgba: &[u8],
-    width: u32,
-    height: u32,
-) -> Result<Texture2D> {
+    width: ImgW,
+    height: ImgH,
+) -> Result<Texture2D, UploadError> {
     // Oversized images (huge panoramas) fail the GL upload.
     // The code clamps them to the safe side limit here, in the single
     // choke point.
     let owned;
-    let (rgba, width, height) = if width.max(height) > MAX_TEXTURE_SIDE {
+    let (rgba, width, height) = if width.get().max(height.get()) > MAX_TEXTURE_SIDE {
         owned = downscale_rgba(
             DecodedImage {
                 width,
                 height,
                 data: rgba.to_vec(),
             },
-            MAX_TEXTURE_SIDE,
+            LongSide::new(MAX_TEXTURE_SIDE),
         );
         (owned.data.as_slice(), owned.width, owned.height)
     } else {
@@ -305,8 +308,8 @@ pub fn upload_rgba(
     };
     let ffi_image = raylib::ffi::Image {
         data: rgba.as_ptr() as *mut std::os::raw::c_void,
-        width: width as i32,
-        height: height as i32,
+        width: width.get() as i32,
+        height: height.get() as i32,
         mipmaps: 1,
         format: PixelFormat::PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 as i32,
     };
@@ -362,7 +365,10 @@ mod tests {
         std::fs::copy(&png, &renamed_jxl).unwrap();
         assert!(!is_jxl(&renamed_jxl));
         let decoded = decode_image(&renamed_jxl).unwrap();
-        assert_eq!((decoded.width, decoded.height), (2, 3));
+        assert_eq!(
+            (decoded.width, decoded.height),
+            (ImgW::new(2), ImgH::new(3))
+        );
 
         let renamed_png = dir.join("renamed.png");
         std::fs::write(&renamed_png, [0xffu8, 0x0a, 0x01, 0x02]).unwrap();
@@ -380,7 +386,7 @@ mod tests {
         let mut fb = jxl_oxide::FrameBuffer::new(2, 1, 1);
         fb.buf_mut()[..2].copy_from_slice(&[0.0, 0.5]);
         let img = fb_to_rgba(&fb).unwrap();
-        assert_eq!((img.width, img.height), (2, 1));
+        assert_eq!((img.width, img.height), (ImgW::new(2), ImgH::new(1)));
         assert_eq!(img.data, [0, 0, 0, 255, 128, 128, 128, 255]);
     }
 
@@ -391,7 +397,7 @@ mod tests {
         let mut fb = jxl_oxide::FrameBuffer::new(1, 1, 2);
         fb.buf_mut()[..2].copy_from_slice(&[1.0, 0.5]);
         let img = fb_to_rgba(&fb).unwrap();
-        assert_eq!((img.width, img.height), (1, 1));
+        assert_eq!((img.width, img.height), (ImgW::new(1), ImgH::new(1)));
         assert_eq!(img.data, [255, 255, 255, 128]);
     }
 
@@ -402,8 +408,8 @@ mod tests {
         let path = dir.join("img.png");
         image::DynamicImage::new_rgb8(3, 2).save(&path).unwrap();
         let decoded = decode_image(&path).unwrap();
-        assert_eq!(decoded.width, 3);
-        assert_eq!(decoded.height, 2);
+        assert_eq!(decoded.width, ImgW::new(3));
+        assert_eq!(decoded.height, ImgH::new(2));
         assert_eq!(decoded.data.len(), 3 * 2 * 4);
     }
 
@@ -418,8 +424,8 @@ mod tests {
             .save_with_format(&path, image::ImageFormat::WebP)
             .unwrap();
         let decoded = decode_image(&path).unwrap();
-        assert_eq!(decoded.width, 5);
-        assert_eq!(decoded.height, 4);
+        assert_eq!(decoded.width, ImgW::new(5));
+        assert_eq!(decoded.height, ImgH::new(4));
         assert_eq!(decoded.data.len(), 5 * 4 * 4);
     }
 
@@ -442,7 +448,11 @@ mod tests {
                 .save_with_format(&path, format)
                 .unwrap_or_else(|e| panic!("encode {ext}: {e}"));
             let decoded = decode_image(&path).unwrap_or_else(|e| panic!("decode {ext}: {e}"));
-            assert_eq!((decoded.width, decoded.height), (4, 2), "{ext}");
+            assert_eq!(
+                (decoded.width, decoded.height),
+                (ImgW::new(4), ImgH::new(2)),
+                "{ext}"
+            );
             assert_eq!(decoded.data.len(), 4 * 2 * 4, "{ext}");
         }
     }

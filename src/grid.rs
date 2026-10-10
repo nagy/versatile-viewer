@@ -31,12 +31,14 @@ use std::{
     sync::mpsc::{Receiver, Sender, channel},
 };
 
-use anyhow::{Context, Result};
+use derive_more::{Display, Error, From};
 use raylib::{color::Color, prelude::*};
 
 use crate::{
     DecodedImage,
     blurbg::{self},
+    dim::{ImgH, ImgW, LongSide, WinH, WinW},
+    error::DecodeError,
 };
 
 const MARGIN: f32 = 8.0;
@@ -71,14 +73,15 @@ fn max_inflight() -> usize {
 /// The image view also shows the thumb as a full-frame placeholder while a
 /// decode catches up.
 /// The thumbnail must cover the whole image, not only its center square.
-const THUMB_LONG_SIDE: u32 = 1024;
+const THUMB_LONG_SIDE: LongSide = LongSide::new(1024);
 
 /// A finished background decode, matched to an entry by its unique id.
 /// Indices shift when entries come and go.
 /// Ids never shift.
+#[derive(Debug)]
 struct DecodeResult {
     id: u64,
-    res: anyhow::Result<DecodeOk>,
+    res: Result<DecodeOk, DecodeError>,
 }
 
 /// Successful decode payload: the thumbnail and the untouched
@@ -88,6 +91,7 @@ struct DecodeResult {
 /// plus prefetched neighbors) and drops the rest.
 /// The buffers live only until the next frame drains them, bounded by
 /// `max_inflight()`.
+#[derive(Debug)]
 struct DecodeOk {
     /// The whole image with the aspect preserved, long side
     /// [`THUMB_LONG_SIDE`].
@@ -98,8 +102,16 @@ struct DecodeOk {
     full: DecodedImage,
 }
 
+/// Why the grid could not open a directory.
+#[derive(Debug, Display, Error, From)]
+pub enum GridError {
+    /// The directory could not be read.
+    #[display("failed to read directory")]
+    ReadDir(std::io::Error),
+}
+
 /// Grid layout, in window pixels.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct Layout {
     cols: usize,
     cell_w: f32,
@@ -133,11 +145,12 @@ pub enum DecodeFailure {
 /// The code draws thumbs by cropping a center square, so a resize never
 /// needs a re-decode.
 /// The GPU scales the texture down every frame.
+#[derive(Debug)]
 pub struct GridEntry {
     pub path: PathBuf,
     /// Full-resolution image dimensions (as decoded, not the thumb's).
-    pub width: u32,
-    pub height: u32,
+    pub width: ImgW,
+    pub height: ImgH,
     /// The thumbnail texture (the whole image with the aspect preserved,
     /// long side `THUMB_LONG_SIDE`).
     /// The grid cell draws this texture center-cropped at draw time.
@@ -168,13 +181,16 @@ pub struct GridEntry {
 }
 
 /// What the user asked the grid to do this frame.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GridAction {
     /// Open the grid entry at this index in image mode.
     Open(usize),
+    /// Quit the viewer.
     Quit,
 }
 
+/// The thumbnail grid, its entry list and its background decode workers.
+#[derive(Debug)]
 pub struct Grid {
     pub entries: Vec<GridEntry>,
     pub selected: usize,
@@ -198,7 +214,7 @@ pub struct Grid {
     /// Decode workers compute the tiny blurred copy only when enabled, at
     /// this texture long side.
     blur_enabled: bool,
-    blur_px: u32,
+    blur_px: LongSide,
 }
 
 impl Grid {
@@ -208,9 +224,8 @@ impl Grid {
     /// # Errors
     ///
     /// The function errors when it cannot read the directory.
-    pub fn from_dir(dir: &Path) -> Result<Grid> {
-        let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
-            .with_context(|| format!("failed to read directory {}", dir.display()))?
+    pub fn from_dir(dir: &Path) -> Result<Grid, GridError> {
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)?
             .filter_map(|e| e.ok().map(|e| e.path()))
             .filter(|p| {
                 p.is_file()
@@ -229,8 +244,8 @@ impl Grid {
                 .enumerate()
                 .map(|(i, path)| GridEntry {
                     path,
-                    width: 0,
-                    height: 0,
+                    width: ImgW::new(0),
+                    height: ImgH::new(0),
                     texture: None,
                     full: None,
                     id: i as u64,
@@ -440,12 +455,17 @@ impl Grid {
     }
 
     /// Layout for the current state, via the cache (see `layout_cache`).
-    fn layout(&self, win_w: f32, win_h: f32) -> Layout {
+    fn layout(&self, win_w: WinW, win_h: WinH) -> Layout {
         let n = self.entries.len();
-        let key = (n, win_w.to_bits(), win_h.to_bits(), self.zoom.to_bits());
+        let key = (
+            n,
+            win_w.get().to_bits(),
+            win_h.get().to_bits(),
+            self.zoom.to_bits(),
+        );
         let mut cache = self.layout_cache.borrow_mut();
         if cache.as_ref().is_none_or(|(k, _)| *k != key) {
-            *cache = Some((key, grid_layout_at(n, win_w, win_h, self.zoom)));
+            *cache = Some((key, grid_layout_at(n, win_w.get(), win_h.get(), self.zoom)));
         }
         cache.as_ref().expect("just cached").1
     }
@@ -470,7 +490,8 @@ impl Grid {
     /// that order), as prefetch priority.
     /// The function needs the window size for the column count.
     /// It skips duplicates and out-of-range indices.
-    pub fn prefetch_neighbors(&self, sel: usize, win_w: f32, win_h: f32) -> Vec<usize> {
+    #[must_use]
+    pub fn prefetch_neighbors(&self, sel: usize, win_w: WinW, win_h: WinH) -> Vec<usize> {
         let n = self.entries.len();
         if n == 0 {
             return Vec::new();
@@ -497,11 +518,12 @@ impl Grid {
     /// The code uses this when it sets the selection (or the layout changed)
     /// from outside the navigation code, for example when returning to the
     /// grid from image view, or after a +/- zoom step.
-    pub fn ensure_visible(&mut self, win_w: f32, win_h: f32) {
+    pub fn ensure_visible(&mut self, win_w: WinW, win_h: WinH) {
         if self.entries.is_empty() {
             return;
         }
         let l = self.layout(win_w, win_h);
+        let (_, win_h) = (win_w.get(), win_h.get());
         let scroll_max = (l.content_h - win_h).max(0.0);
         let row = self.selected / l.cols;
         let top = MARGIN + row as f32 * (l.cell_h + GAP);
@@ -527,12 +549,8 @@ impl Grid {
     // navigation, mouse) is intentionally linear.
     // See main() too.
     #[allow(clippy::too_many_lines)]
-    pub fn handle_input(
-        &mut self,
-        rl: &mut RaylibHandle,
-        win_w: f32,
-        win_h: f32,
-    ) -> Option<GridAction> {
+    pub fn handle_input(&mut self, rl: &mut RaylibHandle, win: (WinW, WinH)) -> Option<GridAction> {
+        let (win_w, win_h) = (win.0.get(), win.1.get());
         if self.entries.is_empty() {
             return None;
         }
@@ -634,7 +652,7 @@ impl Grid {
             }
             follow = true;
         }
-        let l = self.layout(win_w, win_h);
+        let l = self.layout(win.0, win.1);
         let (cols, side) = (l.cols, l.side);
         let scroll_max = (l.content_h - win_h).max(0.0);
         // Mouse wheel scrolls the grid (only meaningful once zoomed in past
@@ -686,7 +704,7 @@ impl Grid {
         // under it (+/- zoom).
         // The code leaves manual wheel scrolling untouched.
         if self.selected != old_sel || follow {
-            self.ensure_visible(win_w, win_h);
+            self.ensure_visible(win.0, win.1);
         }
         if enter {
             return Some(GridAction::Open(self.selected));
@@ -700,24 +718,24 @@ impl Grid {
         // `f` opens the cell under the cursor directly (a double-click
         // without the clicking: select and open in one step).
         if rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
-            && let Some(idx) = self.cell_at(rl.get_mouse_position(), win_w, win_h)
+            && let Some(idx) = self.cell_at(rl.get_mouse_position(), win.0, win.1)
         {
             if idx == self.selected {
                 return Some(GridAction::Open(idx));
             }
             self.selected = idx;
-            self.ensure_visible(win_w, win_h);
+            self.ensure_visible(win.0, win.1);
         }
-        if open_at_cursor && let Some(idx) = self.cell_at(rl.get_mouse_position(), win_w, win_h) {
+        if open_at_cursor && let Some(idx) = self.cell_at(rl.get_mouse_position(), win.0, win.1) {
             self.selected = idx;
-            self.ensure_visible(win_w, win_h);
+            self.ensure_visible(win.0, win.1);
             return Some(GridAction::Open(idx));
         }
         None
     }
 
     /// The grid cell under the window-space point, if any.
-    fn cell_at(&self, m: Vector2, win_w: f32, win_h: f32) -> Option<usize> {
+    fn cell_at(&self, m: Vector2, win_w: WinW, win_h: WinH) -> Option<usize> {
         let l = self.layout(win_w, win_h);
         let (cw, ch) = (l.cell_w, l.cell_h);
         // Grid coordinates: the code draws content at MARGIN + col*(cw+GAP)
@@ -739,7 +757,9 @@ impl Grid {
         None
     }
 
-    pub fn draw(&self, d: &mut RaylibDrawHandle, win_w: f32, win_h: f32) {
+    /// Draw the grid: the placeholder text or every visible thumbnail cell.
+    pub fn draw(&self, d: &mut RaylibDrawHandle, win: (WinW, WinH)) {
+        let (win_w, win_h) = (win.0.get(), win.1.get());
         if self.entries.is_empty() {
             let msg = "no images found in directory";
             let tw = d.measure_text(msg, 20);
@@ -752,7 +772,7 @@ impl Grid {
             );
             return;
         }
-        let l = self.layout(win_w, win_h);
+        let l = self.layout(win.0, win.1);
         let (cols, cw, ch, side) = (l.cols, l.cell_w, l.cell_h, l.side);
         for (i, e) in self.entries.iter().enumerate() {
             let col = i % cols;
@@ -1032,9 +1052,15 @@ mod tests {
         let grid = Grid::from_dir(dir).unwrap();
         // Square window: 9 images lay out as a 3x3 grid, so index 4 has
         // neighbors 3 (left), 5 (right), 1 (up), 7 (down).
-        assert_eq!(grid.prefetch_neighbors(4, 640.0, 640.0), vec![3, 5, 1, 7]);
+        assert_eq!(
+            grid.prefetch_neighbors(4, WinW::new(640.0), WinH::new(640.0)),
+            vec![3, 5, 1, 7]
+        );
         // Top-left corner: only right (1) and down (3) exist.
-        assert_eq!(grid.prefetch_neighbors(0, 640.0, 640.0), vec![1, 3]);
+        assert_eq!(
+            grid.prefetch_neighbors(0, WinW::new(640.0), WinH::new(640.0)),
+            vec![1, 3]
+        );
     }
 
     #[test]

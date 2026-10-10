@@ -17,13 +17,16 @@ use std::time::Instant;
 
 use raylib::{color::Color, consts::TextureFilter, prelude::*, texture::RaylibTexture2D};
 
-use crate::DecodedImage;
+use crate::{
+    DecodedImage,
+    dim::{ImgH, ImgW, LongSide, WinH, WinW},
+};
 
 /// Long side of the blurred background texture.
 /// The GPU upscales from this size.
 /// `VV_BLUR_PX` configures it.
 /// Fewer pixels give a blurrier result.
-const DEFAULT_LONG_SIDE: u32 = 128;
+const DEFAULT_LONG_SIDE: LongSide = LongSide::new(128);
 /// Gaussian sigma applied to the tiny image, in its own pixels.
 const BLUR_SIGMA: f32 = 8.0;
 /// Background brightness when `VV_BG_DIM` is unset.
@@ -43,12 +46,14 @@ pub fn enabled() -> bool {
 /// The value is clamped to 8..=1024.
 /// The default 128 is already far below any window size.
 #[must_use]
-pub fn blur_px() -> u32 {
-    std::env::var("VV_BLUR_PX")
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok())
-        .unwrap_or(DEFAULT_LONG_SIDE)
-        .clamp(8, 1024)
+pub fn blur_px() -> LongSide {
+    LongSide::new(
+        std::env::var("VV_BLUR_PX")
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .unwrap_or(DEFAULT_LONG_SIDE.get())
+            .clamp(8, 1024),
+    )
 }
 
 /// Background brightness from `VV_BG_DIM`.
@@ -74,30 +79,38 @@ fn parse_dim(s: Option<&str>) -> f32 {
 ///
 /// ```
 /// # use versatile_viewer::{DecodedImage, blurbg::small_blur};
+/// # use versatile_viewer::dim::{ImgH, ImgW, LongSide};
 /// // Landscape: the long side lands exactly on `long_side`.
 /// // The aspect stays and each pixel holds 4 bytes.
 /// let img = DecodedImage {
-///     width: 200,
-///     height: 100,
+///     width: ImgW::new(200),
+///     height: ImgH::new(100),
 ///     data: vec![0; 4 * 200 * 100],
 /// };
-/// let img = small_blur(&img, 128);
-/// assert_eq!((img.width, img.height), (128, 64));
-/// assert_eq!(img.data.len(), 4 * img.width as usize * img.height as usize);
+/// let img = small_blur(&img, LongSide::new(128));
+/// assert_eq!((img.width.get(), img.height.get()), (128, 64));
+/// assert_eq!(
+///     img.data.len(),
+///     4 * img.width.get() as usize * img.height.get() as usize
+/// );
 ///
 /// // Portrait: the long side switches to the height.
 /// let img = DecodedImage {
-///     width: 100,
-///     height: 200,
+///     width: ImgW::new(100),
+///     height: ImgH::new(200),
 ///     data: vec![0; 4 * 100 * 200],
 /// };
-/// let img = small_blur(&img, 128);
-/// assert_eq!((img.width, img.height), (64, 128));
-/// assert_eq!(img.data.len(), 4 * img.width as usize * img.height as usize);
+/// let img = small_blur(&img, LongSide::new(128));
+/// assert_eq!((img.width.get(), img.height.get()), (64, 128));
+/// assert_eq!(
+///     img.data.len(),
+///     4 * img.width.get() as usize * img.height.get() as usize
+/// );
 /// ```
 #[must_use]
-pub fn small_blur(image: &DecodedImage, long_side: u32) -> DecodedImage {
-    let (width, height) = (image.width, image.height);
+pub fn small_blur(image: &DecodedImage, long_side: LongSide) -> DecodedImage {
+    let (width, height) = (image.width.get(), image.height.get());
+    let long_side = long_side.get();
     let (tw, th) = if width >= height {
         (
             long_side,
@@ -115,8 +128,8 @@ pub fn small_blur(image: &DecodedImage, long_side: u32) -> DecodedImage {
     let small = image::imageops::resize(&img, tw, th, image::imageops::FilterType::Triangle);
     let blurred = image::imageops::blur(&small, BLUR_SIGMA);
     DecodedImage {
-        width: tw,
-        height: th,
+        width: ImgW::new(tw),
+        height: ImgH::new(th),
         data: blurred.into_raw(),
     }
 }
@@ -125,6 +138,7 @@ pub fn small_blur(image: &DecodedImage, long_side: u32) -> DecodedImage {
 /// It holds the blurred background texture for the image view.
 /// It lives between `rl` and its users in main.
 /// It then drops and unloads before the window closes.
+#[derive(Debug)]
 pub struct BlurBg {
     dim: f32,
     /// The current background texture.
@@ -164,7 +178,7 @@ impl BlurBg {
             height,
             data: rgba,
         } = data;
-        let same = matches!(&self.tex, Some(t) if t.width() == width as i32 && t.height() == height as i32);
+        let same = matches!(&self.tex, Some(t) if t.width() == width.get() as i32 && t.height() == height.get() as i32);
         if same {
             if let Some(t) = &mut self.tex
                 && t.update_texture(&rgba).is_err()
@@ -248,7 +262,7 @@ impl BlurBg {
     /// The new texture fades in on top.
     /// Call this function every frame so the fades complete and the code
     /// frees the old texture.
-    pub fn draw(&mut self, d: &mut RaylibDrawHandle, win_w: f32, win_h: f32) {
+    pub fn draw(&mut self, d: &mut RaylibDrawHandle, win_w: WinW, win_h: WinH) {
         let progress = self
             .fade_start
             .map_or(1.0, |s| (s.elapsed().as_secs_f64() / FADE_SECS).min(1.0));
@@ -297,8 +311,9 @@ impl BlurBg {
 /// Dest rect for a texture of w x h scaled to cover the window.
 /// The texture fits on the narrower side and stays centered.
 /// The other axis overflows and the code crops it.
-const fn cover_rect(w: u32, h: u32, win_w: f32, win_h: f32) -> Rectangle {
+const fn cover_rect(w: u32, h: u32, win_w: WinW, win_h: WinH) -> Rectangle {
     let (fw, fh) = (w as f32, h as f32);
+    let (win_w, win_h) = (win_w.get(), win_h.get());
     let s = (win_w / fw).max(win_h / fh);
     Rectangle {
         x: (win_w - fw * s) / 2.0,
@@ -313,40 +328,43 @@ mod tests {
     use super::*;
 
     // Compile-time check that these stay const-evaluable.
-    const _: f32 = cover_rect(64, 32, 800.0, 600.0).width;
+    const _: f32 = cover_rect(64, 32, WinW::new(800.0), WinH::new(600.0)).width;
 
     #[test]
     fn small_blur_dims_and_size() {
         let img = |w: u32, h: u32, v: u8| DecodedImage {
-            width: w,
-            height: h,
+            width: ImgW::new(w),
+            height: ImgH::new(h),
             data: vec![v; (w * h * 4) as usize],
         };
         // Long side 64 (VV_BLUR_PX): 800x200 in -> 64x16 out, RGBA8 matches.
-        let out = small_blur(&img(800, 200, 128), 64);
-        assert_eq!((out.width, out.height), (64, 16));
+        let out = small_blur(&img(800, 200, 128), LongSide::new(64));
+        assert_eq!((out.width, out.height), (ImgW::new(64), ImgH::new(16)));
         assert_eq!(out.data.len(), (64 * 16 * 4) as usize);
         // Portrait input keeps the aspect the other way around.
-        let out = small_blur(&img(100, 400, 0), 64);
-        assert_eq!((out.width, out.height), (16, 64));
+        let out = small_blur(&img(100, 400, 0), LongSide::new(64));
+        assert_eq!((out.width, out.height), (ImgW::new(16), ImgH::new(64)));
         // The code honors the configurable long side (VV_BLUR_PX).
-        let out = small_blur(&img(800, 200, 0), 256);
-        assert_eq!((out.width, out.height), (256, 64));
+        let out = small_blur(&img(800, 200, 0), LongSide::new(256));
+        assert_eq!((out.width, out.height), (ImgW::new(256), ImgH::new(64)));
         // Degenerate 1xN input still yields at least 1px on each side.
-        let out = small_blur(&img(1, 9, 0), 64);
-        assert!(out.width >= 1 && out.height >= 1);
-        assert_eq!(out.data.len(), (out.width * out.height * 4) as usize);
+        let out = small_blur(&img(1, 9, 0), LongSide::new(64));
+        assert!(out.width.get() >= 1 && out.height.get() >= 1);
+        assert_eq!(
+            out.data.len(),
+            (out.width.get() * out.height.get() * 4) as usize
+        );
     }
 
     #[test]
     fn cover_rect_fits_narrower_side() {
         // 2:1 texture in an 800x600 window: height limits -> 1200x600,
         // centered (x overflows equally to both sides).
-        let r = cover_rect(64, 32, 800.0, 600.0);
+        let r = cover_rect(64, 32, WinW::new(800.0), WinH::new(600.0));
         assert_eq!((r.width, r.height), (1200.0, 600.0));
         assert_eq!((r.x, r.y), (-200.0, 0.0));
         // Tall texture: width limits instead.
-        let r = cover_rect(32, 64, 800.0, 600.0);
+        let r = cover_rect(32, 64, WinW::new(800.0), WinH::new(600.0));
         assert_eq!((r.width, r.height), (800.0, 1600.0));
         assert_eq!((r.x, r.y), (0.0, -500.0));
     }
@@ -354,17 +372,19 @@ mod tests {
     #[test]
     fn blur_px_defaults_and_clamps() {
         // No var set: the 128px default (parse of None-like input).
-        let p = |s: Option<&str>| -> u32 {
-            s.and_then(|s| s.trim().parse::<u32>().ok())
-                .unwrap_or(DEFAULT_LONG_SIDE)
-                .clamp(8, 1024)
+        let p = |s: Option<&str>| -> LongSide {
+            LongSide::new(
+                s.and_then(|s| s.trim().parse::<u32>().ok())
+                    .unwrap_or(DEFAULT_LONG_SIDE.get())
+                    .clamp(8, 1024),
+            )
         };
-        assert_eq!(p(None), 128);
-        assert_eq!(p(Some("128")), 128);
-        assert_eq!(p(Some(" 32 ")), 32);
-        assert_eq!(p(Some("4")), 8); // clamped up
-        assert_eq!(p(Some("99999")), 1024); // clamped down
-        assert_eq!(p(Some("junk")), 128);
+        assert_eq!(p(None), LongSide::new(128));
+        assert_eq!(p(Some("128")), LongSide::new(128));
+        assert_eq!(p(Some(" 32 ")), LongSide::new(32));
+        assert_eq!(p(Some("4")), LongSide::new(8)); // clamped up
+        assert_eq!(p(Some("99999")), LongSide::new(1024)); // clamped down
+        assert_eq!(p(Some("junk")), LongSide::new(128));
     }
 
     #[test]
