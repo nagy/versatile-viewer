@@ -3,6 +3,8 @@
 //! thumbnail sizes of nsxiv.
 //! A white border marks the selection.
 //!
+//! A cell is an [`EntrySource`]: a file, or one plane of an open surface.
+//! A multi-plane source (a PDF, say) therefore browses as a page grid.
 //! The grid has a Vim-style visual selection (see [`Visual`]).
 //! `v` selects charwise, `V` linewise, and `Ctrl+v` blockwise.
 //! The same key toggles its mode off, `o` swaps the anchor and the cursor,
@@ -1470,8 +1472,10 @@ fn step_selection(sel: usize, n: usize, step: usize, delta: i128) -> usize {
     moved.clamp(0, n as i128 - 1) as usize
 }
 
-/// Do the code most likely decode this path as an image? (Grid directory
-/// filter.)
+/// Do the code most likely decode this path as an image or a document?
+/// (Grid directory filter.)
+/// A PDF has no image extension but opens as a page grid, so the filter
+/// accepts it too.
 fn is_image_path(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
         matches!(
@@ -1488,6 +1492,7 @@ fn is_image_path(path: &Path) -> bool {
                 | "tga"
                 | "svg"
                 | "svgz"
+                | "pdf"
         )
     })
 }
@@ -1933,6 +1938,9 @@ mod tests {
         assert!(is_image_path(Path::new("photo.JXL")));
         assert!(is_image_path(Path::new("logo.svg")));
         assert!(is_image_path(Path::new("logo.SVGZ")));
+        // A PDF opens as a page grid, so the directory filter keeps it.
+        assert!(is_image_path(Path::new("doc.pdf")));
+        assert!(is_image_path(Path::new("DOC.PDF")));
         assert!(!is_image_path(Path::new("notes.txt")));
         assert!(!is_image_path(Path::new("archive.tar.gz")));
         assert!(!is_image_path(Path::new("noext")));
@@ -2127,6 +2135,30 @@ mod tests {
         assert_eq!(plane, 1);
         let out = surface.render(View::whole(plane, 1.0)).unwrap();
         assert_eq!((out.width, out.height), (ImgW::new(4), ImgH::new(2)));
+    }
+
+    #[test]
+    fn from_surface_builds_a_page_grid_for_a_pdf() {
+        // A multi-page PDF browses like a directory: one cell per page, with
+        // the page size (in points) known before any render.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("doc.pdf");
+        std::fs::write(&path, crate::pdf::tests::TWO_PAGE_PDF).unwrap();
+        let surface: Arc<dyn Surface> = open_surface(&path).unwrap().into();
+        let grid = Grid::from_surface(&surface);
+        assert_eq!(grid.entries.len(), 2);
+        assert_eq!(
+            (grid.entries[0].width, grid.entries[0].height),
+            (ImgW::new(612), ImgH::new(792))
+        );
+        assert_eq!(
+            (grid.entries[1].width, grid.entries[1].height),
+            (ImgW::new(200), ImgH::new(100))
+        );
+        assert!(matches!(
+            grid.entries[1].source,
+            EntrySource::Plane { plane: 1, .. }
+        ));
     }
 
     #[test]

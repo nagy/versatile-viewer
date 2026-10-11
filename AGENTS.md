@@ -59,8 +59,8 @@ The binary name is `vv`.
   `img_w`/`img_h` keep measuring the source, never the patch, so a bigger texture never disturbs fit, pan or zoom.
   The whole-image texture (`view_tex`) stays as the fallback and draws only where the patch cannot reach (`patch_covers`), so a resize or a pan that outruns the repaint never shows background.
   Drawing both over the same pixels would double the alpha of an antialiased edge, so the patch hides the whole image where it covers.
-- Grid extension filter: `src/grid.rs` `is_image_path`.
-  Keep the crate features in sync.
+- Grid extension filter: `src/grid.rs` `is_image_path` (also `pdf`).
+  Keep the crate features in sync (`pdf` is not an image crate feature).
 - A grid cell holds an `EntrySource`: a `File` opened (and sniffed) lazily at decode time, or a `Plane` with the surface handle and plane index of an already-open source.
   `Grid::from_surface` makes one cell per plane, with the natural size from `Surface::bounds`, so the layout runs before any decode.
   A plane cell has no file, so it skips the thumbnail cache and the placeholder pass.
