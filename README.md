@@ -21,6 +21,12 @@ the paint area follows the window, not the document. One paint in flight,
 and a repaint once the view holds still. A cold vector cell measures its
 shape from a size-only parse, so the grid and the image fit never wait for
 the decode.
+PDF rasterizes through [hayro], also pure Rust, with no C dependency. One
+page is one plane, so a PDF browses as a page grid. The page counts
+PostScript points, a region render rasterizes only the rect the window
+shows, and the image view repaints the visible region over a rested zoom,
+so a deep zoom of a page never stretches a raster. A coarse preview lands
+first, because rasterizing a page takes a moment.
 Thumbnails render in a directory grid
 that fills the window, decoded in parallel on a background pool, and sorted
 in natural order (`img2` before `img10`). Every downscale, including the
@@ -50,7 +56,8 @@ size of each plane. A grid cell holds an `EntrySource`: a file to open lazily,
 or the surface handle and plane index of an open source, so a multi-plane
 surface browses as a plane grid. The grid, the streaming loader and the image
 view speak surfaces, plane indices and regions, never file formats.
-`src/sign.rs` decides the decoder from the file content, not the file name.
+`src/sign.rs` decides the decoder from the file content, not the file name,
+and a PDF routes on its `%PDF-` magic to the hayro backend in `src/pdf.rs`.
 
 The grid holds one cell per source. A cell is a file, or one plane of an
 already-open surface. A multi-plane surface (a document, say) therefore
@@ -59,6 +66,7 @@ browses as a plane grid. See `docs/adr/0001-*.md`.
 [jxl-oxide]: https://crates.io/crates/jxl-oxide
 [image]: https://crates.io/crates/image
 [resvg]: https://crates.io/crates/resvg
+[hayro]: https://crates.io/crates/hayro
 [fast_image_resize]: https://crates.io/crates/fast_image_resize
 [ThumbHash]: https://evanw.github.io/thumbhash/
 

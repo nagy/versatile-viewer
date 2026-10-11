@@ -23,6 +23,7 @@
 //! The common formats decode with the `image` crate.
 //! SVG and SVGZ rasterize with pure-Rust resvg in [`svg`], which bakes a base
 //! raster because a vector file has no pixels of its own.
+//! PDF rasterizes with pure-Rust hayro in [`pdf`], one plane per page.
 //! Every showable source is a [`surface::Surface`], so the grid, the loader
 //! and the image view ask for a plane at a scale and never for a file format.
 //! [`downscale_rgba`], [`cap_texture_side`] and [`upload_rgba`] keep the
@@ -51,6 +52,7 @@ pub mod grid;
 pub mod keyrepeat;
 pub mod loader;
 pub mod mcp;
+pub mod pdf;
 pub mod placeholder;
 pub mod region;
 pub mod rotate;

@@ -279,6 +279,12 @@ pub enum SurfaceError {
     /// The rendered buffer did not match its dimensions.
     #[display("rendered buffer does not match its dimensions")]
     Buffer,
+    /// The rasterizer failed on this plane (a malformed page, a panicking
+    /// renderer).
+    /// The message names the cause.
+    #[display("render failed: {_0}")]
+    #[from(ignore)]
+    Render(#[error(ignore)] String),
     /// The backend cannot render this view (a region anchor it lacks, a page
     /// too large for its buffers).
     /// The message names the cause.
@@ -288,6 +294,8 @@ pub enum SurfaceError {
 
 /// Sniff the file format and open the matching surface.
 ///
+/// A PDF routes on the `%PDF-` magic to the multi-plane PDF backend, so a
+/// misnamed file still opens.
 /// A vector file keeps its parsed tree, so a region render of the image view
 /// pays only for the pixels it shows.
 /// Every other content goes to the raster backend, which dispatches JPEG XL
@@ -296,8 +304,13 @@ pub enum SurfaceError {
 /// # Errors
 ///
 /// The function errors when the file cannot be read, or when the content is
-/// not a decodable image.
+/// not a decodable image, PDF or vector file.
 pub fn open_surface(path: &Path) -> Result<Box<dyn Surface>, SurfaceError> {
+    // A PDF is a multi-plane surface (one plane per page).
+    // The backend holds the hayro dependency in `pdf.rs`.
+    if crate::pdf::is_pdf(path) {
+        return Ok(Box::new(crate::pdf::PdfSurface::open(path)?));
+    }
     // The sniff doubles as a validity check; render() reports the decode
     // error otherwise.
     sign::format(path)?;

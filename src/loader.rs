@@ -484,6 +484,44 @@ mod tests {
     }
 
     #[test]
+    fn a_pdf_page_announces_its_point_size_then_rasterizes() {
+        // A page rasterizes in a moment, so the Header goes out first and the
+        // window fits the page while the whole-plane render runs.
+        // The plane counts points, so a scale-1.0 render measures the page.
+        let tmp = temp_dir();
+        let dir = tmp.path();
+        let path = dir.join("doc.pdf");
+        std::fs::write(&path, crate::pdf::tests::MINIMAL_PDF).unwrap();
+
+        let surface = crate::surface::open_surface(&path).unwrap();
+        let loader = Loader::start(surface, PreviewPx::new(512));
+        let mut header = None;
+        let mut saw_preview = false;
+        let done;
+        loop {
+            match wait(&loader, Duration::from_secs(30))
+                .expect("loader timed out")
+                .expect("decode failed")
+            {
+                DecodeMsg::Done { image, .. } => {
+                    done = image;
+                    break;
+                }
+                DecodeMsg::Header { width, height } => header = Some((width, height)),
+                // The preview is capped at `preview_px` on the long side, so
+                // it arrives smaller than the page.
+                DecodeMsg::Preview { image, .. } => {
+                    saw_preview = true;
+                    assert!(image.width.get() <= 512 && image.height.get() <= 512);
+                }
+            }
+        }
+        assert_eq!(header, Some((ImgW::new(612), ImgH::new(792))));
+        assert_eq!((done.width, done.height), (ImgW::new(612), ImgH::new(792)));
+        assert!(saw_preview, "a slow rasterizer previews first");
+    }
+
+    #[test]
     fn garbage_jxl_extension_fails_cleanly() {
         // The .jxl extension decides before the code sniffs the content.
         // The content is not a codestream.
