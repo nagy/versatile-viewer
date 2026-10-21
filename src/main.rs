@@ -50,17 +50,40 @@ use versatile_viewer::{
     DecodedImage, UploadError,
     blurbg::{self, BlurBg},
     decode_image,
-    dim::{ImgH, ImgW, PreviewPx, WinH, WinW},
+    dim::{ImgH, ImgW, PreviewPx, RampTime, WinH, WinW},
     grid::{DecodeFailure, Grid, GridAction},
     keyrepeat,
     loader::{DecodeMsg, Loader},
-    mcp, upload_rgba,
+    mcp,
+    tween::Ramp,
+    upload_rgba,
+    zoomkeys::TypedKeys,
 };
 
 /// The fraction of the remaining distance to the window center that the
 /// zoomed image point (and the cursor riding it) drifts over one zoom ease.
 /// It shares the exponential time constant of the ease.
 const ZOOM_ANCHOR_DRIFT: f32 = 0.25;
+
+/// The time a held-key motion ramps in or out, in seconds.
+/// A hold reaches cruise speed after this time, and a release coasts to rest
+/// over it.
+const RAMP_TIME: RampTime = RampTime::new(0.36);
+
+/// The pan cruise speed, in window long sides per second.
+/// 0.9 suits a deliberate scan of the image.
+/// The ramp scales it down near the press and the release.
+const PAN_RATE: f32 = 0.9;
+
+/// The free-zoom cruise rate, in natural-log e-folds per second.
+/// A full-speed second covers about 5x.
+/// The ramp scales the rate down near the press and the release.
+const ZOOM_RATE: f32 = 1.65;
+
+/// The exponential ease time constant for the on-screen pan and scale, in
+/// seconds.
+/// About 95% of the remaining difference closes after three of them.
+const EASE_TIME: f32 = 0.05;
 
 /// Target pan that centers the fill view on the image point under `mouse`.
 ///
@@ -107,6 +130,17 @@ enum ZoomMode {
     Free(f32),
 }
 
+impl ZoomMode {
+    /// The free scale, or the fit scale when the mode is not free.
+    #[must_use]
+    fn free_or(self, fit: f32) -> f32 {
+        match self {
+            Self::Free(scale) => scale,
+            _ => fit,
+        }
+    }
+}
+
 /// The viewer screen: thumbnail grid or single image.
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
@@ -139,8 +173,11 @@ struct ViewState {
     target_pan: Vector2,
     /// The on-screen scale, eased toward the target scale each frame.
     view_scale: Option<f32>,
+    /// The held-key ramps that drive continuous motion.
+    /// Each held key owns one ramp, so the speed eases in, holds, and eases
+    /// out instead of stepping on the auto-repeat rate.
+    ramps: Ramps,
     /// The window-space point the running zoom eases around.
-    /// The code captures it from the mouse position when a zoom step starts
     /// (+/- or wheel).
     /// None falls back to the window center, for example when an ease still
     /// runs from an earlier step.
@@ -167,7 +204,89 @@ impl ViewState {
         self.target_pan = Vector2::ZERO;
         self.zoom_anchor = None;
         self.view_scale = None;
+        self.ramps = Ramps::default();
     }
+}
+
+/// The held-key ramps behind the continuous image-view motions.
+/// One ramp per direction, so a hold eases in, cruises, and eases out
+/// instead of stepping on the auto-repeat rate.
+/// The pan ramps feed the target pan, and the zoom ramps feed the free-zoom
+/// target.
+#[derive(Debug, Clone, Copy, Default)]
+struct Ramps {
+    pan_left: Ramp,
+    pan_right: Ramp,
+    pan_up: Ramp,
+    pan_down: Ramp,
+    zoom_in: Ramp,
+    zoom_out: Ramp,
+}
+
+impl Ramps {
+    /// Advance every ramp by one frame.
+    ///
+    /// `down`: whether each key is held now.
+    /// `base`: the pan cruise speed for one full frame.
+    /// `dt`: the frame time, in seconds.
+    ///
+    /// The return value holds this frame's pan delta and zoom factors.
+    /// The ease runs on the returned values, not on the call count, so a
+    /// caller may call the function once per frame.
+    fn tick(&mut self, down: NavKeys, base: f32, dt: f32) -> Motion {
+        // Only the held state counts.
+        // Every key press event, and the auto-repeat rate with it, has no
+        // effect on these ramps.
+        let pan_speed = base * dt;
+        let ramp = RAMP_TIME;
+        let (l, r, u, d) = (
+            self.pan_left.tick(down.left, dt, ramp),
+            self.pan_right.tick(down.right, dt, ramp),
+            self.pan_up.tick(down.up, dt, ramp),
+            self.pan_down.tick(down.down, dt, ramp),
+        );
+        let (zi, zo) = (
+            self.zoom_in.tick(down.zoom_in, dt, ramp),
+            self.zoom_out.tick(down.zoom_out, dt, ramp),
+        );
+        // The zoom rate is an e-fold rate, so the scale factor is the
+        // exponential of the ramped rate over this frame.
+        // That keeps the zoom speed even in perceived terms at any scale.
+        Motion {
+            pan: Vector2 {
+                x: pan_speed * (l - r),
+                y: pan_speed * (u - d),
+            },
+            zoom_factor: (ZOOM_RATE * dt * (zi - zo)).exp(),
+            zoom_moving: zi > 0.0 || zo > 0.0,
+        }
+    }
+}
+
+/// One frame of output from the held-key ramps.
+#[derive(Debug, Clone, Copy)]
+struct Motion {
+    /// The pan delta for this frame, in window pixels.
+    pan: Vector2,
+    /// The free-zoom factor for this frame.
+    /// 1.0 when no zoom key moves.
+    zoom_factor: f32,
+    /// True while a +/- ramp gives speed.
+    zoom_moving: bool,
+}
+
+/// The held keys that drive the continuous image-view motions.
+/// The six directions are independent, so the struct stays a plain set of
+/// flags.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy, Default)]
+struct NavKeys {
+    left: bool,
+    right: bool,
+    up: bool,
+    down: bool,
+    zoom_in: bool,
+    zoom_out: bool,
 }
 
 /// Show a new RGBA8 frame in image view.
@@ -519,6 +638,7 @@ fn main() -> Result<()> {
         target_pan: Vector2::ZERO,
         view_scale: None,
         zoom_anchor: None,
+        ramps: Ramps::default(),
         pixelated: false,
         loader: None,
         blur_bg: BlurBg::from_env(),
@@ -606,6 +726,11 @@ fn main() -> Result<()> {
     // A tap (no pointer travel) runs the `f` action on release instead, so
     // the code can tell a press and a press-and-hold apart.
     let mut f_capture = false;
+    // The held state of the zoom keys on layouts where `+`/`-` do not sit on
+    // their US keycodes.
+    // The raw character events repeat at the X auto-repeat rate, so this
+    // turns them into a timed hold that the motion ramps can read.
+    let mut zoom_keys = TypedKeys::default();
 
     while !rl.window_should_close() && !quit {
         // VV_DEBUG: trace every key raylib sees (keycode per raylib/GLFW:
@@ -905,9 +1030,14 @@ fn main() -> Result<()> {
             let mut nav_prev_edge = false;
             let mut jump_first = false;
             let mut jump_last = false;
+            // The key that went down this frame, if any.
+            // A typed `+`/`-` pairs with it to learn which physical key holds
+            // that character (see zoomkeys::TypedKeys).
+            let mut pressed_key: Option<KeyboardKey> = None;
             let shift = rl.is_key_down(KeyboardKey::KEY_LEFT_SHIFT)
                 || rl.is_key_down(KeyboardKey::KEY_RIGHT_SHIFT);
             while let Some(k) = rl.get_key_pressed() {
+                pressed_key = Some(k);
                 match k {
                     KeyboardKey::KEY_ESCAPE
                     | KeyboardKey::KEY_ENTER
@@ -1011,15 +1141,18 @@ fn main() -> Result<()> {
             // Some input setups (IMEs, unusual X11 input methods) deliver
             // Enter as a character event ('\n'/ '\r').
             // The code accepts both.
-            // This drain also covers the +/- zoom chars for every frame, so
-            // nothing piles up while the header has not arrived yet.
-            let mut zoom_in_char = false;
-            let mut zoom_out_char = false;
+            //
+            // A typed '+'/'-' teaches its physical keycode (see
+            // zoomkeys::TypedKeys).
+            // That covers the layouts where the keys do not sit on their US
+            // keycodes.
+            // The code then polls that keycode's held state, and the motion
+            // stays continuous however the auto-repeat behaves.
             while let Some(c) = rl.get_char_pressed() {
                 match c {
                     '\n' | '\r' => enter = true,
-                    '+' => zoom_in_char = true,
-                    '-' => zoom_out_char = true,
+                    '+' => zoom_keys.typed_zoom_in(pressed_key),
+                    '-' => zoom_keys.typed_zoom_out(pressed_key),
                     _ => {}
                 }
             }
@@ -1181,27 +1314,80 @@ fn main() -> Result<()> {
             if st.img_w > 0.0 {
                 // Scale for the current mode (fit modes recompute every
                 // frame, so resizing stays correct).
-                let target_scale = match st.zoom {
+                let fit_scale = match st.zoom {
                     ZoomMode::FitDown => (win_w / st.img_w).min(win_h / st.img_h).min(1.0),
                     ZoomMode::FitAll => (win_w / st.img_w).min(win_h / st.img_h),
                     ZoomMode::FitWidth => win_w / st.img_w,
                     ZoomMode::FitHeight => win_h / st.img_h,
                     // Cover: the larger ratio wins, so the image fills the
                     // window and the code crops the other axis.
-                    ZoomMode::Fill => (win_w / st.img_w).max(win_h / st.img_h),
-                    ZoomMode::Free(scale) => scale,
+                    // A free zoom keeps its scale as the fit base.
+                    ZoomMode::Fill | ZoomMode::Free(_) => (win_w / st.img_w).max(win_h / st.img_h),
                 };
 
-                // Ease the on-screen scale toward the target, so zoom steps
-                // animate smoothly (~95% of the way after 150 ms) and snap
-                // when close enough.
-                // On a window resize, snap instead: the new fit target tracks
-                // the window edge at once, and does not glide after it.
+                // Held keys feed the ramps.
+                // The ramps make a hold ease in to cruise speed and a release
+                // ease out, so the motion never steps on the auto-repeat
+                // rate.
+                // The code reads input before begin_drawing borrows rl
+                // mutably.
+                let dt = rl.get_frame_time();
+                let nav = NavKeys {
+                    left: rl.is_key_down(KeyboardKey::KEY_H)
+                        || rl.is_key_down(KeyboardKey::KEY_LEFT),
+                    right: rl.is_key_down(KeyboardKey::KEY_L)
+                        || rl.is_key_down(KeyboardKey::KEY_RIGHT),
+                    up: rl.is_key_down(KeyboardKey::KEY_K) || rl.is_key_down(KeyboardKey::KEY_UP),
+                    down: rl.is_key_down(KeyboardKey::KEY_J)
+                        || rl.is_key_down(KeyboardKey::KEY_DOWN),
+                    // US layouts put the zoom keys on the `=` and `-`
+                    // keycodes (numpad included).
+                    // Other layouts put `+`/`-` on another key, whose keycode
+                    // the typed character taught earlier.
+                    // Polling that keycode reads the real held state, so a
+                    // second key going down does not stop the zoom.
+                    zoom_in: rl.is_key_down(KeyboardKey::KEY_EQUAL)
+                        || rl.is_key_down(KeyboardKey::KEY_KP_ADD)
+                        || zoom_keys.zoom_in_key().is_some_and(|k| rl.is_key_down(k)),
+                    zoom_out: rl.is_key_down(KeyboardKey::KEY_MINUS)
+                        || rl.is_key_down(KeyboardKey::KEY_KP_SUBTRACT)
+                        || zoom_keys.zoom_out_key().is_some_and(|k| rl.is_key_down(k)),
+                };
+                // The pan cruise speed scales with the window, so the motion
+                // covers the same fraction of the view on any screen size.
+                let motion = st.ramps.tick(nav, win_w.max(win_h) * PAN_RATE, dt);
+                // Fold the ramped delta into the pan and its target together,
+                // so the pan follows the ramp at once and the ease below sees
+                // no leftover distance.
+                st.pan += motion.pan;
+                st.target_pan += motion.pan;
+                // Free zoom: the held +/- keys scale the free-zoom factor
+                // itself, with a ramped speed, so a hold zooms at a steady
+                // eased rate and a release coasts to a stop.
+                // The fit modes keep their own scale.
+                // The on-screen scale takes the ramped factor directly: an
+                // exponential ease on top would lag a target that moves every
+                // frame, and that lag reads as stepping.
+                let held_zoom = motion.zoom_moving;
+                if held_zoom {
+                    let base = st.zoom.free_or(fit_scale);
+                    st.zoom = ZoomMode::Free((base * motion.zoom_factor).clamp(0.01, 100.0));
+                    // Keyboard zoom centers on the picture, not the cursor.
+                    // None falls back to the window center anchor.
+                    st.zoom_anchor = None;
+                }
+                let target_scale = st.zoom.free_or(fit_scale);
+
+                // The exponential ease only carries a discrete jump (a fit
+                // mode change, the wheel, the `f` aim) the rest of the way.
+                // A held key already set the target to the on-screen value, so
+                // the ease stays out of its way.
                 let prev_scale = st.view_scale;
-                let alpha = 1.0 - (-rl.get_frame_time() / 0.05).exp();
+                let alpha = 1.0 - (-dt / EASE_TIME).exp();
                 st.view_scale = Some(match st.view_scale {
                     None => target_scale,
                     Some(_) if resized => target_scale,
+                    Some(_) if held_zoom => target_scale,
                     Some(s) => {
                         let s = s + (target_scale - s) * alpha;
                         if (target_scale - s).abs() < target_scale * 0.001 {
@@ -1212,28 +1398,10 @@ fn main() -> Result<()> {
                     }
                 });
 
-                // Free zoom: +/- steps the scale up or down by 25%, starting
-                // from the scale currently on screen.
-                // The code detects it two ways: the keycode of the US-layout
-                // =/- keys (including numpad) and the typed character, which
-                // covers non-US layouts where '+' lives on another physical
-                // key.
-                let zoom_in = rl.is_key_pressed(KeyboardKey::KEY_EQUAL)
-                    || rl.is_key_pressed(KeyboardKey::KEY_KP_ADD)
-                    || zoom_in_char;
-                let zoom_out = rl.is_key_pressed(KeyboardKey::KEY_MINUS)
-                    || rl.is_key_pressed(KeyboardKey::KEY_KP_SUBTRACT)
-                    || zoom_out_char;
-                if zoom_in || zoom_out {
-                    let factor = if zoom_in { 1.25 } else { 1.0 / 1.25 };
-                    st.zoom = ZoomMode::Free((target_scale * factor).clamp(0.01, 100.0));
-                    // Keyboard zoom centers on the picture, not the cursor.
-                    // None falls back to the window center anchor.
-                    st.zoom_anchor = None;
-                }
-                // Mouse wheel zooms free-mode with the same 25% steps,
-                // anchored at the cursor: while the scale eases, the image
-                // point under the mouse stays put.
+                // A discrete zoom step (the wheel) replaces the target that
+                // the held keys build, and anchors the ease at the cursor:
+                // while the scale eases, the image point under the mouse
+                // stays put.
                 let wheel = rl.get_mouse_wheel_move();
                 if wheel != 0.0 {
                     let factor = 1.25f32.powf(wheel);
@@ -1327,21 +1495,24 @@ fn main() -> Result<()> {
                     let r = scale / s_old;
                     let ox = ax - (ax - (win_w - st.img_w * s_old) / 2.0 - st.pan.x) * r;
                     let oy = ay - (ay - (win_h - st.img_h * s_old) / 2.0 - st.pan.y) * r;
-                    st.pan.x = ox - (win_w - st.img_w * scale) / 2.0;
-                    st.pan.y = oy - (win_h - st.img_h * scale) / 2.0;
+                    let new_x = ox - (win_w - st.img_w * scale) / 2.0;
+                    let new_y = oy - (win_h - st.img_h * scale) / 2.0;
                     // The drift shares the exponential time constant of the
                     // ease: by the time the scale covers its remaining
                     // distance, the pair covers ZOOM_ANCHOR_DRIFT of its own.
                     let d = (center - a) * (alpha * ZOOM_ANCHOR_DRIFT);
-                    st.pan.x += d.x;
-                    st.pan.y += d.y;
+                    // Move the pan and its target by the same amount.
+                    // The anchor then holds without discarding the offset a
+                    // held pan key added this frame.
+                    let dx = new_x + d.x - st.pan.x;
+                    let dy = new_y + d.y - st.pan.y;
+                    st.pan.x += dx;
+                    st.pan.y += dy;
+                    st.target_pan.x += dx;
+                    st.target_pan.y += dy;
                     if !keyboard_zoom {
                         st.zoom_anchor = Some(a + d);
                     }
-                    // Pin the target too, so the pan easing does not fight
-                    // the anchor.
-                    st.target_pan.x = st.pan.x;
-                    st.target_pan.y = st.pan.y;
                     // Ride the pointer along with the drifted image point
                     // (never while a drag has it captured, and keyboard zoom
                     // leaves the cursor wherever it is).
@@ -1354,49 +1525,30 @@ fn main() -> Result<()> {
                 }
 
                 // Vim-style panning (h/j/k/l and arrow keys).
-                // Held keys move the target offset, and the on-screen pan
-                // eases after it (the same exponential easing as zoom), so
-                // taps glide and holds scroll smoothly.
-                // The code reads input before begin_drawing borrows rl
-                // mutably.
-                // Per-second speed: matches the old 3%-of-window-per-frame
-                // pace (3% x 60 fps = 180% per second), now frame-time aware.
-                let speed = win_w.max(win_h) * 1.8 * rl.get_frame_time();
-                let pan_left =
-                    rl.is_key_down(KeyboardKey::KEY_H) || rl.is_key_down(KeyboardKey::KEY_LEFT);
-                let pan_right =
-                    rl.is_key_down(KeyboardKey::KEY_L) || rl.is_key_down(KeyboardKey::KEY_RIGHT);
-                let pan_up =
-                    rl.is_key_down(KeyboardKey::KEY_K) || rl.is_key_down(KeyboardKey::KEY_UP);
-                let pan_down =
-                    rl.is_key_down(KeyboardKey::KEY_J) || rl.is_key_down(KeyboardKey::KEY_DOWN);
-                if pan_left {
-                    st.target_pan.x += speed;
-                }
-                if pan_right {
-                    st.target_pan.x -= speed;
-                }
-                if pan_up {
-                    st.target_pan.y += speed;
-                }
-                if pan_down {
-                    st.target_pan.y -= speed;
-                }
+                // The held-key ramps above already moved the pan and its
+                // target by this frame's ramped delta.
+                // The exponential ease here only carries a discrete jump (a
+                // fit-mode change, the fill aim, a mouse drag) the rest of the
+                // way.
+                // It must not chase a moving target: easing after a target
+                // that advances every frame makes the motion lag its own
+                // input, and the lag grows and then snaps, which reads as a
+                // key press rather than a ramp.
+                // Speed continuity is the ramp's job.
+                //
                 // On a resize frame, snap pan too, so it does not glide after
                 // the new fit offset (matches the scale snap above).
                 if resized {
                     st.pan = st.target_pan;
                 }
-                let pan_alpha = 1.0 - (-rl.get_frame_time() / 0.05).exp();
-                st.pan = Vector2 {
-                    x: st.pan.x + (st.target_pan.x - st.pan.x) * pan_alpha,
-                    y: st.pan.y + (st.target_pan.y - st.pan.y) * pan_alpha,
-                };
-                // While dragging, skip the ease entirely: the image sticks to
-                // the cursor (only the zoom-anchor shift above touches pan).
+                // While dragging, the image sticks to the cursor (only the
+                // zoom-anchor shift above touches pan).
                 if dragging {
                     st.pan = st.target_pan;
                 }
+                let pan_alpha = 1.0 - (-dt / EASE_TIME).exp();
+                st.pan.x += (st.target_pan.x - st.pan.x) * pan_alpha;
+                st.pan.y += (st.target_pan.y - st.pan.y) * pan_alpha;
                 // Snap when the residual glide is sub-pixel.
                 if (st.target_pan.x - st.pan.x).abs() < 0.25 {
                     st.pan.x = st.target_pan.x;

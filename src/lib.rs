@@ -25,6 +25,8 @@
 //! choke points.
 //! [`mcp`] serves the Model Context Protocol on stdio when the binary starts
 //! with `--mcp`.
+//! [`keyrepeat`] steps a held key for discrete moves, and [`tween`] ramps a
+//! held key for continuous motion.
 //! The binary in `main.rs` wires these pieces into the window and event loop.
 //! The unit tests and doctests here keep the pure helpers honest.
 
@@ -35,8 +37,10 @@ pub mod grid;
 pub mod keyrepeat;
 pub mod loader;
 pub mod mcp;
+pub mod tween;
 #[cfg(target_os = "linux")]
 pub mod wmclass;
+pub mod zoomkeys;
 
 use std::path::Path;
 

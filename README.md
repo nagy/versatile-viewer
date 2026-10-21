@@ -49,7 +49,7 @@ because stdout carries protocol frames only.
 |---------------------|----------------------------|-------------------------------|
 |`q`                  |quit                        |quit                           |
 |`Enter` / `Esc`      |open selection / —          |return to grid / (inert alone) |
-|`h j k l` / arrows   |move selection (auto-repeat)|pan                            |
+|`h j k l` / arrows   |move selection (auto-repeat)|pan (hold: eased speed ramp)   |
 |`Space` / `Backspace`|—                           |next / previous image          |
 |`n` / `p`            |—                           |next / previous image          |
 |`g` / `G`            |first / last entry          |first / last image             |
@@ -58,7 +58,7 @@ because stdout carries protocol frames only.
 |`t`                  |—                           |toggle fit-all / fill          |
 |`a`                  |—                           |toggle smooth / pixelated filter|
 |`f`                  |open cell under cursor      |fill-zoom at cursor / zoom out / back to grid (hold: pan)|
-|`+` / `-`            |zoom thumbnails             |free zoom (25% steps, eased)   |
+|`+` / `-`            |zoom thumbnails             |free zoom (hold: eased ramp)   |
 |mouse wheel          |scroll (when zoomed in)     |free zoom (25% steps, anchored)|
 |left-drag            |—                           |pan                            |
 |click / click        |select / open               |—                              |

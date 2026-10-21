@@ -19,8 +19,18 @@ The binary name is `vv`.
 - Public error types derive `derive_more::{Display, Error, From}` (feature `from` on).
   Each module owns its error enum: `src/error.rs` (`DecodeError`, `UploadError`), `src/grid.rs` (`GridError`), `src/loader.rs` (`LoadError`), `src/mcp.rs` (`SpawnError`).
   `main.rs` keeps `anyhow`.
-- Wrap raw pixel and window primitives in the `src/dim.rs` newtypes (`ImgW`, `ImgH`, `WinW`, `WinH`, `LongSide`, `PreviewPx`, `Delay`, `Rate`).
+- Wrap raw pixel and window primitives in the `src/dim.rs` newtypes (`ImgW`, `ImgH`, `WinW`, `WinH`, `LongSide`, `PreviewPx`, `Delay`, `Rate`, `RampTime`).
   Public API boundaries take the newtype, not the bare primitive.
+- Two motion styles, and a key picks one:
+  - Auto-repeat steps a discrete move.
+    `src/keyrepeat.rs` reimplements the X rate for the grid selection and image next/previous.
+  - A velocity ramp eases a continuous move.
+    `src/tween.rs` ramps the speed in, holds it, and ramps it out for the image pan and the image free zoom.
+    The ramp is linear, and it reads only the held state.
+    Never step a continuous motion on the auto-repeat rate.
+- Read the held state of a key that no `KeyboardKey` names by learning its keycode.
+  `src/zoomkeys.rs` pairs a typed `+`/`-` with the key that went down in the same frame, then the code polls that keycode.
+  The X server repeats only the key that went down last, so a time window cannot stand in for the held state.
 
 ## Build
 
