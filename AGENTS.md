@@ -52,6 +52,7 @@ Run `nix run . -- <image-path-or-directory>`.
 ESC never quits.
 
 - Keys: see the README table.
+- Mouse side buttons step next / previous in image view, like `n` / `p` (`read_nav_mouse` in `main.rs`).
 - Env vars `VV_DEBUG`, `VV_TIMING`, `VV_SLOW_STREAM`, `VV_BLUR_BG`, `VV_BG_DIM`, `VV_BLUR_PX`: see the README table.
 - Window title uses en-dash separators: `<file> – <dir> – versatile-viewer`.
   The grid title is `(<n> image(s)) – <dir> – versatile-viewer`.

@@ -61,6 +61,7 @@ because stdout carries protocol frames only.
 |`f`                  |open cell under cursor      |fill-zoom at cursor / zoom out / back to grid (hold: pan)|
 |`+` / `-`            |zoom thumbnails             |free zoom (hold: eased ramp)   |
 |mouse wheel          |scroll (when zoomed in)     |free zoom (25% steps, anchored)|
+|mouse side buttons   |—                           |next / previous image          |
 |left-drag            |—                           |pan                            |
 |click / click        |select / open               |—                              |
 

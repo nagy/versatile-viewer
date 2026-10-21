@@ -294,6 +294,48 @@ struct NavKeys {
     zoom_out: bool,
 }
 
+/// The mouse side-button nav state for this frame.
+/// The X11 thumb buttons arrive as raylib `MOUSE_BUTTON_SIDE` (X button 8, back)
+/// and `MOUSE_BUTTON_EXTRA` (X button 9, forward).
+/// The code accepts raylib's own BACK and FORWARD codes too, so a backend that
+/// maps them directly behaves the same.
+#[derive(Debug, Clone, Copy, Default)]
+struct NavMouse {
+    /// The next-image button state.
+    next: NavButton,
+    /// The previous-image button state.
+    prev: NavButton,
+}
+
+/// One side button, as an edge and a held state.
+#[derive(Debug, Clone, Copy, Default)]
+struct NavButton {
+    /// The button went down this frame.
+    edge: bool,
+    /// The button is held now.
+    held: bool,
+}
+
+/// Read the side-button nav state once per frame.
+/// A held side button auto-repeats through `keyrepeat`, exactly like `n` and
+/// `p`.
+fn read_nav_mouse(rl: &RaylibHandle) -> NavMouse {
+    let buttons = |list: &[MouseButton]| NavButton {
+        edge: list.iter().any(|&b| rl.is_mouse_button_pressed(b)),
+        held: list.iter().any(|&b| rl.is_mouse_button_down(b)),
+    };
+    NavMouse {
+        next: buttons(&[
+            MouseButton::MOUSE_BUTTON_EXTRA,
+            MouseButton::MOUSE_BUTTON_FORWARD,
+        ]),
+        prev: buttons(&[
+            MouseButton::MOUSE_BUTTON_SIDE,
+            MouseButton::MOUSE_BUTTON_BACK,
+        ]),
+    }
+}
+
 /// Show a new RGBA8 frame in image view.
 /// When a texture with the same dimensions exists (progressive previews of
 /// the same image), the function updates its pixels in place instead of
@@ -1045,6 +1087,8 @@ fn main() -> Result<()> {
             // (nsxiv-style nav, with n or Space for next and p or
             // Backspace for previous, while the arrows and h/j/k/l stay
             // panning).
+            // The mouse side buttons navigate too: forward is next and back
+            // is previous, like n and p.
             // Nav keys auto-repeat while held, at the X server rate
             // (xset r rate, from keyrepeat::settings).
             // g/G jump to the first or last image.
@@ -1131,23 +1175,22 @@ fn main() -> Result<()> {
             // Auto-repeat: the initial press fires at once (edge from the
             // queue above), and the hold fires at the X server repeat rate
             // after its delay.
+            // The mouse side buttons ride the same nav path: forward is next
+            // and back is previous, exactly like n and p.
             let now = rl.get_time();
             let (delay, rate) = keyrepeat::settings();
-            let mut nav = if rep_nav_fwd.tick(
-                nav_next_edge,
-                rl.is_key_down(KeyboardKey::KEY_N) || rl.is_key_down(KeyboardKey::KEY_SPACE),
-                now,
-                delay,
-                rate,
-            ) {
+            let mouse_nav = read_nav_mouse(&rl);
+            let next_edge = nav_next_edge || mouse_nav.next.edge;
+            let prev_edge = nav_prev_edge || mouse_nav.prev.edge;
+            let next_held = rl.is_key_down(KeyboardKey::KEY_N)
+                || rl.is_key_down(KeyboardKey::KEY_SPACE)
+                || mouse_nav.next.held;
+            let prev_held = rl.is_key_down(KeyboardKey::KEY_P)
+                || rl.is_key_down(KeyboardKey::KEY_BACKSPACE)
+                || mouse_nav.prev.held;
+            let mut nav = if rep_nav_fwd.tick(next_edge, next_held, now, delay, rate) {
                 Some(1)
-            } else if rep_nav_back.tick(
-                nav_prev_edge,
-                rl.is_key_down(KeyboardKey::KEY_P) || rl.is_key_down(KeyboardKey::KEY_BACKSPACE),
-                now,
-                delay,
-                rate,
-            ) {
+            } else if rep_nav_back.tick(prev_edge, prev_held, now, delay, rate) {
                 Some(-1)
             } else {
                 None
