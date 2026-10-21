@@ -50,6 +50,7 @@ because stdout carries protocol frames only.
 |`q`                  |quit                        |quit                           |
 |`Enter` / `Esc`      |open selection / —          |return to grid / (inert alone) |
 |`h j k l` / arrows   |move selection (auto-repeat)|pan (hold: eased speed ramp)   |
+|`Shift+h/j/k/l`      |move selection, double step |pan and free zoom, double speed|
 |`Space` / `Backspace`|—                           |next / previous image          |
 |`n` / `p`            |—                           |next / previous image          |
 |`g` / `G`            |first / last entry          |first / last image             |

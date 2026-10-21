@@ -230,15 +230,19 @@ impl Ramps {
     /// `down`: whether each key is held now.
     /// `base`: the pan cruise speed for one full frame.
     /// `dt`: the frame time, in seconds.
+    /// `speed`: a multiplier on both the pan and the zoom rate, and 1.0 for
+    /// normal speed and 2.0 while Shift is held.
+    /// It scales the output speed only, not the ramp, so the ease stays the
+    /// same length at any speed.
     ///
     /// The return value holds this frame's pan delta and zoom factors.
     /// The ease runs on the returned values, not on the call count, so a
     /// caller may call the function once per frame.
-    fn tick(&mut self, down: NavKeys, base: f32, dt: f32) -> Motion {
+    fn tick(&mut self, down: NavKeys, base: f32, dt: f32, speed: f32) -> Motion {
         // Only the held state counts.
         // Every key press event, and the auto-repeat rate with it, has no
         // effect on these ramps.
-        let pan_speed = base * dt;
+        let pan_speed = base * dt * speed;
         let ramp = RAMP_TIME;
         let (l, r, u, d) = (
             self.pan_left.tick(down.left, dt, ramp),
@@ -258,7 +262,7 @@ impl Ramps {
                 x: pan_speed * (l - r),
                 y: pan_speed * (u - d),
             },
-            zoom_factor: (ZOOM_RATE * dt * (zi - zo)).exp(),
+            zoom_factor: (ZOOM_RATE * speed * dt * (zi - zo)).exp(),
             zoom_moving: zi > 0.0 || zo > 0.0,
         }
     }
@@ -979,15 +983,31 @@ fn main() -> Result<()> {
             }
         }
 
+        // True while a Shift key is down.
+        // Shift + h/j/k/l moves at double speed in both views: the grid
+        // selection step and the image pan and free zoom.
+        // The flag lives outside the mode branches because both read it.
+        let shift = rl.is_key_down(KeyboardKey::KEY_LEFT_SHIFT)
+            || rl.is_key_down(KeyboardKey::KEY_RIGHT_SHIFT);
+        // Shift + h/j/k/l moves at double speed in both views.
+        // The grid passes the step count to its input handler, and the image
+        // view scales its pan and zoom ramps.
+        let shift_mult = if shift {
+            versatile_viewer::SHIFT_SPEED_MULTIPLIER
+        } else {
+            1
+        };
+        let shift_speed = shift_mult as f32;
+
         if st.mode == Mode::Grid {
             // Grid navigation: h/j/k/l and the arrows move the selection,
             // Enter opens the selected image, q quits (ESC is inert here,
             // because the grid is the home view).
-            match grid
-                .as_mut()
-                .unwrap()
-                .handle_input(&mut rl, (WinW::new(win_w), WinH::new(win_h)))
-            {
+            match grid.as_mut().unwrap().handle_input(
+                &mut rl,
+                (WinW::new(win_w), WinH::new(win_h)),
+                shift_mult,
+            ) {
                 Some(GridAction::Open(i)) => {
                     if debug {
                         eprintln!("vv: enter pressed -> open idx {i}");
@@ -1040,8 +1060,6 @@ fn main() -> Result<()> {
             // A typed `+`/`-` pairs with it to learn which physical key holds
             // that character (see zoomkeys::TypedKeys).
             let mut pressed_key: Option<KeyboardKey> = None;
-            let shift = rl.is_key_down(KeyboardKey::KEY_LEFT_SHIFT)
-                || rl.is_key_down(KeyboardKey::KEY_RIGHT_SHIFT);
             while let Some(k) = rl.get_key_pressed() {
                 pressed_key = Some(k);
                 match k {
@@ -1361,7 +1379,11 @@ fn main() -> Result<()> {
                 };
                 // The pan cruise speed scales with the window, so the motion
                 // covers the same fraction of the view on any screen size.
-                let motion = st.ramps.tick(nav, win_w.max(win_h) * PAN_RATE, dt);
+                // Shift multiplies both the pan cruise speed and the zoom
+                // rate.
+                let motion = st
+                    .ramps
+                    .tick(nav, win_w.max(win_h) * PAN_RATE, dt, shift_speed);
                 // Fold the ramped delta into the pan and its target together,
                 // so the pan follows the ramp at once and the ease below sees
                 // no leftover distance.

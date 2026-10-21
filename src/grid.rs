@@ -551,13 +551,21 @@ impl Grid {
     /// g/G jump to the first or last image.
     /// Enter opens the selected image and q quits.
     /// ESC does nothing here, because the grid is the home view.
+    /// `step` scales one press: Shift passes
+    /// [`crate::SHIFT_SPEED_MULTIPLIER`], so the selection jumps that many
+    /// cells.
     ///
     /// `None` means no action this frame.
     // One frame input pipeline (queue drain, repeat, zoom, scroll,
     // navigation, mouse) is intentionally linear.
     // See main() too.
     #[allow(clippy::too_many_lines)]
-    pub fn handle_input(&mut self, rl: &mut RaylibHandle, win: (WinW, WinH)) -> Option<GridAction> {
+    pub fn handle_input(
+        &mut self,
+        rl: &mut RaylibHandle,
+        win: (WinW, WinH),
+        step: u32,
+    ) -> Option<GridAction> {
         let (win_w, win_h) = (win.0.get(), win.1.get());
         if self.entries.is_empty() {
             return None;
@@ -671,33 +679,23 @@ impl Grid {
         }
         let old_sel = self.selected;
         let mut sel = self.selected;
-        // h/l wrap between rows: l on a row's rightmost element moves to the
-        // next row's first element, h on the leftmost moves back to the end of
-        // the previous row (never past the first or last element).
+        // `step` scales every press: Shift passes
+        // [`crate::SHIFT_SPEED_MULTIPLIER`], so one press moves that many
+        // cells.
+        // The selection stays inside the entry list.
+        let s = step.max(1) as usize;
+        let cols_i = cols as i128;
         if left {
-            if sel.is_multiple_of(cols) {
-                if sel > 0 {
-                    sel = sel.saturating_sub(1); // first element of a row -> last of the previous
-                }
-            } else {
-                sel -= 1;
-            }
+            sel = step_selection(sel, n, s, -1);
         }
         if right {
-            if sel % cols == cols - 1 {
-                let next = sel + (cols - sel % cols); // first element of the next row
-                if next < n {
-                    sel = next;
-                }
-            } else if sel + 1 < n {
-                sel += 1;
-            }
+            sel = step_selection(sel, n, s, 1);
         }
-        if up && sel >= cols {
-            sel -= cols;
+        if up {
+            sel = step_selection(sel, n, s, -cols_i);
         }
-        if down && sel + cols < n {
-            sel += cols;
+        if down {
+            sel = step_selection(sel, n, s, cols_i);
         }
         // g/G: jump to the first or last image (overrides held direction
         // keys).
@@ -833,6 +831,22 @@ impl Grid {
             }
         }
     }
+}
+
+/// Move the selection by one direction press, `step` times over.
+///
+/// `delta` is the index change of a single step: -1 and +1 for h and l, and
+/// -cols and +cols for k and j.
+/// The result stays inside `0..n`, and it clamps instead of wrapping.
+/// A step of 0 counts as 1.
+#[must_use]
+fn step_selection(sel: usize, n: usize, step: usize, delta: i128) -> usize {
+    if n == 0 {
+        return 0;
+    }
+    let step = step.max(1);
+    let moved = sel as i128 + delta * step as i128;
+    moved.clamp(0, n as i128 - 1) as usize
 }
 
 /// Do the code most likely decode this path as an image? (Grid directory
@@ -1048,6 +1062,24 @@ mod tests {
     fn grid_layout_side_is_square_of_cell_minimum() {
         let l = grid_layout_at(7, 1200.0, 700.0, 1.0);
         assert_eq!(l.side, l.cell_w.min(l.cell_h));
+    }
+
+    #[test]
+    fn step_selection_doubles_with_shift() {
+        // 3x3 grid over 9 entries, selection 4 (the middle cell).
+        // A normal press moves one cell, and Shift moves two.
+        assert_eq!(step_selection(4, 9, 1, 1), 5);
+        assert_eq!(step_selection(4, 9, 2, 1), 6);
+        assert_eq!(step_selection(4, 9, 1, -1), 3);
+        assert_eq!(step_selection(4, 9, 2, -1), 2);
+        // A row step is the column count apart, doubled with Shift.
+        assert_eq!(step_selection(4, 9, 1, 3), 7);
+        // The clamp holds at both ends instead of wrapping.
+        assert_eq!(step_selection(8, 9, 2, 1), 8);
+        assert_eq!(step_selection(0, 9, 2, -1), 0);
+        assert_eq!(step_selection(1, 9, 2, -3), 0);
+        // A step of zero still moves one cell.
+        assert_eq!(step_selection(4, 9, 0, 1), 5);
     }
 
     #[test]

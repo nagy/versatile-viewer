@@ -51,6 +51,13 @@ use raylib::{consts::PixelFormat, prelude::*};
 use crate::dim::{ImgH, ImgW, LongSide};
 pub use crate::error::{DecodeError, UploadError};
 
+/// The speed multiplier while Shift is held.
+///
+/// Shift + h/j/k/l moves at double speed: the grid selection step, the image
+/// pan and the image free zoom.
+/// Both views read this one constant, so the two speeds never drift apart.
+pub const SHIFT_SPEED_MULTIPLIER: u32 = 2;
+
 /// Holds the decoded image data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedImage {

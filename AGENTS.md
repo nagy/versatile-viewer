@@ -33,6 +33,10 @@ The binary name is `vv`.
     `src/tween.rs` ramps the speed in, holds it, and ramps it out for the image pan and the image free zoom.
     The ramp is linear, and it reads only the held state.
     Never step a continuous motion on the auto-repeat rate.
+- Shift + h/j/k/l moves at double speed in both views.
+  `SHIFT_SPEED_MULTIPLIER` (`src/lib.rs`) is the one constant.
+  The grid takes it as the `step` argument of `handle_input` (`step_selection` clamps the move).
+  The image view passes it as the `speed` argument of `Ramps::tick`, which scales the pan and the zoom rate but not the ramp, so the ease keeps its length at any speed.
 - Read the held state of a key that no `KeyboardKey` names by learning its keycode.
   `src/zoomkeys.rs` pairs a typed `+`/`-` with the key that went down in the same frame, then the code polls that keycode.
   The X server repeats only the key that went down last, so a time window cannot stand in for the held state.
