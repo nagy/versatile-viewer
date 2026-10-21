@@ -84,8 +84,9 @@ struct DecodeResult {
     res: Result<DecodeOk, DecodeError>,
 }
 
-/// Successful decode payload: the thumbnail and the untouched
-/// full-resolution image.
+/// Successful decode payload: the thumbnail and the full-resolution image.
+/// [`crate::decode_image`] caps the full image to the uploadable
+/// [`crate::MAX_TEXTURE_SIDE`] before it arrives here.
 /// The main thread uploads the thumb for every entry.
 /// It uploads the full texture only for keep-set entries (selection or open
 /// plus prefetched neighbors) and drops the rest.
@@ -444,7 +445,14 @@ impl Grid {
             rayon::spawn(move || {
                 let res = crate::decode_image(&path).map(|full| {
                     let blur = blur_enabled.then(|| blurbg::small_blur(&full, blur_px));
-                    let thumb = crate::downscale_rgba(full.clone(), THUMB_LONG_SIDE);
+                    // Borrow the decoded buffer for the thumb: a clone of a
+                    // large image costs hundreds of megabytes.
+                    let thumb = crate::downscale_rgba_ref(
+                        &full.data,
+                        full.width,
+                        full.height,
+                        THUMB_LONG_SIDE,
+                    );
                     DecodeOk { thumb, blur, full }
                 });
                 // Receiver gone (grid dropped): the code discards the

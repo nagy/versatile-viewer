@@ -70,6 +70,7 @@ because stdout carries protocol frames only.
 |variable          |effect                                                                 |
 |------------------|-----------------------------------------------------------------------|
 |`VV_DEBUG=1`      |trace grid open/return events and raw key events to stderr             |
+|`VV_TIMING=1`     |trace every texture upload (size, duration) and slow frames to stderr  |
 |`VV_SLOW_STREAM=1`|dribble 4 KB chunks with 1 s pauses until the first preview renders    |
 |`VV_BLUR_BG=1`    |image-view background is a tiny blurred copy of the viewed image       |
 |`VV_BG_DIM=0..1`  |brightness of the blurred background (default 0.6)                     |

@@ -26,7 +26,7 @@ use derive_more::{Display, Error, From};
 use jxl_oxide::{InitializeResult, JxlImage};
 
 use crate::{
-    DecodedImage, blurbg, decode_common,
+    DecodedImage, blurbg, cap_texture_side, decode_common,
     dim::{ImgH, ImgW, LongSide, PreviewPx},
     downscale_rgba,
     error::DecodeError,
@@ -278,6 +278,8 @@ fn stream(
     img.finalize().map_err(jxl_err)?;
     let render = img.render_frame(0).map_err(jxl_err)?;
     let image = fb_to_rgba(&render.image_all_channels())?;
+    // Cap here, on the worker: the main thread uploads the buffer as is.
+    let image = cap_texture_side(image);
     let blur = blur_enabled.then(|| blurbg::small_blur(&image, blur_px));
     Ok(Some(DecodeMsg::Done { image, blur }))
 }

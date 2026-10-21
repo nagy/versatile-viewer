@@ -22,6 +22,7 @@
 //! Usage: `vv [--mcp] <image-path-or-directory>`
 //!
 //! `VV_DEBUG`=1 traces input events.
+//! `VV_TIMING`=1 traces main-thread texture uploads and slow frames.
 //! `VV_SLOW_STREAM`=1 slows the JXL stream.
 //! `VV_BLUR_BG`=1 draws a blurred copy of the viewed image as the image-view
 //! background, scaled to cover the window and upscaled by the GPU.
@@ -690,6 +691,8 @@ fn main() -> Result<()> {
     let mut quit = false;
     // VV_DEBUG=1: trace grid open/return events to stderr.
     let debug = std::env::var_os("VV_DEBUG").is_some();
+    // VV_TIMING=1: trace slow frames to stderr.
+    let timing = versatile_viewer::timing_enabled();
     // Previous per-key down state for the VV_DEBUG event trace.
     let mut prev_down = [false; 349];
 
@@ -733,6 +736,9 @@ fn main() -> Result<()> {
     let mut zoom_keys = TypedKeys::default();
 
     while !rl.window_should_close() && !quit {
+        // VV_TIMING: the frame started now.
+        // The code reports it at the end of the frame when it ran long.
+        let frame_started = timing.then(std::time::Instant::now);
         // VV_DEBUG: trace every key raylib sees (keycode per raylib/GLFW:
         // 257=Enter, 335=KpEnter, 256=Esc, 262/263=Right/Left,
         // 264/265=Up/Down, 72/74/75/76=h/j/k/l).
@@ -1683,6 +1689,12 @@ fn main() -> Result<()> {
                     Vector2::new(vx, vy + 12.0),
                     Color::YELLOW,
                 );
+            }
+        }
+        if let Some(started) = frame_started {
+            let ms = started.elapsed().as_secs_f64() * 1000.0;
+            if ms > 50.0 {
+                eprintln!("vv: slow frame {ms:.1} ms");
             }
         }
     }

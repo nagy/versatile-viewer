@@ -21,8 +21,10 @@
 //! JPEG XL decodes with pure-Rust jxl-oxide and streams progressively in
 //! [`loader`].
 //! The common formats decode with the `image` crate.
-//! [`downscale_rgba`] and [`upload_rgba`] are the shared pixel and texture
-//! choke points.
+//! [`downscale_rgba`], [`cap_texture_side`] and [`upload_rgba`] keep the
+//! pixel and texture budget.
+//! Decode workers cap the buffer, so the main thread never resizes a large
+//! image.
 //! [`mcp`] serves the Model Context Protocol on stdio when the binary starts
 //! with `--mcp`.
 //! [`keyrepeat`] steps a held key for discrete moves, and [`tween`] ramps a
@@ -76,6 +78,10 @@ fn decode_jxl(path: &Path) -> Result<DecodedImage, DecodeError> {
 /// RGB (3 channels) gets alpha = 1.
 /// The code takes RGBA (4 channels) as is.
 ///
+/// The function applies [`cap_texture_side`], so the result is uploadable as
+/// is, like [`decode_common`].
+/// It runs on a decode worker, never on the main thread.
+///
 /// # Errors
 ///
 /// The function errors when the framebuffer holds an unexpected channel
@@ -106,11 +112,11 @@ pub(crate) fn fb_to_rgba(fb: &jxl_oxide::FrameBuffer) -> Result<DecodedImage, De
             255
         };
     }
-    Ok(DecodedImage {
+    Ok(cap_texture_side(DecodedImage {
         width,
         height,
         data: rgba,
-    })
+    }))
 }
 
 const fn to_u8(v: f32) -> u8 {
@@ -118,17 +124,21 @@ const fn to_u8(v: f32) -> u8 {
 }
 
 /// Decode common formats (PNG, JPEG, ...) with the `image` crate.
+///
+/// The function applies [`cap_texture_side`], so the result is uploadable as
+/// is.
+/// This runs on a decode worker, never on the main thread.
 fn decode_common(path: &Path) -> Result<DecodedImage, DecodeError> {
     let rgba = image::ImageReader::open(path)?
         .with_guessed_format()?
         .decode()?
         .into_rgba8();
     let (width, height) = rgba.dimensions();
-    Ok(DecodedImage {
+    Ok(cap_texture_side(DecodedImage {
         width: ImgW::new(width),
         height: ImgH::new(height),
         data: rgba.into_raw(),
-    })
+    }))
 }
 
 /// Decide the decoder by file content, not by the file name.
@@ -199,7 +209,48 @@ pub fn decode_image(path: &Path) -> Result<DecodedImage, DecodeError> {
 /// This is the safe middle value.
 /// raylib does not expose the real limit.
 /// The code downscales anything larger here instead of failing the load.
-const MAX_TEXTURE_SIDE: u32 = 8192;
+pub const MAX_TEXTURE_SIDE: u32 = 8192;
+
+/// Downscale an RGBA8 buffer to the uploadable [`MAX_TEXTURE_SIDE`].
+///
+/// Run this function off the main thread, where the decode runs.
+/// [`upload_rgba`] then never resizes a big buffer on the main thread.
+/// Below the limit the function returns the image unchanged, so no quality
+/// is lost and nothing is copied.
+///
+/// # Examples
+///
+/// ```
+/// # use versatile_viewer::{DecodedImage, cap_texture_side, MAX_TEXTURE_SIDE};
+/// # use versatile_viewer::dim::{ImgH, ImgW};
+/// # use versatile_viewer::dim::LongSide;
+/// // Below the limit: the same buffer comes back, untouched.
+/// let img = DecodedImage {
+///     width: ImgW::new(64),
+///     height: ImgH::new(32),
+///     data: vec![7; 4 * 64 * 32],
+/// };
+/// let img = cap_texture_side(img);
+/// assert_eq!((img.width.get(), img.height.get()), (64, 32));
+/// assert_eq!(img.data.len(), 4 * 64 * 32);
+///
+/// // Over the limit: the long side lands exactly on the limit.
+/// let img = DecodedImage {
+///     width: ImgW::new(MAX_TEXTURE_SIDE + 1),
+///     height: ImgH::new(1),
+///     data: vec![0; 4 * (MAX_TEXTURE_SIDE as usize + 1)],
+/// };
+/// let img = cap_texture_side(img);
+/// assert_eq!((img.width.get(), img.height.get()), (MAX_TEXTURE_SIDE, 1));
+/// ```
+#[must_use]
+pub fn cap_texture_side(image: DecodedImage) -> DecodedImage {
+    if image.width.get().max(image.height.get()) > MAX_TEXTURE_SIDE {
+        downscale_rgba(image, LongSide::new(MAX_TEXTURE_SIDE))
+    } else {
+        image
+    }
+}
 
 /// Downscale an RGBA8 buffer so its long side is at most `long_side`.
 ///
@@ -278,12 +329,75 @@ pub fn downscale_rgba(image: DecodedImage, long_side: LongSide) -> DecodedImage 
     }
 }
 
+/// Downscale a borrowed RGBA8 buffer, and leave the input alone.
+///
+/// [`downscale_rgba`] takes ownership, so a caller that still needs the
+/// source buffer would have to clone it.
+/// The grid decodes once and needs two sizes from that decode (thumb and
+/// full), and a clone of a 100 MP buffer costs hundreds of megabytes.
+/// This function copies no input pixels: the `ImageBuffer` borrows.
+///
+/// The function never upscales, and it clamps a zero dimension to 1.
+/// Below `long_side` the output is a plain copy of the input.
+///
+/// # Panics
+///
+/// The function panics if `rgba` does not hold exactly
+/// `width * height * 4` bytes.
+#[must_use]
+pub fn downscale_rgba_ref(
+    rgba: &[u8],
+    width: ImgW,
+    height: ImgH,
+    long_side: LongSide,
+) -> DecodedImage {
+    let (width, height) = (width.get().max(1), height.get().max(1));
+    let m = width.max(height);
+    let long_side = long_side.get().max(1);
+    let img: image::ImageBuffer<image::Rgba<u8>, &[u8]> =
+        image::ImageBuffer::from_raw(width, height, rgba).expect("rgba buffer matches dimensions");
+    if m <= long_side {
+        return DecodedImage {
+            width: ImgW::new(width),
+            height: ImgH::new(height),
+            data: rgba.to_vec(),
+        };
+    }
+    let scale = long_side as f32 / m as f32;
+    let nw = ((width as f32 * scale).round() as u32).max(1);
+    let nh = ((height as f32 * scale).round() as u32).max(1);
+    let small = image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle);
+    DecodedImage {
+        width: ImgW::new(nw),
+        height: ImgH::new(nh),
+        data: small.into_raw(),
+    }
+}
+
+/// True when `VV_TIMING` is set.
+///
+/// The code then prints the main-thread costs to stderr: every texture
+/// upload with its pixel size and its duration, and every slow frame.
+/// Input tracing stays under `VV_DEBUG`.
+#[must_use]
+pub fn timing_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VV_TIMING").is_some())
+}
+
 /// Upload a raw RGBA8 buffer as a GPU texture.
 ///
 /// Call this function on the main thread, where the GL context lives.
 /// The function only borrows the buffer for the upload.
 /// It forgets the `ffi::Image` wrapper, so raylib never frees the caller
 /// `Vec`.
+///
+/// The caller passes a buffer that already fits [`MAX_TEXTURE_SIDE`].
+/// Decode workers call [`cap_texture_side`], so this function only copies a
+/// buffer that skipped that step.
+/// A resize here blocks the main thread, and a large image then freezes the
+/// window for seconds.
 ///
 /// # Errors
 ///
@@ -296,9 +410,9 @@ pub fn upload_rgba(
     width: ImgW,
     height: ImgH,
 ) -> Result<Texture2D, UploadError> {
-    // Oversized images (huge panoramas) fail the GL upload.
-    // The code clamps them to the safe side limit here, in the single
-    // choke point.
+    // Last-resort clamp: a caller that skipped `cap_texture_side` still
+    // uploads (huge panoramas would fail the GL upload otherwise).
+    // The decode path never reaches this branch.
     let owned;
     let (rgba, width, height) = if width.get().max(height.get()) > MAX_TEXTURE_SIDE {
         owned = downscale_rgba(
@@ -321,8 +435,18 @@ pub fn upload_rgba(
         format: PixelFormat::PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 as i32,
     };
     let image = unsafe { Image::from_raw(ffi_image) };
+    let started = std::time::Instant::now();
     let texture = rl.load_texture_from_image(thread, &image)?;
     image.to_raw(); // forget: drop would MemFree our borrowed Vec
+    if timing_enabled() {
+        eprintln!(
+            "vv: upload {}x{} ({:.1} MB) in {:.1} ms",
+            width.get(),
+            height.get(),
+            rgba.len() as f64 / (1024.0 * 1024.0),
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
     Ok(texture)
 }
 
@@ -334,6 +458,49 @@ mod tests {
 
     // Compile-time check that this stays const-evaluable.
     const _: u8 = to_u8(0.5);
+
+    #[test]
+    fn cap_texture_side_never_upscales_and_caps() {
+        let img = |w: u32, h: u32| DecodedImage {
+            width: ImgW::new(w),
+            height: ImgH::new(h),
+            data: vec![9; (w * h * 4) as usize],
+        };
+        // Below the limit: the same buffer, untouched.
+        let src = img(32, 16);
+        let out = cap_texture_side(src.clone());
+        assert_eq!((out.width, out.height), (ImgW::new(32), ImgH::new(16)));
+        assert_eq!(out.data, src.data);
+        // Over the limit: the long side lands exactly on the limit.
+        let out = cap_texture_side(img(MAX_TEXTURE_SIDE + 1, 2));
+        assert_eq!(out.width, ImgW::new(MAX_TEXTURE_SIDE));
+        assert_eq!(out.height, ImgH::new(2));
+        assert_eq!(out.data.len(), (MAX_TEXTURE_SIDE * 2 * 4) as usize);
+        // A tall image caps by height instead.
+        let out = cap_texture_side(img(2, MAX_TEXTURE_SIDE + 1));
+        assert_eq!(out.width, ImgW::new(2));
+        assert_eq!(out.height, ImgH::new(MAX_TEXTURE_SIDE));
+    }
+
+    #[test]
+    fn downscale_rgba_ref_borrows_and_never_upscales() {
+        let src = |w: u32, h: u32| DecodedImage {
+            width: ImgW::new(w),
+            height: ImgH::new(h),
+            data: vec![7; (w * h * 4) as usize],
+        };
+        // Above the cap: 800x200 with cap 64 -> 64x16.
+        let img = src(800, 200);
+        let out = downscale_rgba_ref(&img.data, img.width, img.height, LongSide::new(64));
+        assert_eq!((out.width, out.height), (ImgW::new(64), ImgH::new(16)));
+        assert_eq!((img.width, img.height), (ImgW::new(800), ImgH::new(200)));
+        // Below the cap: the output equals the borrowed input.
+        let img = src(32, 16);
+        let out = downscale_rgba_ref(&img.data, img.width, img.height, LongSide::new(64));
+        assert_eq!((out.width, out.height), (ImgW::new(32), ImgH::new(16)));
+        assert_eq!(out.data, img.data);
+        assert_eq!(out, downscale_rgba(img.clone(), LongSide::new(64)));
+    }
 
     #[test]
     fn to_u8_clamps_and_rounds() {

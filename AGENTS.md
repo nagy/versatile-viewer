@@ -16,6 +16,11 @@ The binary name is `vv`.
   Keep the crate features in sync.
 - Dispatch decode on sniffed content.
   Do not dispatch decode on the file name.
+- Decode and every pixel resize stay off the main thread.
+  Decode workers cap the buffer with `cap_texture_side` (`src/lib.rs`), so `upload_rgba` on the main thread uploads a buffer that already fits `MAX_TEXTURE_SIDE`.
+  Never add a main-thread resize: a large image then freezes the window for seconds.
+  Downscale a borrowed buffer with `downscale_rgba_ref`, not `downscale_rgba` on a clone.
+  `VV_TIMING=1` prints upload cost and slow frames.
 - Public error types derive `derive_more::{Display, Error, From}` (feature `from` on).
   Each module owns its error enum: `src/error.rs` (`DecodeError`, `UploadError`), `src/grid.rs` (`GridError`), `src/loader.rs` (`LoadError`), `src/mcp.rs` (`SpawnError`).
   `main.rs` keeps `anyhow`.
@@ -43,7 +48,7 @@ Run `nix run . -- <image-path-or-directory>`.
 ESC never quits.
 
 - Keys: see the README table.
-- Env vars `VV_DEBUG`, `VV_SLOW_STREAM`, `VV_BLUR_BG`, `VV_BG_DIM`, `VV_BLUR_PX`: see the README table.
+- Env vars `VV_DEBUG`, `VV_TIMING`, `VV_SLOW_STREAM`, `VV_BLUR_BG`, `VV_BG_DIM`, `VV_BLUR_PX`: see the README table.
 - Window title uses en-dash separators: `<file> – <dir> – versatile-viewer`.
   The grid title is `(<n> image(s)) – <dir> – versatile-viewer`.
   Canonicalize the paths.
