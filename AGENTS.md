@@ -57,6 +57,9 @@ The binary name is `vv`.
 Run `nix run . -- <image-path-or-directory>`.
 ESC never quits.
 
+The window clears to `BACKGROUND` (`#062329`, `main.rs`).
+Both views share it, so the letterbox bars and the grid gaps match.
+
 - Keys: see the README table.
 - `Shift+F` hold turns vertical mouse travel into the free zoom (`ZOOM_DRAG_SPAN` in `main.rs`).
   Up zooms in, down zooms out.

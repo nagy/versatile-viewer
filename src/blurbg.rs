@@ -205,7 +205,8 @@ impl BlurBg {
     /// it in place.
     /// This path has no fade (same image: streaming previews).
     /// The code cuts a running crossfade short.
-    /// Errors are non-fatal: the background just stays black.
+    /// Errors are non-fatal: the background just stays transparent, and the
+    /// window background shows through.
     pub fn attach(
         &mut self,
         rl: &mut RaylibHandle,
@@ -222,7 +223,8 @@ impl BlurBg {
     /// Swap the background to `data` with a slow crossfade.
     /// The function does nothing while `tag` already matches.
     /// The grid calls this function every frame for the selected entry.
-    /// Without an existing background, the new texture fades in from black.
+    /// Without an existing background, the new texture fades in from the
+    /// window background.
     pub fn transition(
         &mut self,
         rl: &mut RaylibHandle,
@@ -235,7 +237,7 @@ impl BlurBg {
         }
         let (rgba, width, height) = (&data.data, data.width, data.height);
         // First background ever (empty window at startup): show it
-        // at once, with no fade-in from black.
+        // at once, with no fade-in from the window background.
         let first = self.tex.is_none();
         match crate::upload_rgba(rl, thread, rgba, width, height) {
             Ok(t) => {
@@ -290,7 +292,8 @@ impl BlurBg {
                 Color::new(rgb, rgb, rgb, 255),
             );
         }
-        // ...then the new one, fading in (from black when there is no old).
+        // ...then the new one, fading in (from the window background when
+        // there is no old).
         let t = progress * progress * (3.0 - 2.0 * progress); // smoothstep
         d.draw_texture_pro(
             tex,

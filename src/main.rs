@@ -61,6 +61,11 @@ use versatile_viewer::{
     zoomkeys::TypedKeys,
 };
 
+/// The window background color, `#062329`.
+/// The grid and the image view both clear to it, so the letterbox bars and the
+/// gaps between thumbnails match.
+const BACKGROUND: Color = Color::new(0x06, 0x23, 0x29, 0xff);
+
 /// The fraction of the remaining distance to the window center that the
 /// zoomed image point (and the cursor riding it) drifts over one zoom ease.
 /// It shares the exponential time constant of the ease.
@@ -1766,7 +1771,7 @@ fn main() -> Result<()> {
         let show_decoding = st.view_loading && rl.get_time() - st.view_loading_since > 1.0;
 
         let mut d = rl.begin_drawing(&thread);
-        d.clear_background(Color::BLACK);
+        d.clear_background(BACKGROUND);
 
         if st.mode == Mode::Grid {
             // VV_BLUR_BG gimmick: the blurred background follows the
