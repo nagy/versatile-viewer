@@ -314,7 +314,11 @@ impl Grid {
                     && is_image_path(p)
             })
             .collect();
-        paths.sort_by_key(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()));
+        paths.sort_by(|a, b| {
+            // Natural order, so img2 sorts before img10.
+            let name = |p: &PathBuf| p.file_name().map(|n| n.to_string_lossy().to_lowercase());
+            natord::compare_ignore_case(&name(a).unwrap_or_default(), &name(b).unwrap_or_default())
+        });
 
         let (res_tx, res_rx) = channel::<DecodeResult>();
 
@@ -1305,5 +1309,101 @@ mod tests {
             .map(|e| e.path.file_name().unwrap().to_string_lossy().to_string())
             .collect();
         assert_eq!(names, vec!["b.png", "c.png"]);
+    }
+
+    #[test]
+    fn from_dir_sorts_naturally() {
+        // Natural order: img2 comes before img10, as in file managers.
+        let dir = TempDir::new().unwrap();
+        let dir = dir.path();
+        let png = image::DynamicImage::new_rgb8(1, 1);
+        for name in ["img10.png", "img2.png", "Img1.png"] {
+            png.save(dir.join(name)).unwrap();
+        }
+        let grid = Grid::from_dir(dir).unwrap();
+        let names: Vec<String> = grid
+            .entries
+            .iter()
+            .map(|e| e.path.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["Img1.png", "img2.png", "img10.png"]);
+    }
+
+    proptest::proptest! {
+        /// The layout always has a usable geometry: at least one column, a
+        /// positive square side, and a content height that covers every row.
+        #[test]
+        fn grid_layout_is_always_usable(
+            n in 1usize..200,
+            win_w in 1.0f32..4000.0,
+            win_h in 1.0f32..4000.0,
+            zoom in 0.0f32..8.0,
+        ) {
+            let l = grid_layout_at(n, win_w, win_h, zoom);
+            proptest::prop_assert!(l.cols >= 1, "cols {}", l.cols);
+            proptest::prop_assert!(l.cols <= n, "cols {} > n {}", l.cols, n);
+            proptest::prop_assert!(l.cell_w >= l.side && l.cell_h >= l.side);
+            let rows = n.div_ceil(l.cols);
+            proptest::prop_assert!(l.content_h >= 2.0 * MARGIN);
+            proptest::prop_assert!(l.content_h >= rows as f32 * l.cell_h);
+        }
+
+        /// At the default zoom the grid spans the widest row exactly.
+        #[test]
+        fn grid_layout_default_spans_the_window(
+            n in 1usize..60,
+            win_w in 200.0f32..3000.0,
+            win_h in 200.0f32..3000.0,
+        ) {
+            let l = grid_layout_at(n, win_w, win_h, 1.0);
+            let span_w = 2.0 * MARGIN + l.cols as f32 * l.cell_w + (l.cols - 1) as f32 * GAP;
+            proptest::prop_assert!((span_w - win_w).abs() < 0.05, "span_w {span_w} vs {win_w}");
+        }
+
+        /// A visual selection always contains the cursor, and the char mode
+        /// contains exactly the inclusive range between the anchor and the
+        /// cursor.
+        #[test]
+        fn visual_char_is_an_inclusive_range(
+            anchor in 0usize..500,
+            cursor in 0usize..500,
+            cols in 1usize..30,
+        ) {
+            let v = Visual { mode: VisualMode::Char, anchor };
+            let (lo, hi) = (anchor.min(cursor), anchor.max(cursor));
+            for i in 0..1000usize {
+                proptest::prop_assert_eq!(v.contains(i, cursor, cols), (lo..=hi).contains(&i));
+            }
+            proptest::prop_assert!(v.contains(cursor, cursor, cols));
+        }
+
+        /// A block selection covers whole rows and stays inside the column
+        /// span of the anchor and the cursor.
+        #[test]
+        fn visual_block_is_inside_its_column_span(
+            anchor in 0usize..500,
+            cursor in 0usize..500,
+            cols in 1usize..30,
+        ) {
+            let v = Visual { mode: VisualMode::Block, anchor };
+            let (c0, c1) = ((anchor % cols).min(cursor % cols), (anchor % cols).max(cursor % cols));
+            let (r0, r1) = ((anchor / cols).min(cursor / cols), (anchor / cols).max(cursor / cols));
+            for i in 0..1000usize {
+                let want = (r0..=r1).contains(&(i / cols)) && (c0..=c1).contains(&(i % cols));
+                proptest::prop_assert_eq!(v.contains(i, cursor, cols), want);
+            }
+        }
+
+        /// A selection step never leaves `0..n` and never wraps.
+        #[test]
+        fn step_selection_clamps(
+            sel in 0usize..300,
+            n in 1usize..300,
+            step in 0usize..4,
+            delta in -5i128..=5,
+        ) {
+            let out = step_selection(sel, n, step, delta);
+            proptest::prop_assert!(out < n);
+        }
     }
 }

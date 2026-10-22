@@ -20,7 +20,15 @@ The binary name is `vv`.
   Decode workers cap the buffer with `cap_texture_side` (`src/lib.rs`), so `upload_rgba` on the main thread uploads a buffer that already fits `MAX_TEXTURE_SIDE`.
   Never add a main-thread resize: a large image then freezes the window for seconds.
   Downscale a borrowed buffer with `downscale_rgba_ref`, not `downscale_rgba` on a clone.
+  All pixel resize goes through `resample_rgba` (`src/lib.rs`), the `fast_image_resize` SIMD path with Lanczos3.
+  Do not call `image::imageops::resize` for a downscale: it is several times slower.
+  Keep the `rayon` feature of `fast_image_resize` off, so a resize never spawns nested workers inside a decode job.
   `VV_TIMING=1` prints upload cost and slow frames.
+- Sort grid entries in natural order with `natord`, so `img2` comes before `img10`.
+- The streaming JXL loader memory-maps the file (`memmap2`) and feeds slices of the map to jxl-oxide.
+  A file rewritten under the map faults with SIGBUS instead of reading short data.
+- Tests: `proptest` covers the pure helpers (layout, visual selection, selection step, the resize fit, the ramp).
+  Property tests are dev-only and never gate a release build.
 - Public error types derive `derive_more::{Display, Error, From}` (feature `from` on).
   Each module owns its error enum: `src/error.rs` (`DecodeError`, `UploadError`), `src/grid.rs` (`GridError`), `src/loader.rs` (`LoadError`), `src/mcp.rs` (`SpawnError`).
   `main.rs` keeps `anyhow`.

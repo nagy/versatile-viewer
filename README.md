@@ -5,12 +5,17 @@ first-class citizen.
 
 JPEG XL decodes through [jxl-oxide], pure Rust — no libjxl C dependency —
 with progressive streaming: a blurry full-size preview appears long before
-all bytes arrive. Common formats (PNG, JPEG, WebP, GIF, BMP, TIFF, TGA)
+all bytes arrive. The stream reads from a memory map, so a large file costs
+no extra copy. Common formats (PNG, JPEG, WebP, GIF, BMP, TIFF, TGA)
 decode through the [image] crate. Thumbnails render in a directory grid
-that fills the window, decoded in parallel on a background pool.
+that fills the window, decoded in parallel on a background pool, and sorted
+in natural order (`img2` before `img10`). Every downscale, including the
+grid thumbnail, the texture cap, the progressive preview and the blurred
+background, runs through [fast_image_resize] (SIMD, Lanczos3).
 
 [jxl-oxide]: https://crates.io/crates/jxl-oxide
 [image]: https://crates.io/crates/image
+[fast_image_resize]: https://crates.io/crates/fast_image_resize
 
 ## Run
 

@@ -323,17 +323,50 @@ pub fn downscale_rgba(image: DecodedImage, long_side: LongSide) -> DecodedImage 
             data,
         };
     }
-    let scale = long_side as f32 / m as f32;
-    let nw = ((width as f32 * scale).round() as u32).max(1);
-    let nh = ((height as f32 * scale).round() as u32).max(1);
-    let img: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
-        image::ImageBuffer::from_raw(width, height, data).expect("rgba matches dimensions");
-    let small = image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle);
+    let (nw, nh) = fitted(width, height, long_side);
     DecodedImage {
         width: ImgW::new(nw),
         height: ImgH::new(nh),
-        data: small.into_raw(),
+        data: resample_rgba(&data, width, height, nw, nh),
     }
+}
+
+/// The dimensions of `width` x `height` scaled so the long side is
+/// `long_side`, with the aspect preserved and each side at least 1.
+#[must_use]
+fn fitted(width: u32, height: u32, long_side: u32) -> (u32, u32) {
+    let scale = long_side as f32 / width.max(height) as f32;
+    (
+        ((width as f32 * scale).round() as u32).max(1),
+        ((height as f32 * scale).round() as u32).max(1),
+    )
+}
+
+/// Resample an RGBA8 buffer into a `nw` x `nh` buffer with the `fast_image_resize`
+/// SIMD path (Lanczos3).
+///
+/// The function allocates the output and leaves the input alone.
+/// Call it on a decode worker, never on the main thread.
+///
+/// # Panics
+///
+/// The function panics if `rgba` does not hold exactly `w * h * 4` bytes.
+#[must_use]
+fn resample_rgba(rgba: &[u8], w: u32, h: u32, nw: u32, nh: u32) -> Vec<u8> {
+    use fast_image_resize::{
+        FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer,
+        images::{Image, ImageRef},
+    };
+    let src = ImageRef::new(w, h, rgba, PixelType::U8x4).expect("rgba buffer matches dimensions");
+    let mut dst = Image::new(nw, nh, PixelType::U8x4);
+    let options = ResizeOptions {
+        algorithm: ResizeAlg::Convolution(FilterType::Lanczos3),
+        ..Default::default()
+    };
+    Resizer::new()
+        .resize(&src, &mut dst, &options)
+        .expect("rgba buffers match their dimensions");
+    dst.into_vec()
 }
 
 /// Downscale a borrowed RGBA8 buffer, and leave the input alone.
@@ -342,7 +375,7 @@ pub fn downscale_rgba(image: DecodedImage, long_side: LongSide) -> DecodedImage 
 /// source buffer would have to clone it.
 /// The grid decodes once and needs two sizes from that decode (thumb and
 /// full), and a clone of a 100 MP buffer costs hundreds of megabytes.
-/// This function copies no input pixels: the `ImageBuffer` borrows.
+/// This function copies no input pixels: the resizer only reads.
 ///
 /// The function never upscales, and it clamps a zero dimension to 1.
 /// Below `long_side` the output is a plain copy of the input.
@@ -361,8 +394,6 @@ pub fn downscale_rgba_ref(
     let (width, height) = (width.get().max(1), height.get().max(1));
     let m = width.max(height);
     let long_side = long_side.get().max(1);
-    let img: image::ImageBuffer<image::Rgba<u8>, &[u8]> =
-        image::ImageBuffer::from_raw(width, height, rgba).expect("rgba buffer matches dimensions");
     if m <= long_side {
         return DecodedImage {
             width: ImgW::new(width),
@@ -370,14 +401,11 @@ pub fn downscale_rgba_ref(
             data: rgba.to_vec(),
         };
     }
-    let scale = long_side as f32 / m as f32;
-    let nw = ((width as f32 * scale).round() as u32).max(1);
-    let nh = ((height as f32 * scale).round() as u32).max(1);
-    let small = image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle);
+    let (nw, nh) = fitted(width, height, long_side);
     DecodedImage {
         width: ImgW::new(nw),
         height: ImgH::new(nh),
-        data: small.into_raw(),
+        data: resample_rgba(rgba, width, height, nw, nh),
     }
 }
 
@@ -434,8 +462,15 @@ pub fn upload_rgba(
     } else {
         (rgba, width, height)
     };
+    // raylib reads `width * height` RGBA pixels from the pointer.
+    // The cast checks the buffer length, so a short or ragged buffer fails
+    // here instead of reading past the end.
+    let pixels: &[[u8; 4]] = bytemuck::try_cast_slice(rgba).map_err(|_| UploadError::Buffer)?;
+    if pixels.len() < (width.get() as usize) * (height.get() as usize) {
+        return Err(UploadError::Buffer);
+    }
     let ffi_image = raylib::ffi::Image {
-        data: rgba.as_ptr() as *mut std::os::raw::c_void,
+        data: pixels.as_ptr() as *mut std::os::raw::c_void,
         width: width.get() as i32,
         height: height.get() as i32,
         mipmaps: 1,
@@ -645,5 +680,49 @@ mod tests {
         let path = dir.join("x.png");
         std::fs::write(&path, b"garbage").unwrap();
         assert!(decode_image(&path).is_err());
+    }
+
+    proptest::proptest! {
+        /// The cap never upscales, never exceeds the cap and keeps the
+        /// aspect within one pixel of rounding.
+        #[test]
+        fn cap_texture_side_invariants(w in 1u32..400, h in 1u32..400) {
+            let img = DecodedImage {
+                width: ImgW::new(w),
+                height: ImgH::new(h),
+                data: vec![0; 4 * w as usize * h as usize],
+            };
+            let out = cap_texture_side(img);
+            let (ow, oh) = (out.width.get(), out.height.get());
+            // A small image comes back untouched.
+            proptest::prop_assert!((ow, oh) == (w, h));
+            proptest::prop_assert_eq!(out.data.len(), 4 * ow as usize * oh as usize);
+        }
+
+        /// `fitted` keeps the aspect, clamps to 1 and lands the long side on
+        /// the cap.
+        #[test]
+        fn fitted_keeps_aspect(w in 1u32..20000, h in 1u32..20000, cap in 1u32..8192) {
+            // Only downscales occur in the viewer: the cap stays at or below
+            // the source long side.
+            let cap = cap.min(w.max(h)).max(1);
+            let (nw, nh) = fitted(w, h, cap);
+            proptest::prop_assert!(nw >= 1 && nh >= 1);
+            proptest::prop_assert!(nw.max(nh) <= w.max(h));
+            if w >= h {
+                proptest::prop_assert_eq!(nw, cap.min(w));
+            } else {
+                proptest::prop_assert_eq!(nh, cap.min(h));
+            }
+        }
+
+        /// The resample honors the output size and never reads past the
+        /// input buffer.
+        #[test]
+        fn resample_matches_output_size(w in 8u32..256, h in 8u32..256) {
+            let src = vec![0x5au8; 4 * w as usize * h as usize];
+            let out = resample_rgba(&src, w, h, 4, 3);
+            proptest::prop_assert_eq!(out.len(), 4 * 4 * 3);
+        }
     }
 }

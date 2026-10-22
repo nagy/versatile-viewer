@@ -25,6 +25,21 @@ raylib = "6"
 # Work pool for parallel background decodes (grid prefetch); jxl-oxide also
 # uses rayon internally for single-image decode (its default feature).
 rayon = "1"
+# SIMD image resize (the grid thumb, the texture cap, the preview and the
+# blur background).
+# Picks the best CPU extension at runtime.
+# The `rayon` feature stays off: the project runs one resize per decode
+# worker, and a nested parallel resize fights that pool for cores.
+fast_image_resize = { version = "6.1", default-features = false, features = [
+  "std",
+  "bytemuck",
+] }
+# Casts between `u8` and the typed RGBA pixel of `fast_image_resize`.
+bytemuck = "1"
+# Natural-order file name sort (img2 before img10).
+natord = "1"
+# Memory-mapped file reads for the streaming JXL loader.
+memmap2 = "0.9"
 derive_more = { version = "2.1.1", default-features = false, features = [
   "display",
   "error",
@@ -56,6 +71,7 @@ path = "src/main.rs"
 
 [dev-dependencies]
 tempfile = "3"
+proptest = "1"
 
 [lints.clippy]
 # Warning count stays at zero; pedantic is warn and burned down

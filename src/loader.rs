@@ -3,7 +3,8 @@
 //! The loader opens an image off the main thread.
 //! It streams results back over a channel.
 //! JPEG XL decodes progressively.
-//! The worker reads the file in chunks and feeds them into jxl-oxide.
+//! The worker memory-maps the file and feeds slices of the map into
+//! jxl-oxide.
 //! jxl-oxide renders a blurry full-size preview long before all bytes arrive.
 //! The worker sends the final full-quality render when decoding completes.
 //! Every other format decodes in one step.
@@ -11,6 +12,10 @@
 //! Cancellation: dropping the `Loader` sets a flag.
 //! The worker checks this flag between chunks and closes the channel.
 //! Pending sends fail then, and the worker exits.
+//!
+//! The map is a plain read-only mapping.
+//! A file rewritten under the map faults with SIGBUS instead of returning
+//! short data, so the viewer assumes the files it opens stay put.
 
 use std::{
     path::{Path, PathBuf},
@@ -61,8 +66,9 @@ fn jxl_err(e: Box<dyn std::error::Error + Send + Sync + 'static>) -> LoadError {
     LoadError::from(e)
 }
 
-/// Normal read chunk size.
-/// The size is large enough that file IO never limits the speed.
+/// Normal feed chunk size.
+/// The size is large enough that the streaming decoder never waits on the
+/// loop.
 const CHUNK: usize = 256 * 1024;
 /// Minimum time between progressive preview uploads.
 /// The main thread then gets no flood of full-size RGBA buffers.
@@ -188,9 +194,15 @@ fn stream(
         return Ok(Some(DecodeMsg::Done { image, blur }));
     }
 
-    let mut file = std::fs::File::open(path)?;
+    // Map the file instead of reading it through a buffer.
+    // The kernel pages the bytes in on demand, so a large JXL costs no user
+    // space copy and no read loop.
+    // A file that changes under the map faults (SIGBUS): the viewer reads
+    // still files from a directory that does not churn.
+    let file = std::fs::File::open(path)?;
+    let map = unsafe { memmap2::Mmap::map(&file)? };
+    let data: &[u8] = &map;
     let slow = std::env::var_os("VV_SLOW_STREAM").is_some();
-    let mut buf = vec![0u8; CHUNK];
     // `try_init` consumes the uninit image.
     // The code keeps it in an Option so the NeedMoreData branch can put it
     // back.
@@ -198,6 +210,7 @@ fn stream(
     let mut image: Option<JxlImage> = None;
     let mut last_preview: Option<Instant> = None;
     let mut dribbled = 0usize;
+    let mut offset = 0usize;
 
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -209,14 +222,16 @@ fn stream(
         // nothing.
         let dribbling = slow && last_preview.is_none() && dribbled < SLOW_DRIBBLE_MAX;
         let chunk_size = if dribbling { SLOW_CHUNK } else { CHUNK };
-        let n = read_chunk(&mut file, &mut buf[..chunk_size])?;
+        let chunk = &data[offset..(offset + chunk_size).min(data.len())];
+        let n = chunk.len();
         if n == 0 {
             break; // EOF
         }
+        offset += n;
         match &mut image {
             None => {
                 let mut u = uninit.take().expect("header state");
-                u.feed_bytes(&buf[..n]).map_err(jxl_err)?;
+                u.feed_bytes(chunk).map_err(jxl_err)?;
                 match u.try_init().map_err(jxl_err)? {
                     InitializeResult::NeedMoreData(u) => uninit = Some(u),
                     InitializeResult::Initialized(img) => {
@@ -230,7 +245,7 @@ fn stream(
                 }
             }
             Some(img) => {
-                img.feed_bytes(&buf[..n]).map_err(jxl_err)?;
+                img.feed_bytes(chunk).map_err(jxl_err)?;
             }
         }
 
@@ -282,17 +297,6 @@ fn stream(
     let image = cap_texture_side(image);
     let blur = blur_enabled.then(|| blurbg::small_blur(&image, blur_px));
     Ok(Some(DecodeMsg::Done { image, blur }))
-}
-
-/// Read up to `buf.len()` bytes.
-/// The function returns 0 at the end of the file.
-/// It makes a single read call.
-/// Regular files normally fill the whole buffer.
-/// Short reads are also correct.
-/// The next loop iteration reads more data then.
-fn read_chunk(file: &mut std::fs::File, buf: &mut [u8]) -> Result<usize, LoadError> {
-    use std::io::Read;
-    file.read(buf).map_err(LoadError::Io)
 }
 
 #[cfg(test)]

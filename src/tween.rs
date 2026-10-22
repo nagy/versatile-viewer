@@ -138,4 +138,32 @@ mod tests {
         }
         assert!((slow.tick(true, 0.0, ramp) - fast.tick(true, 0.0, ramp)).abs() < 1e-6);
     }
+
+    proptest::proptest! {
+        /// The weight stays in `0.0..=1.0` for any hold pattern and any
+        /// frame time.
+        #[test]
+        fn ramp_stays_in_range(
+            held in proptest::collection::vec(proptest::bool::ANY, 1..40),
+            dt in 0.0f32..0.2,
+            span in 0.0f32..1.0,
+        ) {
+            let ramp = RampTime::new(span);
+            let mut r = Ramp::default();
+            for &down in &held {
+                let w = r.tick(down, dt, ramp);
+                proptest::prop_assert!((0.0..=1.0).contains(&w), "weight {w}");
+            }
+        }
+
+        /// A zero ramp time reaches the cruise speed in one frame, and drops
+        /// to rest in one frame.
+        #[test]
+        fn ramp_with_zero_span_is_a_switch(dt in 0.0f32..0.5) {
+            let ramp = RampTime::new(0.0);
+            let mut r = Ramp::default();
+            proptest::prop_assert!((r.tick(true, dt, ramp) - 1.0).abs() < 1e-6);
+            proptest::prop_assert!(r.tick(false, dt, ramp) < 1e-6);
+        }
+    }
 }

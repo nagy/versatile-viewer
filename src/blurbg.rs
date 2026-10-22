@@ -20,6 +20,7 @@ use raylib::{color::Color, consts::TextureFilter, prelude::*, texture::RaylibTex
 use crate::{
     DecodedImage,
     dim::{ImgH, ImgW, LongSide, Rect, WinH, WinW},
+    downscale_rgba_ref,
 };
 
 /// Long side of the blurred background texture.
@@ -67,7 +68,7 @@ fn parse_dim(s: Option<&str>) -> f32 {
 /// Compute the tiny blurred copy of an RGBA8 image.
 ///
 /// `long_side` is the long side of the texture (`VV_BLUR_PX`, default 128).
-/// The function is cheap enough for a decode worker.
+/// The code downscales with the SIMD resampler, then blurs on the tiny image.
 /// The result holds a few KB.
 ///
 /// # Panics
@@ -111,25 +112,21 @@ fn parse_dim(s: Option<&str>) -> f32 {
 pub fn small_blur(image: &DecodedImage, long_side: LongSide) -> DecodedImage {
     let (width, height) = (image.width.get(), image.height.get());
     let long_side = long_side.get();
-    let (tw, th) = if width >= height {
-        (
-            long_side,
-            ((long_side as f32 * height as f32 / width as f32).round() as u32).max(1),
-        )
-    } else {
-        (
-            ((long_side as f32 * width as f32 / height as f32).round() as u32).max(1),
-            long_side,
-        )
-    };
-    let img: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
-        image::ImageBuffer::from_raw(width, height, image.data.clone())
-            .expect("rgba buffer matches dimensions");
-    let small = image::imageops::resize(&img, tw, th, image::imageops::FilterType::Triangle);
-    let blurred = image::imageops::blur(&small, BLUR_SIGMA);
+    // The SIMD resample reads the borrowed buffer, so the code never clones
+    // the input.
+    let small = downscale_rgba_ref(
+        &image.data,
+        ImgW::new(width),
+        ImgH::new(height),
+        LongSide::new(long_side),
+    );
+    let pixels: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
+        image::ImageBuffer::from_raw(small.width.get(), small.height.get(), small.data)
+            .expect("resampled buffer matches dims");
+    let blurred = image::imageops::blur(&pixels, BLUR_SIGMA);
     DecodedImage {
-        width: ImgW::new(tw),
-        height: ImgH::new(th),
+        width: ImgW::new(small.width.get()),
+        height: ImgH::new(small.height.get()),
         data: blurred.into_raw(),
     }
 }
