@@ -81,6 +81,17 @@ const PAN_RATE: f32 = 0.9;
 /// The ramp scales the rate down near the press and the release.
 const ZOOM_RATE: f32 = 1.65;
 
+/// The vertical travel that a held Shift+F needs to zoom by one natural-log
+/// e-fold, in window long sides.
+/// Up (a negative y delta) zooms in, and down zooms out.
+/// 1.5 suits fine aiming: a screen height of travel zooms one e-fold (2.7x),
+/// so a small drag is a small change.
+const ZOOM_DRAG_SPAN: f32 = 1.5;
+
+/// A multiplier on the Shift+F zoom rate alone.
+/// 8.0 makes a hold eight times as fast as the raw travel suggests.
+const ZOOM_DRAG_SPEED: f32 = 8.0;
+
 /// The exponential ease time constant for the on-screen pan and scale, in
 /// seconds.
 /// About 95% of the remaining difference closes after three of them.
@@ -772,9 +783,25 @@ fn main() -> Result<()> {
     let mut restore_tries = 0u32;
     // `f` held captures the pointer like a left-drag (hold = pan, cursor
     // hidden).
+    // Shift+F held zooms instead: it captures the pointer the same way, and
+    // the vertical mouse travel drives the free zoom (up zooms in, down zooms
+    // out) on the wheel's anchor path.
     // A tap (no pointer travel) runs the `f` action on release instead, so
     // the code can tell a press and a press-and-hold apart.
     let mut f_capture = false;
+    // True when the running `f` hold zooms instead of panning.
+    // A Shift at the `f` press edge starts in the zoom, and Shift going down
+    // or up mid-hold switches the mode.
+    let mut f_zoom_capture = false;
+    // Set when the running `f` hold ever zoomed, so its release runs no tap
+    // action even though a zoom hold travels the pointer no distance.
+    let mut f_zoom_tapped = false;
+    // The free-zoom drag's on-screen anchor.
+    // It starts at the grab point, and the zoom drift then walks it toward the
+    // window center, exactly like the wheel zoom's anchor.
+    // The capture keeps the pointer still, so the image point under the anchor
+    // is what slides toward the center on screen.
+    let mut f_zoom_anchor: Option<Vector2> = None;
     // The held state of the zoom keys on layouts where `+`/`-` do not sit on
     // their US keycodes.
     // The raw character events repeat at the X auto-repeat rate, so this
@@ -1132,17 +1159,45 @@ fn main() -> Result<()> {
             // The release ends it and restores the pointer to the grab point.
             // Travel marks it a hold, with no tap action.
             // Otherwise the release runs the `f` action at the grab point.
+            // Shift at the press edge makes it a zoom hold instead, and a
+            // Shift press or release mid-hold switches the mode.
+            // Both holds capture the pointer, so the travel is unbounded: the
+            // pointer keeps recentering and the motion never stops at a screen
+            // edge.
+            // The zoom anchor starts at the grab point, which the capture holds
+            // still, so the image point under it drifts toward the center on
+            // screen.
             // Auto-repeat re-fires the press edge while held, hence the
-            // `!pointer_captured` guard.
+            // `!pointer_captured && !f_capture` guard.
             let mut f_click: Option<Vector2> = None;
-            if f_key && !pointer_captured {
+            if f_key && !pointer_captured && !f_capture {
                 grab_pos = rl.get_mouse_position();
                 drag_virtual = grab_pos;
                 rl.disable_cursor();
                 pointer_captured = true;
                 f_capture = true;
+                f_zoom_capture = shift;
+                f_zoom_anchor = f_zoom_capture.then_some(grab_pos);
                 if debug {
-                    eprintln!("vv: f hold grab at ({:.0},{:.0})", grab_pos.x, grab_pos.y);
+                    eprintln!(
+                        "vv: f hold grab at ({:.0},{:.0}), zoom {}",
+                        grab_pos.x, grab_pos.y, f_zoom_capture
+                    );
+                }
+            }
+            // A Shift change mid-hold switches the pan and the zoom.
+            // The capture stays, so the travel stays unbounded.
+            if f_capture && shift != f_zoom_capture {
+                f_zoom_capture = shift;
+                // Forget the distance the tap test and the pan measured.
+                grab_pos = rl.get_mouse_position();
+                drag_virtual = grab_pos;
+                // A zoom from here on anchors at the switch point.
+                f_zoom_anchor = f_zoom_capture.then_some(grab_pos);
+                // A zoom hold never counts as a tap.
+                f_zoom_tapped = true;
+                if debug {
+                    eprintln!("vv: f hold switch, zoom {f_zoom_capture}");
                 }
             }
             // `!is_key_down` also covers a press+release landing inside one
@@ -1156,15 +1211,22 @@ fn main() -> Result<()> {
                 drag_virtual.x += delta.x;
                 drag_virtual.y += delta.y;
                 let f_dragged = (drag_virtual - grab_pos).length() > 4.0;
-                rl.enable_cursor();
-                rl.set_mouse_position(grab_pos);
-                pending_restore = Some(grab_pos);
-                restore_tries = 0;
-                pointer_captured = false;
+                if pointer_captured {
+                    rl.enable_cursor();
+                    rl.set_mouse_position(grab_pos);
+                    pending_restore = Some(grab_pos);
+                    restore_tries = 0;
+                    pointer_captured = false;
+                }
                 f_capture = false;
-                if !f_dragged {
+                // A zoom hold has no tap action: it would otherwise run the
+                // `f` fill aim on release.
+                if !f_dragged && !f_zoom_capture && !f_zoom_tapped {
                     f_click = Some(grab_pos);
                 }
+                f_zoom_capture = false;
+                f_zoom_tapped = false;
+                f_zoom_anchor = None;
                 if debug {
                     eprintln!(
                         "vv: f release: grab ({:.0},{:.0}), virtual ({:.0},{:.0}), dragged {}",
@@ -1432,6 +1494,34 @@ fn main() -> Result<()> {
                 // no leftover distance.
                 st.pan += motion.pan;
                 st.target_pan += motion.pan;
+                // A held `f` with Shift turns the vertical mouse travel into
+                // the free zoom, so the pointer replaces the wheel with one
+                // continuous rate.
+                // Up zooms in and down zooms out.
+                // The capture above keeps the pointer recentering, so the travel
+                // never stops at a screen edge, like the pan drag.
+                // The anchor starts at the grab point and then drifts toward the
+                // window center by the same rule as the wheel anchor below, so
+                // the zoom focus recenters while it runs.
+                // The step comes from this frame's travel, so a held pointer
+                // holds the scale.
+                // The wheel below still zooms with no Shift.
+                let delta = rl.get_mouse_delta();
+                let zoom_drag = f_capture && f_zoom_capture;
+                if zoom_drag {
+                    // The grab edge seeds the anchor, and the drift carries it
+                    // from frame to frame.
+                    st.zoom_anchor = Some(*f_zoom_anchor.get_or_insert(grab_pos));
+                    if delta.y != 0.0 {
+                        // One e-fold of scale per ZOOM_DRAG_SPAN of travel,
+                        // where the span scales with the window.
+                        let span = win_w.max(win_h) * ZOOM_DRAG_SPAN;
+                        let r = (-delta.y * ZOOM_DRAG_SPEED / span).exp();
+                        let base = st.zoom.free_or(fit_scale);
+                        st.zoom = ZoomMode::Free((base * r).clamp(0.01, 100.0));
+                    }
+                }
+
                 // Free zoom: the held +/- keys scale the free-zoom factor
                 // itself, with a ramped speed, so a hold zooms at a steady
                 // eased rate and a release coasts to a stop.
@@ -1447,6 +1537,9 @@ fn main() -> Result<()> {
                     // None falls back to the window center anchor.
                     st.zoom_anchor = None;
                 }
+                // The Shift+F drag rides the pointer, so its target moves
+                // every frame: the ease must stay out of its way, like the
+                // wheel step.
                 let target_scale = st.zoom.free_or(fit_scale);
 
                 // The exponential ease only carries a discrete jump (a fit
@@ -1524,18 +1617,22 @@ fn main() -> Result<()> {
                     restore_tries = 0;
                     pointer_captured = false;
                 }
-                // Any captured pointer (left-drag or held `f`) pans.
-                // The virtual deltas drive both the same way.
+                // Any captured pointer (left-drag or a held `f`) pans or zooms.
+                // The virtual cursor tracks the raw travel the same way.
+                // A Shift+F capture zooms instead: it tracks the travel and
+                // leaves the pan alone.
                 let dragging = pointer_captured;
                 if dragging {
                     let delta = rl.get_mouse_delta();
                     // The virtual cursor follows physical travel 1:1 (debug
                     // crosshair).
-                    // The pan gets the 2x speedup.
                     drag_virtual.x += delta.x;
                     drag_virtual.y += delta.y;
-                    st.target_pan.x += delta.x * 2.0;
-                    st.target_pan.y += delta.y * 2.0;
+                    // The pan gets the 2x speedup.
+                    if !f_zoom_capture {
+                        st.target_pan.x += delta.x * 2.0;
+                        st.target_pan.y += delta.y * 2.0;
+                    }
                 }
 
                 // Mouse-anchored zoom (free zoom only): while the on-screen
@@ -1545,11 +1642,18 @@ fn main() -> Result<()> {
                 // offset = center + pan, so keeping the anchor image point
                 // put gives
                 //   offset' = anchor - (anchor - offset) * (scale'/scale).
-                // Gimmick: after each frame anchor step, the image and the
-                // cursor slide TOGETHER a little toward the window center.
-                // Zooming then gently recenters while the cursor stays glued
-                // to the same image point (the image moves, the pointer rides
-                // along).
+                //
+                // A continuous zoom (the Shift+F hold) replaces its target
+                // every frame, so there is no ease to follow: the pan is
+                // solved exactly.
+                // It drifts like the wheel: after each frame anchor step, the
+                // anchor slides a little toward the window center, so the
+                // image point being zoomed into gently recenters.
+                // The pointer stays captured, so the anchor moves on screen and
+                // the image follows it, instead of the cursor riding along.
+                // The held `+`/`-` keys center the picture outright and skip the
+                // drift.
+                let continuous_zoom = f_capture && f_zoom_capture;
                 let scale = st.view_scale.unwrap();
                 if matches!(st.zoom, ZoomMode::Free(_))
                     && let Some(s_old) = prev_scale
@@ -1568,10 +1672,16 @@ fn main() -> Result<()> {
                     let oy = ay - (ay - (win_h - st.img_h * s_old) / 2.0 - st.pan.y) * r;
                     let new_x = ox - (win_w - st.img_w * scale) / 2.0;
                     let new_y = oy - (win_h - st.img_h * scale) / 2.0;
-                    // The drift shares the exponential time constant of the
-                    // ease: by the time the scale covers its remaining
-                    // distance, the pair covers ZOOM_ANCHOR_DRIFT of its own.
-                    let d = (center - a) * (alpha * ZOOM_ANCHOR_DRIFT);
+                    // A held key zoom skips the drift: it centers anyway.
+                    let d = if held_zoom {
+                        Vector2::ZERO
+                    } else {
+                        // The drift shares the exponential time constant of
+                        // the ease: by the time the scale covers its remaining
+                        // distance, the pair covers ZOOM_ANCHOR_DRIFT of its
+                        // own.
+                        (center - a) * (alpha * ZOOM_ANCHOR_DRIFT)
+                    };
                     // Move the pan and its target by the same amount.
                     // The anchor then holds without discarding the offset a
                     // held pan key added this frame.
@@ -1583,11 +1693,18 @@ fn main() -> Result<()> {
                     st.target_pan.y += dy;
                     if !keyboard_zoom {
                         st.zoom_anchor = Some(a + d);
+                        if continuous_zoom {
+                            // The drag anchor carries the drift into the next
+                            // frame.
+                            f_zoom_anchor = st.zoom_anchor;
+                        }
                     }
                     // Ride the pointer along with the drifted image point
                     // (never while a drag has it captured, and keyboard zoom
                     // leaves the cursor wherever it is).
-                    if !keyboard_zoom && !pointer_captured {
+                    // A continuous zoom keeps the pointer captured instead,
+                    // so this never runs for it.
+                    if d != Vector2::ZERO && !keyboard_zoom && !pointer_captured {
                         if debug {
                             eprintln!("vv: zoom drift anchor to ({ax:.0},{ay:.0})");
                         }

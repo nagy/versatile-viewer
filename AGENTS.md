@@ -58,6 +58,14 @@ Run `nix run . -- <image-path-or-directory>`.
 ESC never quits.
 
 - Keys: see the README table.
+- `Shift+F` hold turns vertical mouse travel into the free zoom (`ZOOM_DRAG_SPAN` in `main.rs`).
+  Up zooms in, down zooms out.
+  The hold captures the pointer like the `f` pan drag, so the travel is unbounded and the motion never stops at a screen edge.
+  The zoom anchor starts at the grab point and then drifts toward the window center by the wheel rule (`ZOOM_ANCHOR_DRIFT`), so the image point being zoomed into recenters.
+  The capture holds the pointer still, so the anchor slides on screen and the image follows it.
+  `ZOOM_DRAG_SPEED` scales the rate (now 8x).
+  Shift going down or up mid-hold switches the `f` pan drag over to the zoom and back.
+  Plain `f` hold keeps the pan drag.
 - Mouse side buttons step next / previous in image view, like `n` / `p` (`read_nav_mouse` in `main.rs`).
 - Env vars `VV_DEBUG`, `VV_TIMING`, `VV_SLOW_STREAM`, `VV_BLUR_BG`, `VV_BG_DIM`, `VV_BLUR_PX`: see the README table.
 - Window title uses en-dash separators: `<file> – <dir> – versatile-viewer`.

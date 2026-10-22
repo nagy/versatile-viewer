@@ -59,6 +59,8 @@ because stdout carries protocol frames only.
 |`t`                  |—                           |toggle fit-all / fill          |
 |`a`                  |—                           |toggle smooth / pixelated filter|
 |`f`                  |open cell under cursor      |fill-zoom at cursor / zoom out / back to grid (hold: pan)|
+|`Shift+f` (hold)     |—                           |free zoom by mouse travel: up zooms in, down zooms out (continuous)|
+|`f` then `Shift`     |—                           |while `f` is held, Shift switches the pan drag over to the free zoom|
 |`v` / `V` / `Ctrl+v` |visual selection: charwise / linewise / blockwise|—                       |
 |`o`                  |swap visual anchor and cursor|—                             |
 |`+` / `-`            |zoom thumbnails             |free zoom (hold: eased ramp)   |
