@@ -82,6 +82,9 @@ Both views share it, so the letterbox bars and the grid gaps match.
   The capture holds the pointer still, so the anchor slides on screen and the image follows it.
   `ZOOM_DRAG_SPEED` scales the rate (now 8x).
   Shift going down or up mid-hold switches the `f` pan drag over to the zoom and back.
+  The switch anchors at the window center, which is the image point the window shows at its middle.
+  The pointer is hidden, and a pan just pushed its last screen spot away from the middle, so that spot cannot name what the user looks at.
+  A center anchor skips the drift, because the drift can only move it away from the middle.
   Plain `f` hold keeps the pan drag.
 - Mouse side buttons step next / previous in image view, like `n` / `p` (`read_nav_mouse` in `main.rs`).
 - Env vars `VV_DEBUG`, `VV_TIMING`, `VV_SLOW_STREAM`, `VV_BLUR_BG`, `VV_BG_DIM`, `VV_BLUR_PX`: see the README table.

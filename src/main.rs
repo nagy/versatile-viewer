@@ -802,10 +802,13 @@ fn main() -> Result<()> {
     // action even though a zoom hold travels the pointer no distance.
     let mut f_zoom_tapped = false;
     // The free-zoom drag's on-screen anchor.
-    // It starts at the grab point, and the zoom drift then walks it toward the
-    // window center, exactly like the wheel zoom's anchor.
+    // A zoom hold that starts with Shift at the grab point anchors there, and
+    // the zoom drift then walks it toward the window center, exactly like the
+    // wheel zoom's anchor.
     // The capture keeps the pointer still, so the image point under the anchor
     // is what slides toward the center on screen.
+    // A switch from the pan hold anchors at the window center instead (see
+    // the switch below).
     let mut f_zoom_anchor: Option<Vector2> = None;
     // The held state of the zoom keys on layouts where `+`/`-` do not sit on
     // their US keycodes.
@@ -1197,8 +1200,17 @@ fn main() -> Result<()> {
                 // Forget the distance the tap test and the pan measured.
                 grab_pos = rl.get_mouse_position();
                 drag_virtual = grab_pos;
-                // A zoom from here on anchors at the switch point.
-                f_zoom_anchor = f_zoom_capture.then_some(grab_pos);
+                // A zoom from here on anchors on the view center: the image
+                // point the window shows at its middle.
+                // The pointer is hidden, so its last screen spot says nothing
+                // about what the user looks at, and a pan had just pushed that
+                // spot away from the middle.
+                // The anchor is the middle of the window, so the ease needs no
+                // drift toward it.
+                f_zoom_anchor = f_zoom_capture.then_some(Vector2 {
+                    x: win_w / 2.0,
+                    y: win_h / 2.0,
+                });
                 // A zoom hold never counts as a tap.
                 f_zoom_tapped = true;
                 if debug {
@@ -1671,6 +1683,8 @@ fn main() -> Result<()> {
                 // the image follows it, instead of the cursor riding along.
                 // The held `+`/`-` keys center the picture outright and skip the
                 // drift.
+                // A zoom hold that starts at the window center needs no drift
+                // either: its anchor already sits there.
                 let continuous_zoom = f_capture && f_zoom_capture;
                 let scale = st.view_scale.unwrap();
                 if matches!(st.zoom, ZoomMode::Free(_))
@@ -1682,16 +1696,20 @@ fn main() -> Result<()> {
                         x: win_w / 2.0,
                         y: win_h / 2.0,
                     };
-                    let a = st.zoom_anchor.unwrap_or(center);
+                    let anchor = st.zoom_anchor;
+                    let a = anchor.unwrap_or(center);
                     let (ax, ay) = (a.x, a.y);
-                    let keyboard_zoom = st.zoom_anchor.is_none();
+                    let keyboard_zoom = anchor.is_none();
                     let r = scale / s_old;
                     let ox = ax - (ax - (win_w - st.img_w * s_old) / 2.0 - st.pan.x) * r;
                     let oy = ay - (ay - (win_h - st.img_h * s_old) / 2.0 - st.pan.y) * r;
                     let new_x = ox - (win_w - st.img_w * scale) / 2.0;
                     let new_y = oy - (win_h - st.img_h * scale) / 2.0;
                     // A held key zoom skips the drift: it centers anyway.
-                    let d = if held_zoom {
+                    // So does an anchor that already sits at the window
+                    // center: the drift can only move it away from there.
+                    let centered = a == center;
+                    let d = if held_zoom || centered {
                         Vector2::ZERO
                     } else {
                         // The drift shares the exponential time constant of
