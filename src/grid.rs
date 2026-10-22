@@ -3,6 +3,12 @@
 //! thumbnail sizes of nsxiv.
 //! A white border marks the selection.
 //!
+//! The grid has a Vim-style visual selection (see [`Visual`]).
+//! `v` selects charwise, `V` linewise, and `Ctrl+v` blockwise.
+//! The same key toggles its mode off, `o` swaps the anchor and the cursor,
+//! and ESC clears the selection.
+//! Every selected cell draws the same white border as the cursor.
+//!
 //! +/- zoom the thumbnails (the same 25% steps as the image-view free zoom).
 //! The default zoom fills the window exactly with the largest possible square
 //! thumbs.
@@ -101,6 +107,77 @@ struct DecodeOk {
     blur: Option<DecodedImage>,
     /// The untouched full-resolution image.
     full: DecodedImage,
+}
+
+/// The three Vim visual selection styles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VisualMode {
+    /// A contiguous index range from the anchor to the cursor.
+    Char,
+    /// Every whole grid row from the anchor row to the cursor row.
+    Line,
+    /// The rectangle spanned by the anchor column and the cursor column.
+    Block,
+}
+
+/// The grid visual selection, in the style of Vim.
+///
+/// The code stores the anchor index and derives the selected set from the
+/// current layout every frame.
+/// A window resize or a +/- zoom therefore reflows the selection, exactly
+/// like Vim reflowing a wrapped selection.
+#[derive(Debug, Clone, Copy)]
+struct Visual {
+    mode: VisualMode,
+    /// The index where the selection started.
+    anchor: usize,
+}
+
+impl Visual {
+    /// The selection after a visual key press for `mode` at `cursor`.
+    ///
+    /// A press for the active mode ends the selection, as in Vim.
+    /// A press for another mode keeps the anchor, so `v` on row 1 then down
+    /// two rows then `V` selects rows 1..=3.
+    /// With no active selection the press starts one at `cursor`.
+    #[must_use]
+    fn pressed(current: Option<Self>, mode: VisualMode, cursor: usize) -> Option<Self> {
+        match current {
+            Some(v) if v.mode == mode => None,
+            Some(v) => Some(Visual {
+                mode,
+                anchor: v.anchor,
+            }),
+            None => Some(Visual {
+                mode,
+                anchor: cursor,
+            }),
+        }
+    }
+
+    /// Is entry `i` inside the selection, with the cursor at `cursor`?
+    /// `cols` is the current column count, which decides rows and columns.
+    #[must_use]
+    fn contains(self, i: usize, cursor: usize, cols: usize) -> bool {
+        let (anchor, cursor) = (self.anchor, cursor);
+        let (lo, hi) = (anchor.min(cursor), anchor.max(cursor));
+        match self.mode {
+            VisualMode::Char => (lo..=hi).contains(&i),
+            VisualMode::Line => {
+                let (first, last) = (lo / cols, hi / cols);
+                (first..=last).contains(&(i / cols))
+            }
+            VisualMode::Block => {
+                let (first_row, last_row) = (lo / cols, hi / cols);
+                let (first_col, last_col) = (
+                    (anchor % cols).min(cursor % cols),
+                    (anchor % cols).max(cursor % cols),
+                );
+                (first_row..=last_row).contains(&(i / cols))
+                    && (first_col..=last_col).contains(&(i % cols))
+            }
+        }
+    }
 }
 
 /// Why the grid could not open a directory.
@@ -206,6 +283,8 @@ pub struct Grid {
     /// The vertical scroll offset, used only when zoomed in past the exact
     /// fill.
     scroll: f32,
+    /// The active Vim-style visual selection, if any.
+    visual: Option<Visual>,
     /// The cached layout, keyed by (entry count, window size, zoom).
     /// The code recomputes it only when one of those changes, because the
     /// layout math is O(n).
@@ -257,6 +336,7 @@ impl Grid {
                 })
                 .collect(),
             selected: 0,
+            visual: None,
             result_tx: res_tx,
             result_rx: res_rx,
             inflight: 0,
@@ -550,12 +630,19 @@ impl Grid {
     /// held at the X server rate (xset r rate).
     /// g/G jump to the first or last image.
     /// Enter opens the selected image and q quits.
-    /// ESC does nothing here, because the grid is the home view.
+    /// `v`, `V`, and `Ctrl+v` start (or stop) the charwise, linewise, and
+    /// blockwise visual selection at the current cell.
+    /// A press for another mode keeps the anchor, so the line selection
+    /// covers every row from the anchor row to the cursor row.
+    /// `o` swaps the anchor and the cursor, as in Vim.
+    /// ESC clears the visual selection, and stays inert when there is none,
+    /// because the grid is the home view.
     /// `step` scales one press: Shift passes
     /// [`crate::SHIFT_SPEED_MULTIPLIER`], so the selection jumps that many
     /// cells.
     ///
     /// `None` means no action this frame.
+    //
     // One frame input pipeline (queue drain, repeat, zoom, scroll,
     // navigation, mouse) is intentionally linear.
     // See main() too.
@@ -590,10 +677,32 @@ impl Grid {
         let mut zoom_in = false;
         let mut zoom_out = false;
         let mut open_at_cursor = false;
+        let mut escape = false;
+        let mut start_visual: Option<VisualMode> = None;
+        let mut swap_ends = false;
         while let Some(k) = rl.get_key_pressed() {
             match k {
                 KeyboardKey::KEY_ENTER | KeyboardKey::KEY_KP_ENTER => enter = true,
                 KeyboardKey::KEY_Q => quit = true,
+                KeyboardKey::KEY_ESCAPE => escape = true,
+                KeyboardKey::KEY_V => {
+                    // Vim: `v` charwise, `V` linewise, `Ctrl+v` blockwise.
+                    // The same key again ends the visual selection, and a
+                    // different key switches its mode in place.
+                    let mode = if rl.is_key_down(KeyboardKey::KEY_LEFT_CONTROL)
+                        || rl.is_key_down(KeyboardKey::KEY_RIGHT_CONTROL)
+                    {
+                        VisualMode::Block
+                    } else if rl.is_key_down(KeyboardKey::KEY_LEFT_SHIFT)
+                        || rl.is_key_down(KeyboardKey::KEY_RIGHT_SHIFT)
+                    {
+                        VisualMode::Line
+                    } else {
+                        VisualMode::Char
+                    };
+                    start_visual = Some(mode);
+                }
+                KeyboardKey::KEY_O => swap_ends = true,
                 KeyboardKey::KEY_F => open_at_cursor = true,
                 KeyboardKey::KEY_H | KeyboardKey::KEY_LEFT => left = true,
                 KeyboardKey::KEY_L | KeyboardKey::KEY_RIGHT => right = true,
@@ -654,6 +763,14 @@ impl Grid {
         // Zooming in overflows the window vertically and enables scrolling.
         let n = self.entries.len();
         let mut follow = false;
+        if let Some(mode) = start_visual {
+            self.visual = Visual::pressed(self.visual, mode, self.selected);
+        }
+        if escape && self.visual.is_some() {
+            self.visual = None;
+            // Consume the frame: ESC only clears the selection here.
+            return None;
+        }
         if zoom_in || zoom_out {
             let aw = (win_w - 2.0 * MARGIN).max(1.0);
             let ah = (win_h - 2.0 * MARGIN).max(1.0);
@@ -706,6 +823,11 @@ impl Grid {
             sel = n - 1;
         }
         self.selected = sel;
+        // `o` swaps the anchor and the cursor, so the far end keeps growing
+        // the selection, as in Vim.
+        if swap_ends && let Some(v) = self.visual.as_mut() {
+            v.anchor = std::mem::replace(&mut self.selected, v.anchor);
+        }
         // Keep the selection on screen after it moved or the layout changed
         // under it (+/- zoom).
         // The code leaves manual wheel scrolling untouched.
@@ -780,6 +902,7 @@ impl Grid {
         }
         let l = self.layout(win.0, win.1);
         let (cols, cw, ch, side) = (l.cols, l.cell_w, l.cell_h, l.side);
+        let visual = self.visual;
         for (i, e) in self.entries.iter().enumerate() {
             let col = i % cols;
             let row = i / cols;
@@ -826,7 +949,7 @@ impl Grid {
                 // Still decoding: placeholder square.
                 d.draw_rectangle_rec(thumb, Color::new(28, 28, 28, 255));
             }
-            if i == self.selected {
+            if i == self.selected || visual.is_some_and(|v| v.contains(i, self.selected, cols)) {
                 d.draw_rectangle_lines_ex(thumb, 4.0, Color::WHITE);
             }
         }
@@ -1062,6 +1185,73 @@ mod tests {
     fn grid_layout_side_is_square_of_cell_minimum() {
         let l = grid_layout_at(7, 1200.0, 700.0, 1.0);
         assert_eq!(l.side, l.cell_w.min(l.cell_h));
+    }
+
+    #[test]
+    fn visual_mode_switch_keeps_the_anchor() {
+        // 3x3 grid: start charwise on row 0, move the cursor two rows down,
+        // then press V. The line selection must cover rows 0..=2.
+        let v = Visual::pressed(None, VisualMode::Char, 1).unwrap();
+        let v = Visual::pressed(Some(v), VisualMode::Line, 7).unwrap();
+        assert_eq!(v.anchor, 1);
+        assert_eq!(v.mode, VisualMode::Line);
+        let picked: Vec<usize> = (0..9).filter(|&i| v.contains(i, 7, 3)).collect();
+        assert_eq!(picked, (0..9).collect::<Vec<_>>());
+        // The same mode again ends the selection.
+        assert!(Visual::pressed(Some(v), VisualMode::Line, 7).is_none());
+    }
+
+    #[test]
+    fn visual_char_selects_a_contiguous_range() {
+        let v = Visual {
+            mode: VisualMode::Char,
+            anchor: 4,
+        };
+        // 3x3 grid: cursor below and to the right of the anchor.
+        let picked: Vec<usize> = (0..9).filter(|&i| v.contains(i, 7, 3)).collect();
+        assert_eq!(picked, vec![4, 5, 6, 7]);
+        // The range works in both directions.
+        let picked: Vec<usize> = (0..9).filter(|&i| v.contains(i, 2, 3)).collect();
+        assert_eq!(picked, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn visual_line_selects_whole_rows() {
+        let v = Visual {
+            mode: VisualMode::Line,
+            anchor: 4,
+        };
+        // 3x3 grid: rows 1..=2, every column.
+        let picked: Vec<usize> = (0..9).filter(|&i| v.contains(i, 6, 3)).collect();
+        assert_eq!(picked, vec![3, 4, 5, 6, 7, 8]);
+        // The cursor in the same row selects that row only.
+        let picked: Vec<usize> = (0..9).filter(|&i| v.contains(i, 3, 3)).collect();
+        assert_eq!(picked, vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn visual_block_selects_a_rectangle() {
+        let v = Visual {
+            mode: VisualMode::Block,
+            anchor: 1,
+        };
+        // 3x3 grid: anchor column 1, cursor column 2, rows 0..=2.
+        let picked: Vec<usize> = (0..9).filter(|&i| v.contains(i, 8, 3)).collect();
+        assert_eq!(picked, vec![1, 2, 4, 5, 7, 8]);
+        // A narrower block over two rows.
+        let picked: Vec<usize> = (0..9).filter(|&i| v.contains(i, 4, 3)).collect();
+        assert_eq!(picked, vec![1, 4]);
+    }
+
+    #[test]
+    fn visual_block_clamps_the_last_partial_row() {
+        // 5 entries in a 3-column grid: the last row holds 2 cells.
+        let v = Visual {
+            mode: VisualMode::Block,
+            anchor: 1,
+        };
+        let picked: Vec<usize> = (0..5).filter(|&i| v.contains(i, 4, 3)).collect();
+        assert_eq!(picked, vec![1, 4]);
     }
 
     #[test]

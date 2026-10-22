@@ -48,7 +48,7 @@ because stdout carries protocol frames only.
 |key                  |grid view                   |image view                     |
 |---------------------|----------------------------|-------------------------------|
 |`q`                  |quit                        |quit                           |
-|`Enter` / `Esc`      |open selection / —          |return to grid / (inert alone) |
+|`Enter` / `Esc`      |open selection / clear visual selection|return to grid / (inert alone) |
 |`h j k l` / arrows   |move selection (auto-repeat)|pan (hold: eased speed ramp)   |
 |`Shift+h/j/k/l`      |move selection, double step |pan and free zoom, double speed|
 |`Space` / `Backspace`|—                           |next / previous image          |
@@ -59,6 +59,8 @@ because stdout carries protocol frames only.
 |`t`                  |—                           |toggle fit-all / fill          |
 |`a`                  |—                           |toggle smooth / pixelated filter|
 |`f`                  |open cell under cursor      |fill-zoom at cursor / zoom out / back to grid (hold: pan)|
+|`v` / `V` / `Ctrl+v` |visual selection: charwise / linewise / blockwise|—                       |
+|`o`                  |swap visual anchor and cursor|—                             |
 |`+` / `-`            |zoom thumbnails             |free zoom (hold: eased ramp)   |
 |mouse wheel          |scroll (when zoomed in)     |free zoom (25% steps, anchored)|
 |mouse side buttons   |—                           |next / previous image          |
