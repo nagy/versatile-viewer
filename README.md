@@ -64,6 +64,7 @@ because stdout carries protocol frames only.
 |`v` / `V` / `Ctrl+v` |visual selection: charwise / linewise / blockwise|—                       |
 |`o`                  |swap visual anchor and cursor|—                             |
 |`+` / `-`            |zoom thumbnails             |free zoom (hold: eased ramp)   |
+|`Ctrl+j` / `Ctrl+k`  |move selection              |free zoom in / out (hold: eased ramp)|
 |mouse wheel          |scroll (when zoomed in)     |free zoom (25% steps, anchored)|
 |mouse side buttons   |—                           |next / previous image          |
 |left-drag            |—                           |pan                            |

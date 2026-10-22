@@ -43,6 +43,9 @@ The binary name is `vv`.
 - Read the held state of a key that no `KeyboardKey` names by learning its keycode.
   `src/zoomkeys.rs` pairs a typed `+`/`-` with the key that went down in the same frame, then the code polls that keycode.
   The X server repeats only the key that went down last, so a time window cannot stand in for the held state.
+- The image view zooms with `+`/`-` and with `Ctrl+j`/`Ctrl+k` (in, out), all as held states.
+  A held Ctrl turns the pan keys into zoom keys, so it guards the pan flags of `NavKeys`.
+  The grid keeps `Ctrl+j`/`Ctrl+k` as plain selection moves.
 - The grid has a Vim-style visual selection, `Visual` in `src/grid.rs`.
   It stores one mode (`Char`, `Line`, `Block`) and one anchor index.
   The selected set derives from the anchor, the cursor, and the current column count, so a resize or zoom reflows it.

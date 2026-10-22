@@ -1466,13 +1466,22 @@ fn main() -> Result<()> {
                 // The code reads input before begin_drawing borrows rl
                 // mutably.
                 let dt = rl.get_frame_time();
+                // Ctrl + j/k zoom like `+`/`-` (Ctrl + Shift + j/k keeps
+                // the Shift speed).
+                // `j` and `k` also pan, so a held Ctrl turns them into zoom
+                // keys instead of pan keys.
+                let ctrl = rl.is_key_down(KeyboardKey::KEY_LEFT_CONTROL)
+                    || rl.is_key_down(KeyboardKey::KEY_RIGHT_CONTROL);
+                let ctrl_zoom_in = ctrl && rl.is_key_down(KeyboardKey::KEY_J);
+                let ctrl_zoom_out = ctrl && rl.is_key_down(KeyboardKey::KEY_K);
                 let nav = NavKeys {
                     left: rl.is_key_down(KeyboardKey::KEY_H)
                         || rl.is_key_down(KeyboardKey::KEY_LEFT),
                     right: rl.is_key_down(KeyboardKey::KEY_L)
                         || rl.is_key_down(KeyboardKey::KEY_RIGHT),
-                    up: rl.is_key_down(KeyboardKey::KEY_K) || rl.is_key_down(KeyboardKey::KEY_UP),
-                    down: rl.is_key_down(KeyboardKey::KEY_J)
+                    up: (rl.is_key_down(KeyboardKey::KEY_K) && !ctrl_zoom_out)
+                        || rl.is_key_down(KeyboardKey::KEY_UP),
+                    down: (rl.is_key_down(KeyboardKey::KEY_J) && !ctrl_zoom_in)
                         || rl.is_key_down(KeyboardKey::KEY_DOWN),
                     // US layouts put the zoom keys on the `=` and `-`
                     // keycodes (numpad included).
@@ -1480,11 +1489,15 @@ fn main() -> Result<()> {
                     // the typed character taught earlier.
                     // Polling that keycode reads the real held state, so a
                     // second key going down does not stop the zoom.
+                    // Ctrl + j/k join them as a hold, so the ramp eases the
+                    // same way.
                     zoom_in: rl.is_key_down(KeyboardKey::KEY_EQUAL)
                         || rl.is_key_down(KeyboardKey::KEY_KP_ADD)
+                        || ctrl_zoom_in
                         || zoom_keys.zoom_in_key().is_some_and(|k| rl.is_key_down(k)),
                     zoom_out: rl.is_key_down(KeyboardKey::KEY_MINUS)
                         || rl.is_key_down(KeyboardKey::KEY_KP_SUBTRACT)
+                        || ctrl_zoom_out
                         || zoom_keys.zoom_out_key().is_some_and(|k| rl.is_key_down(k)),
                 };
                 // The pan cruise speed scales with the window, so the motion
