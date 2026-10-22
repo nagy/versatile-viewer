@@ -11,7 +11,13 @@ decode through the [image] crate. Thumbnails render in a directory grid
 that fills the window, decoded in parallel on a background pool, and sorted
 in natural order (`img2` before `img10`). Every downscale, including the
 grid thumbnail, the texture cap, the progressive preview and the blurred
-background, runs through [fast_image_resize] (SIMD, Lanczos3).
+background, runs through [fast_image_resize] (SIMD, Lanczos3). The grid
+thumbnails cache in `$XDG_CACHE_HOME/vv/thumbnails/`, so a second launch of a
+directory fills the grid from the cache without a decode. The cached thumbnail
+is 512 px, so a warm cell is softer than a fresh one until the full-resolution
+decode catches up. The cache keeps its entries after the viewer exits, so the
+next launch starts warm. A stale entry re-decodes, and a deleted image leaves
+its thumbnail to the user.
 
 [jxl-oxide]: https://crates.io/crates/jxl-oxide
 [image]: https://crates.io/crates/image
@@ -87,6 +93,7 @@ because stdout carries protocol frames only.
 |`VV_BLUR_BG=1`    |image-view background is a tiny blurred copy of the viewed image       |
 |`VV_BG_DIM=0..1`  |brightness of the blurred background (default 0.6)                     |
 |`VV_BLUR_PX=<n>`  |long side of the blur texture, 8..=1024 (default 128; fewer = blurrier)|
+|`VV_CACHE=0`      |do not read or write the thumbnail cache under `$XDG_CACHE_HOME`      |
 
 ## Development
 

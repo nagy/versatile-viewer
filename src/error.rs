@@ -11,6 +11,11 @@ pub enum DecodeError {
     /// The file could not be opened.
     #[display("failed to open file")]
     Open(std::io::Error),
+    /// The thumbnail cache could not serve or take the thumbnail.
+    /// A decode that reached this point already produced the pixels, so the
+    /// grid shows them and the cache only misses.
+    #[display("thumbnail cache: {_0}")]
+    Cache(#[from] crate::thumbcache::CacheError),
     /// The JPEG XL decoder rejected the bytes.
     #[display("jxl-oxide: {_0}")]
     Jxl(

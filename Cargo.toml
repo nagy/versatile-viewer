@@ -59,6 +59,11 @@ tokio = { version = "1", default-features = false, features = [
 ] }
 # The MCP tool schemas and the tool results.
 serde_json = "1"
+# The thumbnail cache directory.
+# `get_cache_home` resolves $XDG_CACHE_HOME, and falls back to `~/.cache`.
+xdg = "3"
+# The thumbnail cache file name: SHA-256 of the canonical image path.
+sha2 = "0.10"
 
 # X11 WM_CLASS setup (XSetClassHint); Linux only, links the same libX11
 # raylib's X11 backend already pulls in.

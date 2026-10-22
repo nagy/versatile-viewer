@@ -34,7 +34,10 @@ use std::{
     cell::RefCell,
     collections::HashSet,
     path::{Path, PathBuf},
-    sync::mpsc::{Receiver, Sender, channel},
+    sync::{
+        Arc,
+        mpsc::{Receiver, Sender, channel},
+    },
 };
 
 use derive_more::{Display, Error, From};
@@ -45,6 +48,7 @@ use crate::{
     blurbg::{self},
     dim::{ImgH, ImgW, LongSide, Rect, WinH, WinW},
     error::DecodeError,
+    thumbcache::Cache,
 };
 
 const MARGIN: f32 = 8.0;
@@ -81,6 +85,15 @@ fn max_inflight() -> usize {
 /// The thumbnail must cover the whole image, not only its center square.
 const THUMB_LONG_SIDE: LongSide = LongSide::new(1024);
 
+/// Long side of the thumbnail the cache keeps on disk.
+/// A cached entry is smaller than [`THUMB_LONG_SIDE`], so a warm cache shows a
+/// softer cell than a fresh decode: the GPU scales the 512 px texture up in a
+/// large cell.
+/// The trade suits a disk cache: a 512 px thumb is a few hundred kilobytes per
+/// file.
+/// Bump it with the `thumbcache` format version when the size changes.
+const CACHE_LONG_SIDE: LongSide = LongSide::new(512);
+
 /// A finished background decode, matched to an entry by its unique id.
 /// Indices shift when entries come and go.
 /// Ids never shift.
@@ -103,10 +116,33 @@ struct DecodeOk {
     /// The whole image with the aspect preserved, long side
     /// [`THUMB_LONG_SIDE`].
     thumb: DecodedImage,
+    /// The source dimensions, as a decode capped at
+    /// [`crate::MAX_TEXTURE_SIDE`] reports them.
+    /// The entry keeps them as the image size, not the thumb size, so the
+    /// image view fits and zooms the picture, not its thumbnail.
+    image: (ImgW, ImgH),
     /// The tiny blurred copy for the `VV_BLUR_BG` gimmick (None when off).
     blur: Option<DecodedImage>,
     /// The untouched full-resolution image.
-    full: DecodedImage,
+    /// The cache hit path sets it to None, because the entry needs only the
+    /// thumbnail.
+    full: Option<DecodedImage>,
+}
+
+/// A decode job for one entry, as the worker sees it.
+/// The worker reads the cache first and decodes on a miss.
+#[derive(Debug, Clone)]
+struct Job {
+    id: u64,
+    path: PathBuf,
+    /// The job must return the full-resolution image, because the entry holds
+    /// a full-res texture: it belongs to the keep set (the selection or open
+    /// entry and its prefetched neighbors).
+    /// A thumb-only job decodes outside that set.
+    want_full: bool,
+    /// The `VV_BLUR_BG` gimmick settings, read once by the grid.
+    blur_enabled: bool,
+    blur_px: LongSide,
 }
 
 /// The three Vim visual selection styles.
@@ -295,6 +331,57 @@ pub struct Grid {
     /// this texture long side.
     blur_enabled: bool,
     blur_px: LongSide,
+    /// The thumbnail cache, shared with every decode worker.
+    cache: Arc<Cache>,
+}
+
+/// Run one decode job on a worker: the cache first, the file on a miss.
+fn run_job(job: &Job, cache: &Cache) -> Result<DecodeOk, DecodeError> {
+    // A miss is normal and stays silent, because the first launch of a
+    // directory misses once per file.
+    if !job.want_full
+        && let Some(hit) = cache.load(&job.path, CACHE_LONG_SIDE).ok()
+    {
+        // The cached thumb already sits below [`THUMB_LONG_SIDE`], so the
+        // code uploads it as is and the GPU scales it in the cell.
+        // A resample here would copy the buffer for nothing.
+        let blur = job
+            .blur_enabled
+            .then(|| blurbg::small_blur(&hit.thumb, job.blur_px));
+        return Ok(DecodeOk {
+            thumb: hit.thumb,
+            image: hit.image,
+            blur,
+            full: None,
+        });
+    }
+    let full = crate::decode_image(&job.path)?;
+    let blur = job
+        .blur_enabled
+        .then(|| blurbg::small_blur(&full, job.blur_px));
+    // Borrow the decoded buffer for the thumb: a clone of a large image costs
+    // hundreds of megabytes.
+    let thumb = crate::downscale_rgba_ref(&full.data, full.width, full.height, THUMB_LONG_SIDE);
+    store_thumb(cache, job, &thumb, full.width, full.height);
+    let image = (full.width, full.height);
+    // The keep-set refill is the only job that carries the full image to the
+    // main thread; otherwise the large buffer drops here.
+    let full = job.want_full.then_some(full);
+    Ok(DecodeOk {
+        thumb,
+        image,
+        blur,
+        full,
+    })
+}
+
+/// Put the thumbnail of a fresh decode into the cache.
+/// A cache failure stays silent: the grid already holds the thumbnail, and a
+/// missing cache home is a normal setup.
+fn store_thumb(cache: &Cache, job: &Job, thumb: &DecodedImage, width: ImgW, height: ImgH) {
+    // One resize for the disk copy: the runtime thumb stays at full quality.
+    let cached = crate::downscale_rgba_ref(&thumb.data, thumb.width, thumb.height, CACHE_LONG_SIDE);
+    let _ = cache.store(&job.path, CACHE_LONG_SIDE, &cached, (width, height));
 }
 
 impl Grid {
@@ -350,6 +437,7 @@ impl Grid {
             scroll: 0.0,
             blur_enabled: blurbg::enabled(),
             blur_px: blurbg::blur_px(),
+            cache: Arc::new(Cache::new()),
         })
     }
 
@@ -402,16 +490,23 @@ impl Grid {
             };
             match res.res {
                 Ok(ok) if self.entries[i].texture.is_none() => {
-                    let DecodeOk { thumb, blur, full } = ok;
+                    let DecodeOk {
+                        thumb,
+                        image,
+                        blur,
+                        full,
+                    } = ok;
                     match crate::upload_rgba(rl, thread, &thumb.data, thumb.width, thumb.height) {
-                        Ok(t) => {
+                        Ok(tex) => {
                             let e = &mut self.entries[i];
-                            e.width = full.width;
-                            e.height = full.height;
-                            e.texture = Some(t);
+                            e.texture = Some(tex);
+                            e.width = image.0;
+                            e.height = image.1;
                             e.blur = blur;
                             e.queued = false;
-                            if keep.contains(&e.id) {
+                            if keep.contains(&e.id)
+                                && let Some(full) = full
+                            {
                                 match crate::upload_rgba(
                                     rl,
                                     thread,
@@ -439,13 +534,23 @@ impl Grid {
                         }
                     }
                 }
-                Ok(DecodeOk { full, .. }) => {
+                Ok(DecodeOk {
+                    image,
+                    full: Some(full),
+                    ..
+                }) => {
                     // Re-decode of a thumb-only entry (keep-set refill).
                     // The thumb already exists, so the code wants only the
                     // full-res texture, and only if the entry still stays
                     // in the keep set (the selection possibly moved on
                     // meanwhile).
+                    // The dimensions land with a cache hit too, and they
+                    // decide how the image view fits the picture.
                     self.entries[i].queued = false;
+                    // The source dimensions land even when the entry left the
+                    // keep set, because the image view reads them either way.
+                    self.entries[i].width = image.0;
+                    self.entries[i].height = image.1;
                     if keep.contains(&res.id)
                         && let Some(e) = self.entries.get_mut(i)
                         && e.full.is_none()
@@ -458,6 +563,18 @@ impl Grid {
                             }
                         }
                     }
+                }
+                Ok(DecodeOk {
+                    image, full: None, ..
+                }) => {
+                    // A cache hit for an entry that already shows a thumb:
+                    // nothing is left to upload, but the source dimensions
+                    // land, because the cached thumb carries them.
+                    // The image view then fits the picture, not its thumb.
+                    let e = &mut self.entries[i];
+                    e.queued = false;
+                    e.width = image.0;
+                    e.height = image.1;
                 }
                 Err(err) => {
                     eprintln!(
@@ -521,24 +638,20 @@ impl Grid {
             }
             e.queued = true;
             self.inflight += 1;
-            let id = e.id;
-            let path = e.path.clone();
+            let job = Job {
+                id: e.id,
+                path: e.path.clone(),
+                // Only a keep-set entry needs the full texture. A cold entry
+                // outside it decodes for its thumbnail only.
+                want_full: keep.contains(&e.id),
+                blur_enabled: self.blur_enabled,
+                blur_px: self.blur_px,
+            };
             let tx = self.result_tx.clone();
-            let blur_enabled = self.blur_enabled;
-            let blur_px = self.blur_px;
+            let cache = Arc::clone(&self.cache);
             rayon::spawn(move || {
-                let res = crate::decode_image(&path).map(|full| {
-                    let blur = blur_enabled.then(|| blurbg::small_blur(&full, blur_px));
-                    // Borrow the decoded buffer for the thumb: a clone of a
-                    // large image costs hundreds of megabytes.
-                    let thumb = crate::downscale_rgba_ref(
-                        &full.data,
-                        full.width,
-                        full.height,
-                        THUMB_LONG_SIDE,
-                    );
-                    DecodeOk { thumb, blur, full }
-                });
+                let id = job.id;
+                let res = run_job(&job, &cache);
                 // Receiver gone (grid dropped): the code discards the
                 // result and the job simply ends.
                 let _ = tx.send(DecodeResult { id, res });
@@ -1073,6 +1186,47 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn a_fresh_decode_fills_the_cache_and_hits_it_next() {
+        let dir = TempDir::new().unwrap();
+        let png = dir.path().join("a.png");
+        image::DynamicImage::new_rgb8(64, 32)
+            .save(&png)
+            .expect("save");
+        // A cache over the temporary directory, so the test never touches the
+        // real thumbnail cache of the user.
+        let cache = Cache::in_dir(dir.path().join("cache"));
+        let job = Job {
+            id: 0,
+            path: png,
+            want_full: false,
+            blur_enabled: false,
+            blur_px: LongSide::new(64),
+        };
+        let miss = run_job(&job, &cache).expect("decode");
+        assert!(miss.full.is_none(), "a thumb-only job keeps no full image");
+        assert_eq!(miss.image, (ImgW::new(64), ImgH::new(32)));
+        assert!(
+            cache.load(&job.path, CACHE_LONG_SIDE).is_ok(),
+            "the decode stores a thumbnail"
+        );
+        // The second job takes the cached thumbnail and decodes nothing.
+        let hit = run_job(&job, &cache).expect("cache hit");
+        assert!(hit.full.is_none());
+        assert_eq!(hit.thumb, miss.thumb);
+        // The hit still reports the source dimensions, so the image view fits
+        // the picture and not the cached thumb.
+        assert_eq!(hit.image, miss.image);
+        // A keep-set job ignores the cache, because it needs the full image.
+        let keep = Job {
+            want_full: true,
+            ..job.clone()
+        };
+        let refill = run_job(&keep, &cache).expect("decode");
+        assert!(refill.full.is_some());
+        assert_eq!(refill.image, miss.image);
+    }
 
     #[test]
     fn mark_failed_keeps_the_entry() {

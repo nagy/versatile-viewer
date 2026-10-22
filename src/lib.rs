@@ -29,6 +29,8 @@
 //! with `--mcp`.
 //! [`keyrepeat`] steps a held key for discrete moves, and [`tween`] ramps a
 //! held key for continuous motion.
+//! [`thumbcache`] keeps the grid thumbnails in `$XDG_CACHE_HOME`, so a warm
+//! cache fills the grid without a decode, across the exit of the viewer.
 //! The binary in `main.rs` wires these pieces into the window and event loop.
 //! The unit tests and doctests here keep the pure helpers honest.
 
@@ -39,6 +41,7 @@ pub mod grid;
 pub mod keyrepeat;
 pub mod loader;
 pub mod mcp;
+pub mod thumbcache;
 pub mod tween;
 #[cfg(target_os = "linux")]
 pub mod wmclass;

@@ -31,7 +31,7 @@ The binary name is `vv`.
 - Tests: `proptest` covers the pure helpers (layout, visual selection, selection step, the resize fit, the ramp).
   Property tests are dev-only and never gate a release build.
 - Public error types derive `derive_more::{Display, Error, From}` (feature `from` on).
-  Each module owns its error enum: `src/error.rs` (`DecodeError`, `UploadError`), `src/grid.rs` (`GridError`), `src/loader.rs` (`LoadError`), `src/mcp.rs` (`SpawnError`).
+  Each module owns its error enum: `src/error.rs` (`DecodeError`, `UploadError`), `src/grid.rs` (`GridError`), `src/loader.rs` (`LoadError`), `src/mcp.rs` (`SpawnError`), `src/thumbcache.rs` (`CacheError`).
   `main.rs` keeps `anyhow`.
 - Wrap raw pixel and window primitives in the `src/dim.rs` newtypes (`ImgW`, `ImgH`, `WinW`, `WinH`, `LongSide`, `PreviewPx`, `Delay`, `Rate`, `RampTime`, `Rect`).
   Public API boundaries take the newtype, not the bare primitive.
@@ -55,6 +55,17 @@ The binary name is `vv`.
 - The image view zooms with `+`/`-` and with `Ctrl+j`/`Ctrl+k` (in, out), all as held states.
   A held Ctrl turns the pan keys into zoom keys, so it guards the pan flags of `NavKeys`.
   The grid keeps `Ctrl+j`/`Ctrl+k` as plain selection moves.
+- The grid caches its thumbnails on disk through `xdg` under `$XDG_CACHE_HOME/vv/thumbnails`.
+  A warm grid is therefore softer than a cold one, until the keep-set refill lands.
+  The decode worker reads the cache first and decodes only on a miss, then stores the new thumbnail.
+  A cache hit carries no full-resolution image, so the keep-set refill decodes the file on its own.
+  The header carries the source dimensions, so `GridEntry::width`/`height` measure the image and not the thumb, on a hit and on a miss.
+  A write beyond the `WRITE_BUDGET` stops the cache for the rest of the run.
+  An entry stays past the exit of the viewer, so the next launch starts warm.
+  No sweep runs on exit: a stale entry answers `CacheError::Stale` and re-decodes, and an entry whose source is gone stays unread.
+  The only cleanup is `sweep_dead_tmp`, which a store runs to drop the half-written temporary files of killed workers.
+  `VV_CACHE=0` turns the cache off.
+  A test builds the cache with `Cache::in_dir` over a temporary directory. Never point a test at `Cache::new()`, because then it fills the cache of the user.
 - The grid has a Vim-style visual selection, `Visual` in `src/grid.rs`.
   It stores one mode (`Char`, `Line`, `Block`) and one anchor index.
   The selected set derives from the anchor, the cursor, and the current column count, so a resize or zoom reflows it.
@@ -88,7 +99,7 @@ Both views share it, so the letterbox bars and the grid gaps match.
   A center anchor skips the drift, because the drift can only move it away from the middle.
   Plain `f` hold keeps the pan drag.
 - Mouse side buttons step next / previous in image view, like `n` / `p` (`read_nav_mouse` in `main.rs`).
-- Env vars `VV_DEBUG`, `VV_TIMING`, `VV_SLOW_STREAM`, `VV_BLUR_BG`, `VV_BG_DIM`, `VV_BLUR_PX`: see the README table.
+- Env vars `VV_DEBUG`, `VV_TIMING`, `VV_SLOW_STREAM`, `VV_BLUR_BG`, `VV_BG_DIM`, `VV_BLUR_PX`, `VV_CACHE`: see the README table.
 - Window title uses en-dash separators: `<file> – <dir> – versatile-viewer`.
   The grid title is `(<n> image(s)) – <dir> – versatile-viewer`.
   Canonicalize the paths.
