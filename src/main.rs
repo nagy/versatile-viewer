@@ -51,7 +51,7 @@ use versatile_viewer::{
     DecodedImage, UploadError,
     blurbg::{self, BlurBg},
     decode_image,
-    dim::{ImgH, ImgW, PreviewPx, RampTime, WinH, WinW},
+    dim::{ImgH, ImgW, PreviewPx, RampTime, Rect, WinH, WinW},
     grid::{DecodeFailure, Grid, GridAction},
     keyrepeat,
     loader::{DecodeMsg, Loader},
@@ -1801,18 +1801,13 @@ fn main() -> Result<()> {
                 // be smaller than st.img_w/h.
                 // A src rect larger than the texture produces UVs > 1, which
                 // the raylib repeat wrap renders as a tiled mosaic.
-                let src = Rectangle {
-                    x: 0.0,
-                    y: 0.0,
-                    width: texture.width() as f32,
-                    height: texture.height() as f32,
-                };
-                let dest = Rectangle {
-                    x: (win_w - dw) / 2.0 + st.pan.x,
-                    y: (win_h - dh) / 2.0 + st.pan.y,
-                    width: dw,
-                    height: dh,
-                };
+                let src = Rect::sized(texture.width() as f32, texture.height() as f32);
+                let dest = Rect::new(
+                    (win_w - dw) / 2.0 + st.pan.x,
+                    (win_h - dh) / 2.0 + st.pan.y,
+                    dw,
+                    dh,
+                );
                 d.draw_texture_pro(texture, src, dest, Vector2::ZERO, 0.0, Color::WHITE);
             } else if st.img_w > 0.0
                 && let Some(g) = grid.as_ref()
@@ -1830,18 +1825,13 @@ fn main() -> Result<()> {
                     .unwrap_or((win_w / st.img_w).min(win_h / st.img_h));
                 let dw = st.img_w * scale;
                 let dh = st.img_h * scale;
-                let src = Rectangle {
-                    x: 0.0,
-                    y: 0.0,
-                    width: tex.width() as f32,
-                    height: tex.height() as f32,
-                };
-                let dest = Rectangle {
-                    x: (win_w - dw) / 2.0 + st.pan.x,
-                    y: (win_h - dh) / 2.0 + st.pan.y,
-                    width: dw,
-                    height: dh,
-                };
+                let src = Rect::sized(tex.width() as f32, tex.height() as f32);
+                let dest = Rect::new(
+                    (win_w - dw) / 2.0 + st.pan.x,
+                    (win_h - dh) / 2.0 + st.pan.y,
+                    dw,
+                    dh,
+                );
                 d.draw_texture_pro(tex, src, dest, Vector2::ZERO, 0.0, Color::WHITE);
             }
             // The threshold check happens above, before begin_drawing.

@@ -24,8 +24,11 @@ The binary name is `vv`.
 - Public error types derive `derive_more::{Display, Error, From}` (feature `from` on).
   Each module owns its error enum: `src/error.rs` (`DecodeError`, `UploadError`), `src/grid.rs` (`GridError`), `src/loader.rs` (`LoadError`), `src/mcp.rs` (`SpawnError`).
   `main.rs` keeps `anyhow`.
-- Wrap raw pixel and window primitives in the `src/dim.rs` newtypes (`ImgW`, `ImgH`, `WinW`, `WinH`, `LongSide`, `PreviewPx`, `Delay`, `Rate`, `RampTime`).
+- Wrap raw pixel and window primitives in the `src/dim.rs` newtypes (`ImgW`, `ImgH`, `WinW`, `WinH`, `LongSide`, `PreviewPx`, `Delay`, `Rate`, `RampTime`, `Rect`).
   Public API boundaries take the newtype, not the bare primitive.
+  `Rect` is a `#[repr(C)]` axis-aligned rectangle with raylib `Rectangle` field names.
+  It converts with `From`, so a raylib call that takes `impl Into<Rectangle>` takes a `Rect` value directly.
+  Do not build a bare `Rectangle` in the draw code.
 - Two motion styles, and a key picks one:
   - Auto-repeat steps a discrete move.
     `src/keyrepeat.rs` reimplements the X rate for the grid selection and image next/previous.

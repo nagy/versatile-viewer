@@ -43,7 +43,7 @@ use raylib::{color::Color, prelude::*};
 use crate::{
     DecodedImage,
     blurbg::{self},
-    dim::{ImgH, ImgW, LongSide, WinH, WinW},
+    dim::{ImgH, ImgW, LongSide, Rect, WinH, WinW},
     error::DecodeError,
 };
 
@@ -871,12 +871,8 @@ impl Grid {
         let (mx, my) = (m.x - MARGIN, m.y + self.scroll - MARGIN);
         let col = (mx / (cw + GAP)).floor();
         let row = (my / (ch + GAP)).floor();
-        if col >= 0.0
-            && row >= 0.0
-            && col < l.cols as f32
-            && mx - col * (cw + GAP) <= cw
-            && my - row * (ch + GAP) <= ch
-        {
+        let cell = Rect::new(col * (cw + GAP), row * (ch + GAP), cw, ch);
+        if col >= 0.0 && row >= 0.0 && col < l.cols as f32 && cell.contains(mx, my) {
             let idx = row as usize * l.cols + col as usize;
             if idx < self.entries.len() {
                 return Some(idx);
@@ -912,25 +908,12 @@ impl Grid {
             if cy + ch < 0.0 || cy > win_h {
                 continue;
             }
-            let thumb = Rectangle {
-                x: cx + (cw - side) / 2.0,
-                y: cy + (ch - side) / 2.0,
-                width: side,
-                height: side,
-            };
+            let thumb = Rect::new(cx + (cw - side) / 2.0, cy + (ch - side) / 2.0, side, side);
             if let Some(tex) = &e.texture {
                 // The thumb texture keeps the aspect ratio of the image.
                 // The square cell shows its center crop (draw-time crop, so a
                 // resize never needs a re-decode).
-                let tw = tex.width() as f32;
-                let th = tex.height() as f32;
-                let side = tw.min(th);
-                let src = Rectangle {
-                    x: (tw - side) / 2.0,
-                    y: (th - side) / 2.0,
-                    width: side,
-                    height: side,
-                };
+                let src = Rect::sized(tex.width() as f32, tex.height() as f32).center_square();
                 d.draw_texture_pro(tex, src, thumb, Vector2::ZERO, 0.0, Color::WHITE);
             } else if e.failed.is_some() {
                 // Decode failed: dim red placeholder with an error glyph.

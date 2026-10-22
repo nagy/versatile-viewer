@@ -19,7 +19,7 @@ use raylib::{color::Color, consts::TextureFilter, prelude::*, texture::RaylibTex
 
 use crate::{
     DecodedImage,
-    dim::{ImgH, ImgW, LongSide, WinH, WinW},
+    dim::{ImgH, ImgW, LongSide, Rect, WinH, WinW},
 };
 
 /// Long side of the blurred background texture.
@@ -280,12 +280,7 @@ impl BlurBg {
         if let Some(old) = &self.old {
             d.draw_texture_pro(
                 old,
-                Rectangle {
-                    x: 0.0,
-                    y: 0.0,
-                    width: old.width() as f32,
-                    height: old.height() as f32,
-                },
+                Rect::sized(old.width() as f32, old.height() as f32),
                 cover_rect(old.width() as u32, old.height() as u32, win_w, win_h),
                 Vector2::ZERO,
                 0.0,
@@ -297,12 +292,7 @@ impl BlurBg {
         let t = progress * progress * (3.0 - 2.0 * progress); // smoothstep
         d.draw_texture_pro(
             tex,
-            Rectangle {
-                x: 0.0,
-                y: 0.0,
-                width: tex.width() as f32,
-                height: tex.height() as f32,
-            },
+            Rect::sized(tex.width() as f32, tex.height() as f32),
             cover_rect(tex.width() as u32, tex.height() as u32, win_w, win_h),
             Vector2::ZERO,
             0.0,
@@ -314,16 +304,16 @@ impl BlurBg {
 /// Dest rect for a texture of w x h scaled to cover the window.
 /// The texture fits on the narrower side and stays centered.
 /// The other axis overflows and the code crops it.
-const fn cover_rect(w: u32, h: u32, win_w: WinW, win_h: WinH) -> Rectangle {
+const fn cover_rect(w: u32, h: u32, win_w: WinW, win_h: WinH) -> Rect {
     let (fw, fh) = (w as f32, h as f32);
     let (win_w, win_h) = (win_w.get(), win_h.get());
     let s = (win_w / fw).max(win_h / fh);
-    Rectangle {
-        x: (win_w - fw * s) / 2.0,
-        y: (win_h - fh * s) / 2.0,
-        width: fw * s,
-        height: fh * s,
-    }
+    Rect::new(
+        (win_w - fw * s) / 2.0,
+        (win_h - fh * s) / 2.0,
+        fw * s,
+        fh * s,
+    )
 }
 
 #[cfg(test)]
