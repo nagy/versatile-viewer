@@ -169,22 +169,23 @@ impl BlurBg {
     /// Upload a tiny blurred copy as the background texture.
     /// The function updates the texture in place when the dimensions match
     /// (streaming previews).
-    fn upload(&mut self, rl: &mut RaylibHandle, thread: &RaylibThread, data: DecodedImage) {
+    fn upload(&mut self, rl: &mut RaylibHandle, thread: &RaylibThread, data: &DecodedImage) {
         let DecodedImage {
             width,
             height,
             data: rgba,
         } = data;
+        let (width, height) = (*width, *height);
         let same = matches!(&self.tex, Some(t) if t.width() == width.get() as i32 && t.height() == height.get() as i32);
         if same {
             if let Some(t) = &mut self.tex
-                && t.update_texture(&rgba).is_err()
+                && t.update_texture(rgba).is_err()
             {
                 self.tex = None;
             }
             return;
         }
-        match crate::upload_rgba(rl, thread, &rgba, width, height) {
+        match crate::upload_rgba(rl, thread, rgba, width, height) {
             Ok(t) => {
                 // Bilinear filtering turns the tiny copy into a smooth blur
                 // when the GPU upscales it every frame.
@@ -208,7 +209,7 @@ impl BlurBg {
         &mut self,
         rl: &mut RaylibHandle,
         thread: &RaylibThread,
-        data: DecodedImage,
+        data: &DecodedImage,
         tag: Option<u64>,
     ) {
         self.upload(rl, thread, data);

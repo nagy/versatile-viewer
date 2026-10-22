@@ -407,7 +407,7 @@ fn attach_blur_bg(
     tag: Option<u64>,
 ) {
     if let (Some(bg), Some(data)) = (blur_bg.as_mut(), blur) {
-        bg.attach(rl, thread, data.clone(), tag);
+        bg.attach(rl, thread, data, tag);
     }
 }
 

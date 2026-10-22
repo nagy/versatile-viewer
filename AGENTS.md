@@ -20,6 +20,7 @@ The binary name is `vv`.
   Decode workers cap the buffer with `cap_texture_side` (`src/lib.rs`), so `upload_rgba` on the main thread uploads a buffer that already fits `MAX_TEXTURE_SIDE`.
   Never add a main-thread resize: a large image then freezes the window for seconds.
   Downscale a borrowed buffer with `downscale_rgba_ref`, not `downscale_rgba` on a clone.
+  `BlurBg::attach` and `upload` take `&DecodedImage`, so a caller never clones the blur buffer.
   All pixel resize goes through `resample_rgba` (`src/lib.rs`), the `fast_image_resize` SIMD path with Lanczos3.
   Do not call `image::imageops::resize` for a downscale: it is several times slower.
   Keep the `rayon` feature of `fast_image_resize` off, so a resize never spawns nested workers inside a decode job.
