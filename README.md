@@ -72,7 +72,7 @@ because stdout carries protocol frames only.
 |`f`                  |open cell under cursor      |fill-zoom at cursor / zoom out / back to grid (hold: pan)|
 |`Shift+f` (hold)     |—                           |free zoom by mouse travel: up zooms in, down zooms out (continuous)|
 |`f` then `Shift`     |—                           |while `f` is held, Shift switches the pan drag over to the free zoom, anchored at the view center|
-|`v` / `V` / `Ctrl+v` |visual selection: charwise / linewise / blockwise|—                       |
+|`v` / `V` / `Ctrl+v` |visual selection: charwise / linewise / blockwise (dims the other cells)|—                       |
 |`o`                  |swap visual anchor and cursor|—                             |
 |`+` / `-`            |zoom thumbnails             |free zoom (hold: eased ramp)   |
 |`Ctrl+j` / `Ctrl+k`  |move selection              |free zoom in / out (hold: eased ramp)|

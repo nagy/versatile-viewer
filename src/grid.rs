@@ -8,6 +8,9 @@
 //! The same key toggles its mode off, `o` swaps the anchor and the cursor,
 //! and ESC clears the selection.
 //! Every selected cell draws the same white border as the cursor.
+//! While a visual selection is active, every cell outside it draws dimmed
+//! with the `DIM_TINT` grey, so the selected set stands out.
+//! The plain cursor marking dims nothing.
 //!
 //! +/- zoom the thumbnails (the same 25% steps as the image-view free zoom).
 //! The default zoom fills the window exactly with the largest possible square
@@ -57,6 +60,9 @@ const GAP: f32 = 8.0;
 const GRID_ZOOM_STEP: f32 = 1.25;
 /// Lower bound for the thumbnail side when the grid zooms out.
 const GRID_MIN_SIDE: f32 = 32.0;
+/// The tint of a cell that a visual selection excludes.
+/// The dim keeps every image visible, while the selected set holds the eye.
+const DIM_TINT: Color = Color::new(90, 90, 90, 255);
 /// The maximum number of decodes in flight at once.
 /// Jobs run in parallel on the shared rayon pool.
 /// jxl-oxide parallelizes each decode further inside.
@@ -1016,6 +1022,9 @@ impl Grid {
         let l = self.layout(win.0, win.1);
         let (cols, cw, ch, side) = (l.cols, l.cell_w, l.cell_h, l.side);
         let visual = self.visual;
+        // A visual selection dims every cell outside it, so the selected set
+        // stands out. Plain cursor marking dims nothing.
+        let dim_others = visual.is_some();
         for (i, e) in self.entries.iter().enumerate() {
             let col = i % cols;
             let row = i / cols;
@@ -1026,16 +1035,23 @@ impl Grid {
                 continue;
             }
             let thumb = Rect::new(cx + (cw - side) / 2.0, cy + (ch - side) / 2.0, side, side);
+            let in_selection =
+                i == self.selected || visual.is_some_and(|v| v.contains(i, self.selected, cols));
+            let tint = if dim_others && !in_selection {
+                DIM_TINT
+            } else {
+                Color::WHITE
+            };
             if let Some(tex) = &e.texture {
                 // The thumb texture keeps the aspect ratio of the image.
                 // The square cell shows its center crop (draw-time crop, so a
                 // resize never needs a re-decode).
                 let src = Rect::sized(tex.width() as f32, tex.height() as f32).center_square();
-                d.draw_texture_pro(tex, src, thumb, Vector2::ZERO, 0.0, Color::WHITE);
+                d.draw_texture_pro(tex, src, thumb, Vector2::ZERO, 0.0, tint);
             } else if e.failed.is_some() {
                 // Decode failed: dim red placeholder with an error glyph.
                 // The file stays visible instead of vanishing silently.
-                d.draw_rectangle_rec(thumb, Color::new(72, 26, 26, 255));
+                d.draw_rectangle_rec(thumb, Color::new(72, 26, 26, 255).tint(tint));
                 let msg = "!";
                 let tw = d.measure_text(msg, 24);
                 d.draw_text(
@@ -1043,13 +1059,13 @@ impl Grid {
                     (thumb.x + (thumb.width - tw as f32) / 2.0) as i32,
                     (thumb.y + (thumb.height - 24.0) / 2.0) as i32,
                     24,
-                    Color::new(214, 92, 92, 255),
+                    Color::new(214, 92, 92, 255).tint(tint),
                 );
             } else {
                 // Still decoding: placeholder square.
-                d.draw_rectangle_rec(thumb, Color::new(28, 28, 28, 255));
+                d.draw_rectangle_rec(thumb, Color::new(28, 28, 28, 255).tint(tint));
             }
-            if i == self.selected || visual.is_some_and(|v| v.contains(i, self.selected, cols)) {
+            if in_selection {
                 d.draw_rectangle_lines_ex(thumb, 4.0, Color::WHITE);
             }
         }

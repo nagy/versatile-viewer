@@ -72,6 +72,8 @@ The binary name is `vv`.
   `v`, `V`, and `Ctrl+v` toggle the mode, `o` swaps the anchor and the cursor, ESC clears it.
   A mode switch keeps the anchor, so `v` on row 1 then `V` on row 3 selects rows 1..=3.
   Do not store a selected bit per entry.
+  An active visual selection dims every cell outside it with `DIM_TINT`.
+  The cursor without a visual selection dims nothing.
 
 ## Build
 
