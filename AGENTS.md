@@ -115,6 +115,12 @@ Both views share it, so the letterbox bars and the grid gaps match.
   A dest corner plus a half-size origin throws the image into the top-left corner.
   `f` hit-tests a turned image through `unrotate_point`.
   Do not rotate pixels on the main thread: the turn is a draw transform.
+- Shift at the `r` press edge turns the image around the mouse point (`ViewState::pivot`) instead of the image center.
+  The hold keeps the image point under that pivot on its window spot, so `rotate::pivot` shifts the pan and its target every frame, and again through the release snap (`keep_pivot` in `main.rs`).
+  The pivot is a pan shift and not a second draw origin: the draw and the `f` hit test keep one center, the window middle plus the pan.
+  A plain `r` press resets the pivot to the center, and a newly opened image resets it too.
+  The pivot hold leaves the pointer visible, because its pivot must stay put, so it needs no capture.
+  A Shift+R hold therefore also doubles the pan and zoom speed, like every other Shift chord.
 - Mouse side buttons step next / previous in image view, like `n` / `p` (`read_nav_mouse` in `main.rs`).
 - Env vars `VV_DEBUG`, `VV_TIMING`, `VV_SLOW_STREAM`, `VV_BLUR_BG`, `VV_BG_DIM`, `VV_BLUR_PX`, `VV_CACHE`: see the README table.
 - Window title uses en-dash separators: `<file> – <dir> – versatile-viewer`.

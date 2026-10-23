@@ -73,6 +73,7 @@ because stdout carries protocol frames only.
 |`Shift+f` (hold)     |—                           |free zoom by mouse travel: up zooms in, down zooms out (continuous)|
 |`f` then `Shift`     |—                           |while `f` is held, Shift switches the pan drag over to the free zoom, anchored at the view center|
 |`r` (hold)           |—                           |rotate by mouse travel: down turns clockwise, up turns counter-clockwise; the release snaps a near quarter turn|
+|`Shift+r` (hold)     |—                           |rotate around the mouse point instead of the image center|
 |`v` / `V` / `Ctrl+v` |visual selection: charwise / linewise / blockwise (dims the other cells)|—                       |
 |`o`                  |swap visual anchor and cursor|—                             |
 |`+` / `-`            |zoom thumbnails             |free zoom (hold: eased ramp)   |

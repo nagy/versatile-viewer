@@ -13,6 +13,11 @@
 //! The snap runs on the release only, never during the drag.
 //! A positive angle turns clockwise on screen, which matches raylib
 //! (`DrawTexturePro` grows the angle clockwise with y down).
+//!
+//! A plain `r` hold turns the image around its own center.
+//! A Shift+R hold turns it around the mouse point that the press showed, and
+//! [`pivot`] moves the pan so that point keeps its window spot.
+//! The pivot stays a draw transform: no pixel moves.
 
 use raylib::prelude::Vector2;
 
@@ -117,6 +122,66 @@ pub fn snap_deg(deg: f32) -> f32 {
     }
 }
 
+/// The pan that turns the image around `pivot` instead of its center.
+///
+/// `pivot` is the window point that must keep the image point it shows while
+/// the angle runs from `from_deg` to `to_deg`.
+/// `center` is the window middle with no pan, so `pan` shifts the draw.
+///
+/// The draw puts the image point that sits on the image middle at
+/// `center + pan`, and a turn by `deg` runs every image point around that
+/// origin.
+/// A plain turn therefore sweeps the image point under the pivot off its
+/// window spot, and the returned pan pulls the drawn image back by that
+/// travel.
+///
+/// # Examples
+///
+/// ```
+/// # use raylib::prelude::Vector2;
+/// # use versatile_viewer::rotate::pivot;
+/// let c = Vector2::new(50.0, 50.0);
+/// let pan = Vector2::new(10.0, -10.0);
+/// // A zero turn keeps the pan, whatever the pivot.
+/// let same = pivot(Vector2::new(60.0, 50.0), c, 42.0, 42.0, pan);
+/// assert!((same.x - pan.x).abs() < 1e-3 && (same.y - pan.y).abs() < 1e-3);
+/// // A pivot left of the middle pulls the pan left as the turn grows.
+/// let next = pivot(Vector2::new(30.0, 50.0), c, 0.0, 90.0, Vector2::ZERO);
+/// assert!((next.x + 20.0).abs() < 1e-3 && (next.y - 20.0).abs() < 1e-3);
+/// ```
+#[must_use]
+pub fn pivot(pivot: Vector2, center: Vector2, from_deg: f32, to_deg: f32, pan: Vector2) -> Vector2 {
+    let (sin, cos) = (to_deg - from_deg).to_radians().sin_cos();
+    // The offset from the drawn center to the pivot, in window pixels.
+    let off = pivot - center - pan;
+    // A plain turn sweeps that offset around, so the pan pulls it back.
+    let swept = Vector2::new(off.x * cos - off.y * sin, off.x * sin + off.y * cos);
+    pan + off - swept
+}
+
+/// Turn a window point around a draw origin, exactly like the draw does.
+///
+/// The code checks the pivot with this: the image point under the pivot keeps
+/// its window spot at every angle.
+///
+/// # Examples
+///
+/// ```
+/// # use raylib::prelude::Vector2;
+/// # use versatile_viewer::rotate::turn_point;
+/// let p = turn_point(Vector2::new(10.0, 0.0), Vector2::ZERO, 90.0);
+/// assert!(p.x.abs() < 1e-3 && (p.y - 10.0).abs() < 1e-3);
+/// ```
+#[must_use]
+pub fn turn_point(p: Vector2, origin: Vector2, deg: f32) -> Vector2 {
+    let (sin, cos) = deg.to_radians().sin_cos();
+    let (dx, dy) = (p.x - origin.x, p.y - origin.y);
+    Vector2::new(
+        origin.x + dx * cos - dy * sin,
+        origin.y + dx * sin + dy * cos,
+    )
+}
+
 /// Turn a window point back into the unrotated image space.
 ///
 /// `center` is the window point that the image turns around, and `deg` is the
@@ -124,8 +189,10 @@ pub fn snap_deg(deg: f32) -> f32 {
 /// The code uses this to hit-test a turned image against its plain
 /// axis-aligned rectangle.
 ///
-/// # Examples
+/// A pivot shifts the pan, so the draw and the hit test both take the center
+/// as the window middle plus the pan, and the pivot changes neither.
 ///
+/// # Examples
 /// ```
 /// # use raylib::prelude::Vector2;
 /// # use versatile_viewer::rotate::unrotate_point;
@@ -151,7 +218,10 @@ mod tests {
     use proptest::prop_assert;
     use raylib::prelude::Vector2;
 
-    use super::{SNAP_DEGREES, apply_turn, normalize_deg, snap_deg, turn_deg, unrotate_point};
+    use super::{
+        SNAP_DEGREES, apply_turn, normalize_deg, pivot, snap_deg, turn_deg, turn_point,
+        unrotate_point,
+    };
 
     #[test]
     fn apply_turn_continues_from_the_current_angle() {
@@ -188,6 +258,29 @@ mod tests {
         assert!((q.x - 7.0).abs() < 1e-3 && (q.y - 3.0).abs() < 1e-3);
     }
 
+    #[test]
+    fn pivot_holds_the_image_point() {
+        // A pixel at the upright offset `u` from the image middle lands at
+        // `center + pan + R(deg) u`. The pivot pan must keep the pixel under
+        // the pivot at the pivot window point.
+        let c = Vector2::new(100.0, 80.0);
+        let pan = Vector2::new(12.0, -7.0);
+        let p = Vector2::new(140.0, 55.0);
+        for (from, to) in [(0.0, 90.0), (30.0, 210.0), (350.0, 10.0), (0.0, 180.0)] {
+            let u = unrotate_point(p, c + pan, from) - (c + pan);
+            let next = pivot(p, c, from, to, pan);
+            let before = c + pan + turn_point(u, Vector2::ZERO, from);
+            let after = c + next + turn_point(u, Vector2::ZERO, to);
+            assert!(
+                (before.x - after.x).abs() < 1e-2 && (before.y - after.y).abs() < 1e-2,
+                "{from}->{to}: {before:?} against {after:?}"
+            );
+        }
+        // The image middle as the pivot is the plain centered turn.
+        let still = pivot(c + pan, c, 0.0, 137.0, pan);
+        assert!((still.x - pan.x).abs() < 1e-3 && (still.y - pan.y).abs() < 1e-3);
+    }
+
     proptest::proptest! {
         /// The normalized angle stays in range, and the snap never lands far
         /// from the input.
@@ -200,6 +293,33 @@ mod tests {
             // Compare around the ring, so 359 against 0 measures 1 degree.
             let diff = (n - s).abs();
             prop_assert!(diff <= SNAP_DEGREES + 1e-3 || (360.0 - diff) <= SNAP_DEGREES + 1e-3);
+        }
+
+        /// A pivot keeps the image point under it, whatever the angle.
+        #[test]
+        fn pivot_holds_any_image_point(
+            px in -5000.0f32..5000.0,
+            py in -5000.0f32..5000.0,
+            from in -10000.0f32..10000.0,
+            delta in -10000.0f32..10000.0,
+            panx in -2000.0f32..2000.0,
+            pany in -2000.0f32..2000.0,
+        ) {
+            let c = Vector2::new(640.0, 480.0);
+            let p = Vector2::new(px, py);
+            let pan = Vector2::new(panx, pany);
+            let to = from + delta;
+            let u = unrotate_point(p, c + pan, from) - (c + pan);
+            let next = pivot(p, c, from, to, pan);
+            let before = c + pan + turn_point(u, Vector2::ZERO, from);
+            let after = c + next + turn_point(u, Vector2::ZERO, to);
+            // The angles reach thousands of degrees and the offsets thousands
+            // of pixels, so a f32 radian loses a fraction of a pixel.
+            let slack = 0.001 * (1.0 + u.length());
+            prop_assert!((before.x - p.x).abs() < slack);
+            prop_assert!((before.y - p.y).abs() < slack);
+            prop_assert!((before.x - after.x).abs() < slack);
+            prop_assert!((before.y - after.y).abs() < slack);
         }
 
         /// One span of travel is one full turn, in either direction.

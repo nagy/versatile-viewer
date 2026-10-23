@@ -217,6 +217,11 @@ struct ViewState {
     /// lands exactly.
     /// The drag itself never snaps.
     angle: f32,
+    /// The window point that a Shift+R hold turns the image around.
+    /// None turns around the image center, which is what plain `r` does.
+    /// The hold moves the pan through `rotate::pivot`, so the point stays on
+    /// its window spot at every angle.
+    pivot: Option<Vector2>,
     /// `a` toggles nearest-neighbor filtering (pixelated) for pixel peeping.
     /// The default is smooth (bilinear).
     pixelated: bool,
@@ -242,6 +247,7 @@ impl ViewState {
         // A newly opened image starts upright: a turn never carries over to
         // the next image.
         self.angle = 0.0;
+        self.pivot = None;
         self.ramps = Ramps::default();
     }
 }
@@ -451,6 +457,23 @@ fn draw_turned(
         rotate::normalize_deg(angle),
         Color::WHITE,
     );
+}
+
+/// Keep the pivot of a turned image on its window spot.
+///
+/// The angle already ran from `from` to the value `st.angle` shows, so the code
+/// shifts the pan and its target by the distance that the plain centered turn
+/// would move the pivot.
+/// The pivot stays a draw transform: no pixel moves.
+fn keep_pivot(st: &mut ViewState, from: f32, win_w: f32, win_h: f32) {
+    let Some(pivot) = st.pivot else {
+        return;
+    };
+    let center = Vector2::new(win_w / 2.0, win_h / 2.0);
+    let pan = rotate::pivot(pivot, center, from, st.angle, st.pan);
+    let shift = pan - st.pan;
+    st.pan = pan;
+    st.target_pan += shift;
 }
 
 /// Upload a tiny blurred copy as the image-view background (`VV_BLUR_BG`
@@ -761,6 +784,7 @@ fn main() -> Result<()> {
         view_scale: None,
         zoom_anchor: None,
         angle: 0.0,
+        pivot: None,
         ramps: Ramps::default(),
         pixelated: false,
         loader: None,
@@ -1199,6 +1223,8 @@ fn main() -> Result<()> {
             let mut pixelated_toggle = false;
             let mut f_key = false;
             let mut r_key = false;
+            // The Shift state at the `r` press edge picks the pivot.
+            let mut r_pivot_edge = false;
             let mut nav_next_edge = false;
             let mut nav_prev_edge = false;
             let mut jump_first = false;
@@ -1218,7 +1244,10 @@ fn main() -> Result<()> {
                     KeyboardKey::KEY_Q => quit_pressed = true,
                     KeyboardKey::KEY_A => pixelated_toggle = true,
                     KeyboardKey::KEY_F => f_key = true,
-                    KeyboardKey::KEY_R => r_key = true,
+                    KeyboardKey::KEY_R => {
+                        r_key = true;
+                        r_pivot_edge = shift;
+                    }
                     KeyboardKey::KEY_SPACE | KeyboardKey::KEY_N => nav_next_edge = true,
                     KeyboardKey::KEY_BACKSPACE | KeyboardKey::KEY_P => nav_prev_edge = true,
                     KeyboardKey::KEY_G => {
@@ -1252,27 +1281,44 @@ fn main() -> Result<()> {
             if (f_key || r_key) && !pointer_captured && !f_capture && !r_capture {
                 grab_pos = rl.get_mouse_position();
                 drag_virtual = grab_pos;
-                rl.disable_cursor();
-                pointer_captured = true;
-                if r_key {
-                    // `r` turns the image. The hold adds to the angle the
-                    // image shows now, so the press never resets the turn.
+                // Shift+R turns the picture around the point under the
+                // pointer, and that point must stay on its window spot, so the
+                // hold needs no capture: nothing has to travel unbounded.
+                // The pointer stays visible, and no release moves it.
+                if r_key && r_pivot_edge {
                     r_capture = true;
+                    st.pivot = Some(grab_pos);
                     if debug {
                         eprintln!(
-                            "vv: r hold grab at ({:.0},{:.0}), angle {}",
+                            "vv: r pivot hold at ({:.0},{:.0}), angle {}",
                             grab_pos.x, grab_pos.y, st.angle
                         );
                     }
                 } else {
-                    f_capture = true;
-                    f_zoom_capture = shift;
-                    f_zoom_anchor = f_zoom_capture.then_some(grab_pos);
-                    if debug {
-                        eprintln!(
-                            "vv: f hold grab at ({:.0},{:.0}), zoom {}",
-                            grab_pos.x, grab_pos.y, f_zoom_capture
-                        );
+                    rl.disable_cursor();
+                    pointer_captured = true;
+                    if r_key {
+                        // Plain `r` turns the image around its own center.
+                        // The hold adds to the angle the image shows now, so
+                        // the press never resets the turn.
+                        r_capture = true;
+                        st.pivot = None;
+                        if debug {
+                            eprintln!(
+                                "vv: r hold grab at ({:.0},{:.0}), angle {}",
+                                grab_pos.x, grab_pos.y, st.angle
+                            );
+                        }
+                    } else {
+                        f_capture = true;
+                        f_zoom_capture = shift;
+                        f_zoom_anchor = f_zoom_capture.then_some(grab_pos);
+                        if debug {
+                            eprintln!(
+                                "vv: f hold grab at ({:.0},{:.0}), zoom {}",
+                                grab_pos.x, grab_pos.y, f_zoom_capture
+                            );
+                        }
                     }
                 }
             }
@@ -1336,7 +1382,10 @@ fn main() -> Result<()> {
                 if r_capture {
                     // The release snaps a near quarter turn exactly, and it is
                     // the only place that snaps: the drag itself turns freely.
+                    // A pivot turn keeps its point on screen through the snap.
+                    let before = st.angle;
                     st.angle = rotate::snap_deg(st.angle);
+                    keep_pivot(&mut st, before, win_w, win_h);
                     r_capture = false;
                 }
                 if debug {
@@ -1664,7 +1713,12 @@ fn main() -> Result<()> {
                     // One full turn per ROTATE_DRAG_SPAN of travel, where the
                     // span scales with the window.
                     let span = win_w.max(win_h) * ROTATE_DRAG_SPAN;
+                    let from = st.angle;
                     st.angle = rotate::apply_turn(st.angle, delta.y * ROTATE_DRAG_SPEED, span);
+                    // A pivot turns the image in place: the pan takes the shift
+                    // that the plain centered turn would move the pivot by, so
+                    // the point under the pivot keeps its window spot.
+                    keep_pivot(&mut st, from, win_w, win_h);
                 }
 
                 // Free zoom: the held +/- keys scale the free-zoom factor
@@ -1735,7 +1789,7 @@ fn main() -> Result<()> {
                 // drag began.
                 let drag_pressed = rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT);
                 let drag_released = rl.is_mouse_button_released(MouseButton::MOUSE_BUTTON_LEFT);
-                if drag_pressed && !pointer_captured {
+                if drag_pressed && !pointer_captured && !r_capture {
                     grab_pos = rl.get_mouse_position();
                     drag_virtual = grab_pos;
                     rl.disable_cursor();
