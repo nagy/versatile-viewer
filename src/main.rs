@@ -1281,44 +1281,31 @@ fn main() -> Result<()> {
             if (f_key || r_key) && !pointer_captured && !f_capture && !r_capture {
                 grab_pos = rl.get_mouse_position();
                 drag_virtual = grab_pos;
-                // Shift+R turns the picture around the point under the
-                // pointer, and that point must stay on its window spot, so the
-                // hold needs no capture: nothing has to travel unbounded.
-                // The pointer stays visible, and no release moves it.
-                if r_key && r_pivot_edge {
+                rl.disable_cursor();
+                pointer_captured = true;
+                if r_key {
+                    // `r` turns the image. The hold adds to the angle the image
+                    // shows now, so the press never resets the turn.
+                    // A plain `r` turns around the image center, and Shift+R
+                    // turns around the grabbed point, which stays on its window
+                    // spot while the pointer stays captured.
                     r_capture = true;
-                    st.pivot = Some(grab_pos);
+                    st.pivot = r_pivot_edge.then_some(grab_pos);
                     if debug {
                         eprintln!(
-                            "vv: r pivot hold at ({:.0},{:.0}), angle {}",
-                            grab_pos.x, grab_pos.y, st.angle
+                            "vv: r hold grab at ({:.0},{:.0}), angle {}, pivot {:?}",
+                            grab_pos.x, grab_pos.y, st.angle, st.pivot
                         );
                     }
                 } else {
-                    rl.disable_cursor();
-                    pointer_captured = true;
-                    if r_key {
-                        // Plain `r` turns the image around its own center.
-                        // The hold adds to the angle the image shows now, so
-                        // the press never resets the turn.
-                        r_capture = true;
-                        st.pivot = None;
-                        if debug {
-                            eprintln!(
-                                "vv: r hold grab at ({:.0},{:.0}), angle {}",
-                                grab_pos.x, grab_pos.y, st.angle
-                            );
-                        }
-                    } else {
-                        f_capture = true;
-                        f_zoom_capture = shift;
-                        f_zoom_anchor = f_zoom_capture.then_some(grab_pos);
-                        if debug {
-                            eprintln!(
-                                "vv: f hold grab at ({:.0},{:.0}), zoom {}",
-                                grab_pos.x, grab_pos.y, f_zoom_capture
-                            );
-                        }
+                    f_capture = true;
+                    f_zoom_capture = shift;
+                    f_zoom_anchor = f_zoom_capture.then_some(grab_pos);
+                    if debug {
+                        eprintln!(
+                            "vv: f hold grab at ({:.0},{:.0}), zoom {}",
+                            grab_pos.x, grab_pos.y, f_zoom_capture
+                        );
                     }
                 }
             }
