@@ -103,6 +103,18 @@ Both views share it, so the letterbox bars and the grid gaps match.
   The pointer is hidden, and a pan just pushed its last screen spot away from the middle, so that spot cannot name what the user looks at.
   A center anchor skips the drift, because the drift can only move it away from the middle.
   Plain `f` hold keeps the pan drag.
+- The `r` hold turns the image, and the release keeps the angle (`src/rotate.rs`).
+  Down travel turns clockwise and up turns counter-clockwise, one full turn per `ROTATE_DRAG_SPAN` of window long side of travel.
+  Each frame adds its travel to the current angle (`rotate::apply_turn`), so a new hold continues from the angle the image shows and never resets the turn.
+  The hold captures the pointer like the `f` pan drag, and it never pans.
+  A newly opened image starts upright, so a turn never carries over to the next image.
+  The release snaps the angle with `snap_deg` when it lands within `SNAP_DEGREES` (2) of a quarter turn, and that release is the only place that snaps.
+  A drag therefore turns freely and never jumps mid-drag.
+  The scale and the pan stay as they are, so a turned image shows its corners past the window edge.
+  The draw passes the image center as the `DrawTexturePro` dest position and `Rect::center_origin` as the origin, because raylib turns the quad around the dest position.
+  A dest corner plus a half-size origin throws the image into the top-left corner.
+  `f` hit-tests a turned image through `unrotate_point`.
+  Do not rotate pixels on the main thread: the turn is a draw transform.
 - Mouse side buttons step next / previous in image view, like `n` / `p` (`read_nav_mouse` in `main.rs`).
 - Env vars `VV_DEBUG`, `VV_TIMING`, `VV_SLOW_STREAM`, `VV_BLUR_BG`, `VV_BG_DIM`, `VV_BLUR_PX`, `VV_CACHE`: see the README table.
 - Window title uses en-dash separators: `<file> – <dir> – versatile-viewer`.

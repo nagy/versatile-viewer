@@ -12,6 +12,9 @@
 //! [`Rect`] converts into a raylib `Rectangle` with `From`.
 //! Every raylib call that takes `impl Into<Rectangle>` accepts a `Rect`
 //! value directly, so the draw code never spells the four fields out.
+//! [`Rect::center_origin`] keeps a turned draw in place.
+
+use raylib::prelude::Vector2;
 
 macro_rules! uint_newtype {
     ($name:ident, $doc:literal) => {
@@ -73,6 +76,7 @@ macro_rules! float_newtype {
 /// # Examples
 ///
 /// ```
+/// # use raylib::prelude::Vector2;
 /// # use versatile_viewer::dim::Rect;
 /// let r = Rect::new(10.0, 20.0, 30.0, 40.0);
 /// assert_eq!((r.right(), r.bottom()), (40.0, 60.0));
@@ -80,6 +84,8 @@ macro_rules! float_newtype {
 /// assert_eq!(r.center_square(), Rect::new(10.0, 25.0, 30.0, 30.0));
 /// assert!(r.contains(25.0, 40.0));
 /// assert!(!r.contains(41.0, 40.0));
+/// // The origin that keeps a turned rect on its own dest position.
+/// assert_eq!(r.center_origin(), Vector2::new(15.0, 20.0));
 /// ```
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -129,6 +135,19 @@ impl Rect {
     #[must_use]
     pub const fn contains(self, px: f32, py: f32) -> bool {
         px >= self.x && py >= self.y && px <= self.right() && py <= self.bottom()
+    }
+
+    /// The raylib `DrawTexturePro` origin that keeps a turned rect on its own
+    /// `dest.position`.
+    ///
+    /// Raylib turns the quad around `dest.position`, and the origin pulls the
+    /// rect back by half its size.
+    /// A dest position at the image center with this origin therefore turns
+    /// the image in place, and the same call draws the plain rect at zero
+    /// degrees.
+    #[must_use]
+    pub fn center_origin(self) -> Vector2 {
+        Vector2::new(self.width / 2.0, self.height / 2.0)
     }
 
     /// The largest square centered inside the rectangle.

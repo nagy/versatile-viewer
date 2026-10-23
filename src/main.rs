@@ -55,7 +55,7 @@ use versatile_viewer::{
     grid::{DecodeFailure, Grid, GridAction},
     keyrepeat,
     loader::{DecodeMsg, Loader},
-    mcp,
+    mcp, rotate,
     tween::Ramp,
     upload_rgba,
     zoomkeys::TypedKeys,
@@ -96,6 +96,17 @@ const ZOOM_DRAG_SPAN: f32 = 1.5;
 /// A multiplier on the Shift+F zoom rate alone.
 /// 8.0 makes a hold eight times as fast as the raw travel suggests.
 const ZOOM_DRAG_SPEED: f32 = 8.0;
+
+/// The vertical travel that a held `r` needs for one full turn, in window long
+/// sides.
+/// Down turns clockwise and up turns counter-clockwise.
+/// 1.0 gives a full turn over one screen of travel, so a small drag is a small
+/// turn.
+const ROTATE_DRAG_SPAN: f32 = 1.0;
+
+/// A multiplier on the `r` rotation rate alone.
+/// 1.0 maps the raw travel straight to the angle.
+const ROTATE_DRAG_SPEED: f32 = 1.0;
 
 /// The exponential ease time constant for the on-screen pan and scale, in
 /// seconds.
@@ -199,6 +210,13 @@ struct ViewState {
     /// None falls back to the window center, for example when an ease still
     /// runs from an earlier step.
     zoom_anchor: Option<Vector2>,
+    /// The image rotation, in degrees clockwise.
+    /// A held `r` drags it, and the code keeps it across a reload of the same
+    /// image.
+    /// The release snaps it with `rotate::snap_deg`, so a near quarter turn
+    /// lands exactly.
+    /// The drag itself never snaps.
+    angle: f32,
     /// `a` toggles nearest-neighbor filtering (pixelated) for pixel peeping.
     /// The default is smooth (bilinear).
     pixelated: bool,
@@ -221,6 +239,9 @@ impl ViewState {
         self.target_pan = Vector2::ZERO;
         self.zoom_anchor = None;
         self.view_scale = None;
+        // A newly opened image starts upright: a turn never carries over to
+        // the next image.
+        self.angle = 0.0;
         self.ramps = Ramps::default();
     }
 }
@@ -391,6 +412,44 @@ fn apply_view_filter(thread: &RaylibThread, tex: &Texture2D, pixelated: bool) {
         } else {
             TextureFilter::TEXTURE_FILTER_BILINEAR
         },
+    );
+}
+
+/// Draw a texture over the image rect, turned by `angle` degrees clockwise
+/// around the image center.
+///
+/// `center` is the image center on screen, in window pixels.
+/// The angle stays as it is: the code snaps it on the hold release, so a drag
+/// turns freely and never jumps mid-drag.
+/// The scale and the pan stay as they are, so a turned image shows its
+/// corners past the window edge.
+///
+/// Raylib turns the quad around `dest.position`, and `origin` pulls the rect
+/// back by half its size.
+/// The dest position is therefore the image center, so the turn pivots on the
+/// middle of the image at every angle.
+/// A zero angle draws the plain centered rect, because the origin pulls it
+/// back by the same half size.
+fn draw_turned(
+    d: &mut impl RaylibDraw,
+    texture: &Texture2D,
+    img_w: f32,
+    img_h: f32,
+    scale: f32,
+    center: Vector2,
+    angle: f32,
+) {
+    let src = Rect::sized(texture.width() as f32, texture.height() as f32);
+    let dw = img_w * scale;
+    let dh = img_h * scale;
+    let dest = Rect::new(center.x, center.y, dw, dh);
+    d.draw_texture_pro(
+        texture,
+        src,
+        dest,
+        dest.center_origin(),
+        rotate::normalize_deg(angle),
+        Color::WHITE,
     );
 }
 
@@ -701,6 +760,7 @@ fn main() -> Result<()> {
         target_pan: Vector2::ZERO,
         view_scale: None,
         zoom_anchor: None,
+        angle: 0.0,
         ramps: Ramps::default(),
         pixelated: false,
         loader: None,
@@ -810,6 +870,13 @@ fn main() -> Result<()> {
     // A switch from the pan hold anchors at the window center instead (see
     // the switch below).
     let mut f_zoom_anchor: Option<Vector2> = None;
+    // `r` held captures the pointer like the `f` hold, and the vertical mouse
+    // travel turns the image: down turns it clockwise and up turns it
+    // counter-clockwise.
+    // The turn adds to the angle the image shows now, so a second hold
+    // continues from where the first one left it.
+    // The release keeps the angle, so the image stays turned.
+    let mut r_capture = false;
     // The held state of the zoom keys on layouts where `+`/`-` do not sit on
     // their US keycodes.
     // The raw character events repeat at the X auto-repeat rate, so this
@@ -1131,6 +1198,7 @@ fn main() -> Result<()> {
             let mut quit_pressed = false;
             let mut pixelated_toggle = false;
             let mut f_key = false;
+            let mut r_key = false;
             let mut nav_next_edge = false;
             let mut nav_prev_edge = false;
             let mut jump_first = false;
@@ -1150,6 +1218,7 @@ fn main() -> Result<()> {
                     KeyboardKey::KEY_Q => quit_pressed = true,
                     KeyboardKey::KEY_A => pixelated_toggle = true,
                     KeyboardKey::KEY_F => f_key = true,
+                    KeyboardKey::KEY_R => r_key = true,
                     KeyboardKey::KEY_SPACE | KeyboardKey::KEY_N => nav_next_edge = true,
                     KeyboardKey::KEY_BACKSPACE | KeyboardKey::KEY_P => nav_prev_edge = true,
                     KeyboardKey::KEY_G => {
@@ -1177,20 +1246,34 @@ fn main() -> Result<()> {
             // screen.
             // Auto-repeat re-fires the press edge while held, hence the
             // `!pointer_captured && !f_capture` guard.
+            // The same guard covers the `r` rotation hold, which grabs the
+            // pointer the same way.
             let mut f_click: Option<Vector2> = None;
-            if f_key && !pointer_captured && !f_capture {
+            if (f_key || r_key) && !pointer_captured && !f_capture && !r_capture {
                 grab_pos = rl.get_mouse_position();
                 drag_virtual = grab_pos;
                 rl.disable_cursor();
                 pointer_captured = true;
-                f_capture = true;
-                f_zoom_capture = shift;
-                f_zoom_anchor = f_zoom_capture.then_some(grab_pos);
-                if debug {
-                    eprintln!(
-                        "vv: f hold grab at ({:.0},{:.0}), zoom {}",
-                        grab_pos.x, grab_pos.y, f_zoom_capture
-                    );
+                if r_key {
+                    // `r` turns the image. The hold adds to the angle the
+                    // image shows now, so the press never resets the turn.
+                    r_capture = true;
+                    if debug {
+                        eprintln!(
+                            "vv: r hold grab at ({:.0},{:.0}), angle {}",
+                            grab_pos.x, grab_pos.y, st.angle
+                        );
+                    }
+                } else {
+                    f_capture = true;
+                    f_zoom_capture = shift;
+                    f_zoom_anchor = f_zoom_capture.then_some(grab_pos);
+                    if debug {
+                        eprintln!(
+                            "vv: f hold grab at ({:.0},{:.0}), zoom {}",
+                            grab_pos.x, grab_pos.y, f_zoom_capture
+                        );
+                    }
                 }
             }
             // A Shift change mid-hold switches the pan and the zoom.
@@ -1221,7 +1304,11 @@ fn main() -> Result<()> {
             // frame (the pressed queue records the press, but there is no
             // release edge to observe).
             // Without this the capture sticks.
-            if f_capture && !rl.is_key_down(KeyboardKey::KEY_F) {
+            // The `r` release keeps the angle, so the image stays turned.
+            if (f_capture || r_capture)
+                && !rl.is_key_down(KeyboardKey::KEY_F)
+                && !rl.is_key_down(KeyboardKey::KEY_R)
+            {
                 // Fold in this frame's motion before the lock is released
                 // (the drag block below no longer runs once capture ends).
                 let delta = rl.get_mouse_delta();
@@ -1235,19 +1322,28 @@ fn main() -> Result<()> {
                     restore_tries = 0;
                     pointer_captured = false;
                 }
-                f_capture = false;
                 // A zoom hold has no tap action: it would otherwise run the
                 // `f` fill aim on release.
-                if !f_dragged && !f_zoom_capture && !f_zoom_tapped {
+                if f_capture && !f_dragged && !f_zoom_capture && !f_zoom_tapped {
                     f_click = Some(grab_pos);
                 }
-                f_zoom_capture = false;
-                f_zoom_tapped = false;
-                f_zoom_anchor = None;
+                if f_capture {
+                    f_capture = false;
+                    f_zoom_capture = false;
+                    f_zoom_tapped = false;
+                    f_zoom_anchor = None;
+                }
+                if r_capture {
+                    // The release snaps a near quarter turn exactly, and it is
+                    // the only place that snaps: the drag itself turns freely.
+                    st.angle = rotate::snap_deg(st.angle);
+                    r_capture = false;
+                }
                 if debug {
                     eprintln!(
-                        "vv: f release: grab ({:.0},{:.0}), virtual ({:.0},{:.0}), dragged {}",
-                        grab_pos.x, grab_pos.y, drag_virtual.x, drag_virtual.y, f_dragged
+                        "vv: hold release: grab ({:.0},{:.0}), virtual ({:.0},{:.0}), dragged {}, \
+                         angle {}",
+                        grab_pos.x, grab_pos.y, drag_virtual.x, drag_virtual.y, f_dragged, st.angle
                     );
                 }
             }
@@ -1331,6 +1427,10 @@ fn main() -> Result<()> {
                 && st.img_w > 0.0
                 && let Some(scale) = st.view_scale
             {
+                let center = Vector2::new(win_w / 2.0 + st.pan.x, win_h / 2.0 + st.pan.y);
+                // A turned image must hit-test its own outline, so the point
+                // goes back into the unrotated image space first.
+                let m = rotate::unrotate_point(m, center, st.angle);
                 let ox = (win_w - st.img_w * scale) / 2.0 + st.pan.x;
                 let oy = (win_h - st.img_h * scale) / 2.0 + st.pan.y;
                 let inside = m.x >= ox
@@ -1367,6 +1467,7 @@ fn main() -> Result<()> {
                     pointer_captured = false;
                 }
                 f_capture = false;
+                r_capture = false;
                 st.mode = Mode::Grid;
                 // Hand the shown texture back to its grid entry and make
                 // that entry the grid selection (nsxiv-like).
@@ -1551,6 +1652,20 @@ fn main() -> Result<()> {
                         st.zoom = ZoomMode::Free((base * r).clamp(0.01, 100.0));
                     }
                 }
+                // A held `r` turns the vertical mouse travel into the image
+                // angle: down turns it clockwise and up turns it
+                // counter-clockwise.
+                // The capture keeps the pointer recentering, so the travel
+                // never stops at a screen edge, like the pan drag.
+                // Each frame adds this frame's travel to the current angle, so
+                // a new hold continues from the angle the image shows and a
+                // release keeps it.
+                if r_capture {
+                    // One full turn per ROTATE_DRAG_SPAN of travel, where the
+                    // span scales with the window.
+                    let span = win_w.max(win_h) * ROTATE_DRAG_SPAN;
+                    st.angle = rotate::apply_turn(st.angle, delta.y * ROTATE_DRAG_SPEED, span);
+                }
 
                 // Free zoom: the held +/- keys scale the free-zoom factor
                 // itself, with a ramped speed, so a hold zooms at a steady
@@ -1628,7 +1743,7 @@ fn main() -> Result<()> {
                     if debug {
                         eprintln!("vv: drag grab at ({:.0},{:.0})", grab_pos.x, grab_pos.y);
                     }
-                } else if drag_released && pointer_captured && !f_capture {
+                } else if drag_released && pointer_captured && !f_capture && !r_capture {
                     if debug {
                         eprintln!(
                             "vv: drag release: grab ({:.0},{:.0}), virtual ({:.0},{:.0}), rl pos \
@@ -1651,6 +1766,8 @@ fn main() -> Result<()> {
                 // The virtual cursor tracks the raw travel the same way.
                 // A Shift+F capture zooms instead: it tracks the travel and
                 // leaves the pan alone.
+                // An `r` capture turns the image instead: the travel it needs
+                // is vertical, so the pan stays put.
                 let dragging = pointer_captured;
                 if dragging {
                     let delta = rl.get_mouse_delta();
@@ -1659,7 +1776,7 @@ fn main() -> Result<()> {
                     drag_virtual.x += delta.x;
                     drag_virtual.y += delta.y;
                     // The pan gets the 2x speedup.
-                    if !f_zoom_capture {
+                    if !f_zoom_capture && !r_capture {
                         st.target_pan.x += delta.x * 2.0;
                         st.target_pan.y += delta.y * 2.0;
                     }
@@ -1823,23 +1940,18 @@ fn main() -> Result<()> {
                 bg.draw(&mut d, WinW::new(win_w), WinH::new(win_h));
             }
             if let Some(texture) = &st.view_tex {
-                let dw = st.img_w * st.view_scale.unwrap();
-                let dh = st.img_h * st.view_scale.unwrap();
-
-                // Source rect in texture pixels, NOT the logical image size.
-                // Uploads clamp oversized textures to MAX_TEXTURE_SIDE (and
-                // streaming previews to the screen size), so the texture can
-                // be smaller than st.img_w/h.
-                // A src rect larger than the texture produces UVs > 1, which
-                // the raylib repeat wrap renders as a tiled mosaic.
-                let src = Rect::sized(texture.width() as f32, texture.height() as f32);
-                let dest = Rect::new(
-                    (win_w - dw) / 2.0 + st.pan.x,
-                    (win_h - dh) / 2.0 + st.pan.y,
-                    dw,
-                    dh,
+                // The image turns around its own center on screen, which is
+                // the pan offset on top of the window middle.
+                let center = Vector2::new(win_w / 2.0 + st.pan.x, win_h / 2.0 + st.pan.y);
+                draw_turned(
+                    &mut d,
+                    texture,
+                    st.img_w,
+                    st.img_h,
+                    st.view_scale.unwrap(),
+                    center,
+                    st.angle,
                 );
-                d.draw_texture_pro(texture, src, dest, Vector2::ZERO, 0.0, Color::WHITE);
             } else if st.img_w > 0.0
                 && let Some(g) = grid.as_ref()
                 && let Some(id) = st.open_id
@@ -1854,16 +1966,8 @@ fn main() -> Result<()> {
                 let scale = st
                     .view_scale
                     .unwrap_or((win_w / st.img_w).min(win_h / st.img_h));
-                let dw = st.img_w * scale;
-                let dh = st.img_h * scale;
-                let src = Rect::sized(tex.width() as f32, tex.height() as f32);
-                let dest = Rect::new(
-                    (win_w - dw) / 2.0 + st.pan.x,
-                    (win_h - dh) / 2.0 + st.pan.y,
-                    dw,
-                    dh,
-                );
-                d.draw_texture_pro(tex, src, dest, Vector2::ZERO, 0.0, Color::WHITE);
+                let center = Vector2::new(win_w / 2.0 + st.pan.x, win_h / 2.0 + st.pan.y);
+                draw_turned(&mut d, tex, st.img_w, st.img_h, scale, center, st.angle);
             }
             // The threshold check happens above, before begin_drawing.
             if show_decoding {
