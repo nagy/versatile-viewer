@@ -11,6 +11,8 @@
 //! While a visual selection is active, every cell outside it draws dimmed
 //! with the `DIM_TINT` grey, so the selected set stands out.
 //! The plain cursor marking dims nothing.
+//! A left-button drag over the grid starts a blockwise visual selection,
+//! exactly like `Ctrl+v`.
 //!
 //! +/- zoom the thumbnails (the same 25% steps as the image-view free zoom).
 //! The default zoom fills the window exactly with the largest possible square
@@ -222,6 +224,17 @@ impl Visual {
     }
 }
 
+/// A left-button hold that started on a grid cell.
+///
+/// The travel over a second cell turns the hold into a blockwise visual
+/// selection anchored at [`Drag::anchor`], which is the `Ctrl+v` style.
+/// A hold that releases on its anchor cell stays a plain click.
+#[derive(Debug, Clone, Copy)]
+struct Drag {
+    /// The entry index where the press landed.
+    anchor: usize,
+}
+
 /// Why the grid could not open a directory.
 #[derive(Debug, Display, Error, From)]
 pub enum GridError {
@@ -327,6 +340,8 @@ pub struct Grid {
     scroll: f32,
     /// The active Vim-style visual selection, if any.
     visual: Option<Visual>,
+    /// The left-button hold in progress, if any.
+    drag: Option<Drag>,
     /// The cached layout, keyed by (entry count, window size, zoom).
     /// The code recomputes it only when one of those changes, because the
     /// layout math is O(n).
@@ -434,6 +449,7 @@ impl Grid {
                 .collect(),
             selected: 0,
             visual: None,
+            drag: None,
             result_tx: res_tx,
             result_rx: res_rx,
             inflight: 0,
@@ -763,6 +779,9 @@ impl Grid {
     /// `step` scales one press: Shift passes
     /// [`crate::SHIFT_SPEED_MULTIPLIER`], so the selection jumps that many
     /// cells.
+    /// A held left button that travels over the grid starts a blockwise
+    /// visual selection from the press cell, like `Ctrl+v`.
+    ///
     ///
     /// `None` means no action this frame.
     //
@@ -968,15 +987,44 @@ impl Grid {
         // second opens, in the nsxiv style).
         // `f` opens the cell under the cursor directly (a double-click
         // without the clicking: select and open in one step).
+        //
+        // A held left button that travels over the grid starts a blockwise
+        // visual selection from the cell where the press landed, so a drag
+        // selects a rectangle exactly like `Ctrl+v`.
+        // A drag that ends where it started is still a plain click, and a
+        // click on the cursor cell still opens it.
+        let mouse = rl.get_mouse_position();
+        let left_down = rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT);
+        // A release ends the hold. The code clears on the held state, not on
+        // the release edge, so a frame that returns early never leaves a
+        // stale hold behind.
+        if !left_down {
+            self.drag = None;
+        }
         if rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
-            && let Some(idx) = self.cell_at(rl.get_mouse_position(), win.0, win.1)
+            && let Some(idx) = self.cell_at(mouse, win.0, win.1)
         {
+            self.drag = Some(Drag { anchor: idx });
             if idx == self.selected {
                 return Some(GridAction::Open(idx));
             }
             self.selected = idx;
             self.ensure_visible(win.0, win.1);
         }
+        if let Some(drag) = self.drag
+            && let Some(idx) = self.cell_at(mouse, win.0, win.1)
+            && idx != drag.anchor
+        {
+            // The press already selected the anchor cell, so a travel to a
+            // second cell starts the block there.
+            self.visual = Some(Visual {
+                mode: VisualMode::Block,
+                anchor: drag.anchor,
+            });
+            self.selected = idx;
+            self.ensure_visible(win.0, win.1);
+        }
+
         if open_at_cursor && let Some(idx) = self.cell_at(rl.get_mouse_position(), win.0, win.1) {
             self.selected = idx;
             self.ensure_visible(win.0, win.1);

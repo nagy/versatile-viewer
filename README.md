@@ -78,7 +78,7 @@ because stdout carries protocol frames only.
 |`Ctrl+j` / `Ctrl+k`  |move selection              |free zoom in / out (hold: eased ramp)|
 |mouse wheel          |scroll (when zoomed in)     |free zoom (25% steps, anchored)|
 |mouse side buttons   |—                           |next / previous image          |
-|left-drag            |—                           |pan                            |
+|left-drag            |blockwise visual selection (`Ctrl+v` style)|pan                  |
 |click / click        |select / open               |—                              |
 
 `Esc` never quits the program.

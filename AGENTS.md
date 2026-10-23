@@ -74,6 +74,9 @@ The binary name is `vv`.
   Do not store a selected bit per entry.
   An active visual selection dims every cell outside it with `DIM_TINT`.
   The cursor without a visual selection dims nothing.
+  A left-button drag over the grid starts a `Block` visual selection from the press cell, so a drag matches `Ctrl+v`.
+  `Drag` holds the press anchor for the length of the hold.
+  A hold that releases on its anchor cell stays a plain click.
 
 ## Build
 
