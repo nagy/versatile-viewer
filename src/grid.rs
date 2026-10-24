@@ -408,18 +408,41 @@ fn run_job(job: &Job, cache: &Cache) -> Result<DecodeOk, DecodeError> {
             full: None,
         });
     }
-    let full = crate::decode_image(&job.path)?;
+    if !job.want_full {
+        // Thumbnail only, so no full-resolution texture is needed.
+        // A vector file paints the thumbnail size directly; a raster format
+        // decodes in full and downscales here, on the worker.
+        let d = crate::decode_thumb(&job.path, THUMB_LONG_SIDE)?;
+        let blur = job
+            .blur_enabled
+            .then(|| blurbg::small_blur(&d.image, job.blur_px));
+        store_thumb(cache, job, &d.image, d.source.0, d.source.1);
+        return Ok(DecodeOk {
+            thumb: d.image,
+            image: d.source,
+            blur,
+            full: None,
+        });
+    }
+    let full = crate::decode_full(&job.path)?;
     let blur = job
         .blur_enabled
-        .then(|| blurbg::small_blur(&full, job.blur_px));
+        .then(|| blurbg::small_blur(&full.image, job.blur_px));
     // Borrow the decoded buffer for the thumb: a clone of a large image costs
     // hundreds of megabytes.
-    let thumb = crate::downscale_rgba_ref(&full.data, full.width, full.height, THUMB_LONG_SIDE);
-    store_thumb(cache, job, &thumb, full.width, full.height);
-    let image = (full.width, full.height);
+    let thumb = crate::downscale_rgba_ref(
+        &full.image.data,
+        full.image.width,
+        full.image.height,
+        THUMB_LONG_SIDE,
+    );
+    store_thumb(cache, job, &thumb, full.source.0, full.source.1);
+    // A vector file measures its base raster, so the entry keeps that pair
+    // and never the thumbnail size.
+    let image = full.source;
     // The keep-set refill is the only job that carries the full image to the
     // main thread; otherwise the large buffer drops here.
-    let full = job.want_full.then_some(full);
+    let full = job.want_full.then_some(full.image);
     Ok(DecodeOk {
         thumb,
         image,
@@ -1272,7 +1295,18 @@ fn is_image_path(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
         matches!(
             e.to_ascii_lowercase().as_str(),
-            "jpg" | "jpeg" | "png" | "jxl" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "tga"
+            "jpg"
+                | "jpeg"
+                | "png"
+                | "jxl"
+                | "gif"
+                | "webp"
+                | "bmp"
+                | "tif"
+                | "tiff"
+                | "tga"
+                | "svg"
+                | "svgz"
         )
     })
 }
@@ -1427,6 +1461,50 @@ mod tests {
         };
         let refill = run_job(&keep, &cache).expect("decode");
         assert!(refill.full.is_some());
+        assert_eq!(refill.image, miss.image);
+    }
+
+    /// A vector entry measures its base raster, not its thumbnail.
+    #[cfg(all(feature = "cache", feature = "svg"))]
+    #[test]
+    fn a_vector_entry_measures_its_base_raster() {
+        let dir = TempDir::new().unwrap();
+        let svg = dir.path().join("logo.svg");
+        std::fs::write(
+            &svg,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50">
+                <rect width="100" height="50" fill="#00ff00"/>
+            </svg>"##,
+        )
+        .unwrap();
+        let cache = Cache::in_dir(dir.path().join("cache"));
+        let job = Job {
+            id: 0,
+            path: svg,
+            want_full: false,
+            blur_enabled: false,
+            blur_px: LongSide::new(64),
+        };
+        let miss = run_job(&job, &cache).expect("decode");
+        assert!(miss.full.is_none());
+        // The thumbnail paints at the cell size, and the entry keeps the
+        // base raster size, clamped up to the minimum side.
+        assert_eq!(
+            (miss.thumb.width, miss.thumb.height),
+            (ImgW::new(512), ImgH::new(256))
+        );
+        assert_eq!(miss.image, (ImgW::new(1024), ImgH::new(512)));
+        let hit = run_job(&job, &cache).expect("cache hit");
+        assert_eq!(hit.image, miss.image);
+        // The keep-set refill paints the base raster, so the open image zooms
+        // on more pixels than the cell shows.
+        let keep = Job {
+            want_full: true,
+            ..job.clone()
+        };
+        let refill = run_job(&keep, &cache).expect("decode");
+        let full = refill.full.expect("the keep set keeps the full image");
+        assert_eq!((full.width, full.height), (ImgW::new(1024), ImgH::new(512)));
         assert_eq!(refill.image, miss.image);
     }
 
@@ -1642,6 +1720,8 @@ mod tests {
         assert!(is_image_path(Path::new("foo.PNG")));
         assert!(is_image_path(Path::new("a/b/c.jpeg")));
         assert!(is_image_path(Path::new("photo.JXL")));
+        assert!(is_image_path(Path::new("logo.svg")));
+        assert!(is_image_path(Path::new("logo.SVGZ")));
         assert!(!is_image_path(Path::new("notes.txt")));
         assert!(!is_image_path(Path::new("archive.tar.gz")));
         assert!(!is_image_path(Path::new("noext")));

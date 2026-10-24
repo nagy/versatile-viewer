@@ -11,7 +11,21 @@ The binary name is `vv`.
 - License: AGPL-3.0-or-later.
 - Use raylib as the renderer.
 - Decode JPEG XL with `jxl-oxide` (pure Rust, no libjxl).
+- Decode JPEG XL with `jxl-oxide` (pure Rust, no libjxl).
 - Decode common formats with the `image` crate.
+- Rasterize SVG and SVGZ with `resvg` (pure Rust, no cairo).
+  The module is `src/svg.rs`, with `src/svg_off.rs` as the stub of a build without the `svg` feature.
+  A vector file has no pixel size, so it bakes one: `svg::base_side` clamps the declared long side into `BASE_MIN_SIDE` (1024) ..= `MAX_TEXTURE_SIDE` (8192).
+  The aspect stays exact, so the base raster and the thumbnail share one shape.
+  The base size is the source size: the grid entry, the cache header and the image fit all measure that pair, never the thumbnail.
+  `decode_thumb` paints a vector file at the thumbnail size directly, so a cell never paints a big pixmap only to shrink it.
+  `decode_announce` sends the header of a vector file before the paint, so the window fits the picture while the raster arrives.
+  Sniffing reads content: magic, then a BOM, comments, a prolog and a doctype, then an `<svg` root. A gzip head sniffs its decompressed head.
+  `MAX_INPUT` (32 MiB) caps the read and the decompression, so a gzip bomb fails.
+  External references never resolve (`resources_dir` stays `None`), so no file makes the viewer read another path.
+  The host font database loads once per process (`fontdb`, `OnceLock`), so `<text>` renders with real fonts and a whole directory pays one scan.
+  `resvg` covers the static subset only: no script, no animation, and `raster-images` stays off, so an embedded JPEG/WebP/GIF draws nothing while an embedded PNG does.
+  A retained `usvg::Tree` (`svg::Vector`) is the hook for a later zoom-tier re-raster.
 - Grid extension filter: `src/grid.rs` `is_image_path`.
   Keep the crate features in sync.
 - Dispatch decode on sniffed content.
@@ -99,7 +113,6 @@ The binary name is `vv`.
 
 - `nix build .#versatile-viewer-doc` makes the rustdoc HTML.
 - `nix flake check` gates clippy (`--all-targets -- --deny warnings`), tests, doctests, and treefmt.
-
 ## Run
 
 Run `nix run . -- <image-path-or-directory>`.

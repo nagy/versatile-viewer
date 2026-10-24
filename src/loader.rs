@@ -31,7 +31,7 @@ use derive_more::{Display, Error, From};
 use jxl_oxide::{InitializeResult, JxlImage};
 
 use crate::{
-    DecodedImage, blurbg, cap_texture_side, decode_common,
+    DecodedImage, blurbg, cap_texture_side, decode_announce,
     dim::{ImgH, ImgW, LongSide, PreviewPx},
     downscale_rgba,
     error::DecodeError,
@@ -188,8 +188,15 @@ fn stream(
     preview_px: PreviewPx,
 ) -> Result<Option<DecodeMsg>, LoadError> {
     if !is_jxl(path) {
-        // No progressive data for common formats: one full decode.
-        let image = decode_common(path)?;
+        // No progressive data for the common formats: one full decode.
+        // A vector file announces its base size before it paints, so the
+        // window fits the picture while the raster arrives.
+        let image = {
+            let mut announce = |width: ImgW, height: ImgH| {
+                let _ = tx.send(Ok(DecodeMsg::Header { width, height }));
+            };
+            decode_announce(path, &mut announce)?
+        };
         let blur = blur_enabled.then(|| blurbg::small_blur(&image, blur_px));
         return Ok(Some(DecodeMsg::Done { image, blur }));
     }

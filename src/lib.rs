@@ -21,6 +21,10 @@
 //! JPEG XL decodes with pure-Rust jxl-oxide and streams progressively in
 //! [`loader`].
 //! The common formats decode with the `image` crate.
+//! SVG and SVGZ rasterize with pure-Rust resvg in [`svg`], which bakes a base
+//! raster because a vector file has no pixels of its own.
+//! A decode returns a [`Decoded`]: the pixels plus the source size the viewer
+//! fits and zooms.
 //! [`downscale_rgba`], [`cap_texture_side`] and [`upload_rgba`] keep the
 //! pixel and texture budget.
 //! Decode workers cap the buffer, so the main thread never resizes a large
@@ -46,6 +50,11 @@ pub mod loader;
 pub mod mcp;
 pub mod placeholder;
 pub mod rotate;
+#[cfg(feature = "svg")]
+pub mod svg;
+#[cfg(not(feature = "svg"))]
+#[path = "svg_off.rs"]
+pub mod svg;
 #[cfg(feature = "cache")]
 pub mod thumbcache;
 #[cfg(not(feature = "cache"))]
@@ -209,18 +218,114 @@ const fn is_common_magic(m: [u8; 2]) -> bool {
     )
 }
 
+/// A decoded raster plus the source dimensions it measures.
+///
+/// A raster format decodes at its own size, so `image` and `source` agree.
+/// A vector file has no pixels, so the code bakes a base raster and reports
+/// that size as the source: the aspect stays exact, and the long side stays
+/// between 1024 px and [`MAX_TEXTURE_SIDE`].
+/// The grid entry, the cache header and the image fit all read `source`, so a
+/// 512 px thumbnail and a 1024 px base raster of one file measure the same
+/// picture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decoded {
+    /// The pixels to upload.
+    pub image: DecodedImage,
+    /// The dimensions the viewer fits and zooms, as [`ImgW`] and [`ImgH`].
+    pub source: (ImgW, ImgH),
+}
+
+impl Decoded {
+    /// A raster decode, where the pixels and the source size agree.
+    fn raster(image: DecodedImage) -> Self {
+        Self {
+            source: (image.width, image.height),
+            image,
+        }
+    }
+}
+
 /// Decode an image file and dispatch by content-sniffed format.
+///
+/// A vector file decodes at its base raster size (see [`Decoded`]).
 ///
 /// # Errors
 ///
 /// The function errors when it cannot open, sniff or decode the file
 /// (missing file, garbage bytes, unsupported content).
 pub fn decode_image(path: &Path) -> Result<DecodedImage, DecodeError> {
-    if is_jxl(path) {
-        decode_jxl(path)
-    } else {
-        decode_common(path)
+    decode_full(path).map(|d| d.image)
+}
+
+/// Decode an image file into its full-size raster.
+///
+/// A raster format decodes at its own size.
+/// A vector file paints its base raster, which [`Decoded::source`] reports.
+///
+/// # Errors
+///
+/// The function errors when it cannot open, sniff or decode the file.
+pub fn decode_full(path: &Path) -> Result<Decoded, DecodeError> {
+    if svg::sniff(path) {
+        return svg::decode_base(path);
     }
+    decode_raster(path)
+}
+
+/// Decode an image file into a thumbnail whose long side lands on `long`.
+///
+/// A vector file paints that size directly, so a cell never paints a
+/// full-size pixmap only to shrink it.
+/// A raster format decodes in full and downscales here, on the worker.
+///
+/// # Errors
+///
+/// The function errors when it cannot open, sniff or decode the file.
+pub fn decode_thumb(path: &Path, long: LongSide) -> Result<Decoded, DecodeError> {
+    if svg::sniff(path) {
+        return svg::decode_thumb(path, long);
+    }
+    let full = decode_raster(path)?;
+    let thumb = downscale_rgba_ref(&full.image.data, full.image.width, full.image.height, long);
+    Ok(Decoded {
+        image: thumb,
+        source: full.source,
+    })
+}
+
+/// Decode a non-vector file with the JXL or the common-format decoder.
+fn decode_raster(path: &Path) -> Result<Decoded, DecodeError> {
+    let image = if is_jxl(path) {
+        decode_jxl(path)?
+    } else {
+        decode_common(path)?
+    };
+    Ok(Decoded::raster(image))
+}
+
+/// Decode a file for the image view, announcing the dimensions when the code
+/// learns them before the pixels.
+///
+/// A vector file parses in a few milliseconds and paints in tens, so the
+/// header goes out first and the window fits the picture while the raster
+/// arrives.
+/// A raster format announces nothing, because a one-step decode reports its
+/// size with the pixels.
+pub(crate) fn decode_announce(
+    path: &Path,
+    announce: &mut dyn FnMut(ImgW, ImgH),
+) -> Result<DecodedImage, DecodeError> {
+    #[cfg(feature = "svg")]
+    if svg::sniff(path) {
+        let vector = svg::parse(path)?;
+        let (width, height) = vector.base_size();
+        announce(width, height);
+        return vector.render_base();
+    }
+    // Without SVG support no decode reports its size early.
+    #[cfg(not(feature = "svg"))]
+    let _ = announce;
+    decode_image(path)
 }
 
 /// The longest texture side the code uploads.

@@ -9,6 +9,8 @@
 //! The content carries the source stamp (length and modification time) and
 //! the image dimensions in a fixed header, so a changed source file never
 //! shows a stale thumbnail.
+//! A vector source stores its base raster size there (see [`crate::svg`]),
+//! because the file declares no pixel size of its own.
 //! The header also carries the [`Placeholder`] of the thumbnail: a `ThumbHash`
 //! of at most 32 bytes.
 //! A launch reads that header only (see [`Cache::load_placeholder`]), so a

@@ -7,7 +7,15 @@ JPEG XL decodes through [jxl-oxide], pure Rust — no libjxl C dependency —
 with progressive streaming: a blurry full-size preview appears long before
 all bytes arrive. The stream reads from a memory map, so a large file costs
 no extra copy. Common formats (PNG, JPEG, WebP, GIF, BMP, TIFF, TGA)
-decode through the [image] crate. Thumbnails render in a directory grid
+decode through the [image] crate. SVG and SVGZ rasterize through [resvg]
+(pure Rust, no cairo): the file head is sniffed, the document parses with
+usvg, and tiny-skia paints it. A vector file has no pixels of its own, so
+the long side bakes at the declared size clamped into 1024..=8192 px — an
+icon zooms without turning to mush, and a huge viewBox lands on the texture
+limit. Text renders with the host fonts, embedded PNG images render, and
+SVGZ decompresses under a size cap. The grid paints a vector cell straight
+at 512 px, so a cell never paints a full-size pixmap only to shrink it.
+Thumbnails render in a directory grid
 that fills the window, decoded in parallel on a background pool, and sorted
 in natural order (`img2` before `img10`). Every downscale, including the
 grid thumbnail, the texture cap, the progressive preview and the blurred
@@ -22,10 +30,12 @@ cached thumbnail is 512 px and the grid thumb is the same size, so a warm
 cell matches a fresh one. The cache keeps its entries after the viewer exits,
 so the next launch starts warm. A stale entry re-decodes, and a deleted image
 leaves its thumbnail to the user. The `cache` cargo feature (on by default)
-owns the cache; `--no-default-features` decodes every file on every launch.
+owns the cache; `--no-default-features` decodes every file on every launch. The `svg` cargo feature (on by default) owns the
+SVG path; `--no-default-features --features cache` leaves it out.
 
 [jxl-oxide]: https://crates.io/crates/jxl-oxide
 [image]: https://crates.io/crates/image
+[resvg]: https://crates.io/crates/resvg
 [fast_image_resize]: https://crates.io/crates/fast_image_resize
 [ThumbHash]: https://evanw.github.io/thumbhash/
 

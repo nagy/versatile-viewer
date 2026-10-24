@@ -9,8 +9,11 @@ description = "A fast image (and later, video) viewer: nsxiv meets mpv. JPEG XL 
 # The on-disk thumbnail cache: the XDG lookup, the entry key and the JPEG XL
 # encoder.
 # Without it every launch decodes every file, and the grid still works.
-default = ["cache"]
+default = ["cache", "svg"]
 cache = ["dep:jixel", "dep:sha2", "dep:xdg"]
+# SVG: sniffs the file head, parses with usvg and paints with tiny-skia.
+# Without it src/svg_off.rs never claims a file, so no `.svg` file decodes.
+svg = ["dep:fontdb", "dep:flate2", "dep:resvg", "dep:tiny-skia", "dep:usvg"]
 
 [dependencies]
 anyhow = "1"
@@ -83,6 +86,42 @@ sha2 = { version = "0.10", optional = true }
 jixel = { version = "0.5", default-features = false, features = [
   "avx",
   "sse",
+], optional = true }
+# SVG rasterization, pure Rust (Apache-2.0 OR MIT), so no cairo and no C
+# toolchain beside raylib's.
+# `text` + `system-fonts` render <text> with the host fonts, which a logo or
+# a diagram needs.
+# `svgz` accepts a gzip codestream.
+# The static subset only: no script, no animation, no `a` element.
+# `raster-images` stays off, so an embedded JPEG/WebP/GIF in an <image>
+# element does not render; an embedded PNG does, because the `png` crate is a
+# core dependency of usvg.
+resvg = { version = "0.49.0", default-features = false, features = [
+  "system-fonts",
+  "svgz",
+  "text",
+], optional = true }
+# The rasterizer under resvg: the code paints a usvg tree into a Pixmap.
+tiny-skia = { version = "0.12.0", default-features = false, features = [
+  "std",
+], optional = true }
+# Gzip for a `.svgz` head. The code decompresses itself, so a gzip bomb hits
+# a size cap instead of the allocator.
+flate2 = { version = "1.1.10", default-features = false, features = [
+  "rust_backend",
+], optional = true }
+# The host font database behind `system-fonts`. The code loads it once per
+# process and hands the same Arc to every SVG parse.
+fontdb = { version = "0.24.0", default-features = false, features = [
+  "fs",
+  "memmap",
+], optional = true }
+# The parser under resvg: XML, CSS and the tree the painter consumes.
+# The same feature flags as resvg, so one version serves both.
+usvg = { version = "0.49.0", default-features = false, features = [
+  "system-fonts",
+  "svgz",
+  "text",
 ], optional = true }
 
 # X11 WM_CLASS setup (XSetClassHint); Linux only, links the same libX11

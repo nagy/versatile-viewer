@@ -29,6 +29,22 @@ pub enum DecodeError {
     /// The decoded framebuffer had an unexpected channel count.
     #[display("unexpected channel count from jxl-oxide: {_0}")]
     Channels(#[error(ignore)] u32),
+    /// The SVG parser or painter rejected the file.
+    ///
+    /// The variant carries a boxed error, like [`Self::Jxl`], so the code
+    /// builds it by hand: a `From` impl would collide with the JXL one.
+    #[display("svg: {_0}")]
+    #[from(skip)]
+    Svg(Box<dyn std::error::Error + Send + Sync + 'static>),
+    /// The raster pixmap of a vector file could not allocate.
+    #[display("svg raster allocation failed")]
+    Raster,
+    /// A vector file passed the input cap.
+    #[display("svg input too large")]
+    Input,
+    /// The build has no SVG support.
+    #[display("svg support not compiled in")]
+    VectorOff,
 }
 
 /// A failed GL texture upload.
