@@ -15,9 +15,11 @@ background, runs through [fast_image_resize] (SIMD, Lanczos3). The grid
 thumbnails cache in `$XDG_CACHE_HOME/vv/thumbnails/`, so a second launch of a
 directory fills the grid from the cache without a decode. An entry holds a
 lossy JPEG XL codestream (quality 95, exact alpha), so 512 px costs tens of
-kilobytes instead of a megabyte of raw RGBA8. The cached thumbnail is 512 px,
-so a warm cell is softer than a fresh one until the full-resolution decode
-catches up. The cache keeps its entries after the viewer exits, so the next
+kilobytes instead of a megabyte of raw RGBA8. The entry header also carries a
+[ThumbHash] of the thumb (at most 32 bytes), so a warm launch paints every
+cell from a header read of about 200 bytes before any decode starts. The
+cached thumbnail is 512 px, so a warm cell is softer than a fresh one until
+the full-resolution decode catches up. The cache keeps its entries after the viewer exits, so the next
 launch starts warm. A stale entry re-decodes, and a deleted image leaves its
 thumbnail to the user. The `cache` cargo feature (on by default) owns the
 cache; `--no-default-features` decodes every file on every launch.
@@ -25,6 +27,7 @@ cache; `--no-default-features` decodes every file on every launch.
 [jxl-oxide]: https://crates.io/crates/jxl-oxide
 [image]: https://crates.io/crates/image
 [fast_image_resize]: https://crates.io/crates/fast_image_resize
+[ThumbHash]: https://evanw.github.io/thumbhash/
 
 ## Run
 

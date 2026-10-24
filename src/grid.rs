@@ -34,6 +34,14 @@
 //! This keeps frame times short.
 //! Decode stalls then never swallow key taps.
 //! The neighbors are ready to open at once.
+//!
+//! Beside the decodes, one cheap worker per entry reads only the header of
+//! its cache entry and renders the [`Placeholder`] it holds (a `ThumbHash` of a
+//! few bytes).
+//! The grid uploads that tiny texture and draws it in the cell until the
+//! decoded thumb lands, so a warm launch paints the whole window from headers
+//! instead of a grey square per cell.
+//! A cold launch has no cache entry, so it keeps the grey cell.
 
 use std::{
     cell::RefCell,
@@ -58,6 +66,10 @@ use crate::{
 
 const MARGIN: f32 = 8.0;
 const GAP: f32 = 8.0;
+/// The maximum number of placeholder textures uploaded per frame.
+/// The uploads are cheap (a 64 px texture each), but a directory of thousands
+/// of files must not stall one frame with all of them.
+const PLACEHOLDER_UPLOADS_PER_FRAME: usize = 16;
 /// Grid zoom step for +/- (the same 25% steps as the image-view free zoom).
 const GRID_ZOOM_STEP: f32 = 1.25;
 /// Lower bound for the thumbnail side when the grid zooms out.
@@ -109,6 +121,16 @@ const CACHE_LONG_SIDE: LongSide = LongSide::new(512);
 struct DecodeResult {
     id: u64,
     res: Result<DecodeOk, DecodeError>,
+}
+
+/// A finished placeholder read, matched to an entry by its stable id.
+#[derive(Debug)]
+struct PlaceholderResult {
+    id: u64,
+    /// The source dimensions from the cache header, zero on a miss.
+    image: (ImgW, ImgH),
+    /// The rendered placeholder, or None on a miss or a render failure.
+    rgba: Option<DecodedImage>,
 }
 
 /// Successful decode payload: the thumbnail and the full-resolution image.
@@ -291,6 +313,11 @@ pub struct GridEntry {
     /// Full-resolution textures live in `full` only for a small keep-set,
     /// so VRAM stays bounded on large directories.
     pub texture: Option<Texture2D>,
+    /// The few-byte [`Placeholder`] of the thumb, uploaded as a small texture.
+    /// The grid draws it until `texture` lands, so a warm launch never shows
+    /// a plain grey cell.
+    /// The code drops it as soon as the decoded thumb uploads.
+    pub placeholder: Option<Texture2D>,
     /// The full-resolution texture.
     /// The code keeps it only for the selection or open entry and its
     /// prefetched neighbors (see `load_pending`), so opening them is instant.
@@ -329,6 +356,8 @@ pub struct Grid {
     pub selected: usize,
     result_tx: Sender<DecodeResult>,
     result_rx: Receiver<DecodeResult>,
+    /// The placeholder pass of a launch (see [`PlaceholderResult`]).
+    placeholder_rx: Receiver<PlaceholderResult>,
     inflight: usize,
     /// Auto-repeat state for the four direction keys (h/j/k/l + arrows),
     /// indexed [left, right, up, down], from the xset r rate values.
@@ -405,6 +434,17 @@ fn store_thumb(cache: &Cache, job: &Job, thumb: &DecodedImage, width: ImgW, heig
     let _ = cache.store(&job.path, CACHE_LONG_SIDE, &cached, (width, height));
 }
 
+/// Run one placeholder job on a worker: the cache header, then the DCT
+/// render.
+/// A miss is normal (a cold directory, a changed source, the cache off), so
+/// the job stays silent and the grid keeps its grey cell.
+fn run_placeholder(cache: &Cache, path: &Path) -> ((ImgW, ImgH), Option<DecodedImage>) {
+    let Ok((hash, image)) = cache.load_placeholder(path, CACHE_LONG_SIDE) else {
+        return ((ImgW::new(0), ImgH::new(0)), None);
+    };
+    (image, hash.render())
+}
+
 impl Grid {
     /// List the images in a directory (sorted by file name) and start the
     /// background decode worker.
@@ -429,29 +469,53 @@ impl Grid {
         });
 
         let (res_tx, res_rx) = channel::<DecodeResult>();
+        let cache = Arc::new(Cache::new());
+        let entries: Vec<GridEntry> = paths
+            .into_iter()
+            .enumerate()
+            .map(|(i, path)| GridEntry {
+                path,
+                width: ImgW::new(0),
+                height: ImgH::new(0),
+                texture: None,
+                placeholder: None,
+                full: None,
+                id: i as u64,
+                queued: false,
+                failed: None,
+                viewing: false,
+                blur: None,
+            })
+            .collect();
+
+        // The placeholder pass: one cheap worker per entry, so the grid paints
+        // the window before the first decode lands.
+        // A job reads one header of about 200 bytes and renders 32 px, so the
+        // pass needs no inflight cap.
+        // Without a cache directory there is no header to read, so the pass
+        // stays off.
+        let (ph_tx, placeholder_rx) = channel::<PlaceholderResult>();
+        if cache.dir().is_some() {
+            for e in &entries {
+                let (id, path) = (e.id, e.path.clone());
+                let cache = Arc::clone(&cache);
+                let tx = ph_tx.clone();
+                rayon::spawn(move || {
+                    let (image, rgba) = run_placeholder(&cache, &path);
+                    let _ = tx.send(PlaceholderResult { id, image, rgba });
+                });
+            }
+        }
+        drop(ph_tx);
 
         Ok(Grid {
-            entries: paths
-                .into_iter()
-                .enumerate()
-                .map(|(i, path)| GridEntry {
-                    path,
-                    width: ImgW::new(0),
-                    height: ImgH::new(0),
-                    texture: None,
-                    full: None,
-                    id: i as u64,
-                    queued: false,
-                    failed: None,
-                    viewing: false,
-                    blur: None,
-                })
-                .collect(),
+            entries,
             selected: 0,
             visual: None,
             drag: None,
             result_tx: res_tx,
             result_rx: res_rx,
+            placeholder_rx,
             inflight: 0,
             layout_cache: RefCell::new(None),
             rep_dir: Default::default(),
@@ -459,7 +523,7 @@ impl Grid {
             scroll: 0.0,
             blur_enabled: blurbg::enabled(),
             blur_px: blurbg::blur_px(),
-            cache: Arc::new(Cache::new()),
+            cache,
         })
     }
 
@@ -495,8 +559,49 @@ impl Grid {
             )
             .collect();
 
+        self.drain_placeholders(rl, thread);
         self.drain_results(rl, thread, &keep);
         self.dispatch(priority, scan_start, scan, &keep);
+    }
+
+    /// Apply finished placeholder reads, bounded per frame.
+    /// The upload needs the main thread, but a whole directory of placeholders
+    /// must not land in one frame, so the budget
+    /// [`PLACEHOLDER_UPLOADS_PER_FRAME`] spreads them.
+    /// An entry that already holds a thumb or a failure skips the upload, and
+    /// the source dimensions still land, because the image view fits the
+    /// picture before any decode.
+    fn drain_placeholders(&mut self, rl: &mut RaylibHandle, thread: &RaylibThread) {
+        for _ in 0..PLACEHOLDER_UPLOADS_PER_FRAME {
+            let Ok(res) = self.placeholder_rx.try_recv() else {
+                break;
+            };
+            let Some(i) = self.index_of(res.id) else {
+                continue; // the entry left meanwhile, so the result is moot
+            };
+            let e = &mut self.entries[i];
+            if e.width.get() == 0 && res.image.0.get() > 0 {
+                // The header carries the source dimensions, so the image view
+                // fits the picture before the first decode lands.
+                e.width = res.image.0;
+                e.height = res.image.1;
+            }
+            let Some(rgba) = res.rgba else {
+                continue;
+            };
+            if e.texture.is_some() || e.placeholder.is_some() || e.failed.is_some() {
+                continue;
+            }
+            match crate::upload_rgba(rl, thread, &rgba.data, rgba.width, rgba.height) {
+                Ok(tex) => {
+                    // Bilinear hides the small source size: the cell draws the
+                    // placeholder far larger than its texture.
+                    tex.set_texture_filter(thread, TextureFilter::TEXTURE_FILTER_BILINEAR);
+                    e.placeholder = Some(tex);
+                }
+                Err(err) => eprintln!("vv: {}: {err:#}", e.path.display()),
+            }
+        }
     }
 
     /// Step 1 of [`Self::load_pending`]: apply finished decodes.
@@ -522,6 +627,9 @@ impl Grid {
                         Ok(tex) => {
                             let e = &mut self.entries[i];
                             e.texture = Some(tex);
+                            // The decoded thumb replaces the placeholder, so
+                            // its texture goes now.
+                            e.placeholder = None;
                             e.width = image.0;
                             e.height = image.1;
                             e.blur = blur;
@@ -1109,6 +1217,12 @@ impl Grid {
                     24,
                     Color::new(214, 92, 92, 255).tint(tint),
                 );
+            } else if let Some(tex) = &e.placeholder {
+                // The few-byte ThumbHash placeholder, until the decoded thumb
+                // lands.
+                // It holds the whole image, so the draw crops it like a thumb.
+                let src = Rect::sized(tex.width() as f32, tex.height() as f32).center_square();
+                d.draw_texture_pro(tex, src, thumb, Vector2::ZERO, 0.0, tint);
             } else {
                 // Still decoding: placeholder square.
                 d.draw_rectangle_rec(thumb, Color::new(28, 28, 28, 255).tint(tint));

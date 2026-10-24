@@ -32,6 +32,8 @@
 //! [`rotate`] holds the image-view rotation angle behind the `r` hold.
 //! [`thumbcache`] keeps the grid thumbnails in `$XDG_CACHE_HOME`, so a warm
 //! cache fills the grid without a decode, across the exit of the viewer.
+//! [`placeholder`] holds the few-byte `ThumbHash` of a thumb, which the cache
+//! header carries so a warm launch paints every cell before any decode.
 //! The binary in `main.rs` wires these pieces into the window and event loop.
 //! The unit tests and doctests here keep the pure helpers honest.
 
@@ -42,6 +44,7 @@ pub mod grid;
 pub mod keyrepeat;
 pub mod loader;
 pub mod mcp;
+pub mod placeholder;
 pub mod rotate;
 #[cfg(feature = "cache")]
 pub mod thumbcache;

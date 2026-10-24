@@ -45,6 +45,10 @@ fast_image_resize = { version = "6.1", default-features = false, features = [
 bytemuck = "1"
 # Natural-order file name sort (img2 before img10).
 natord = "1"
+# The few-byte placeholder of a grid thumbnail (ThumbHash, MIT, no
+# dependencies). The cache header carries one payload per entry, so a warm
+# launch paints the grid from headers before any JPEG XL decode.
+thumbhash = "0.1"
 # Memory-mapped file reads for the streaming JXL loader.
 memmap2 = "0.9"
 derive_more = { version = "2.1.1", default-features = false, features = [

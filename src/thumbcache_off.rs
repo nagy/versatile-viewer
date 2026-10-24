@@ -86,6 +86,19 @@ impl Cache {
         Err(CacheError::Off)
     }
 
+    /// The cache is off, so the function finds no placeholder.
+    ///
+    /// # Errors
+    ///
+    /// The function always errors with [`CacheError::Off`].
+    pub fn load_placeholder(
+        &self,
+        _path: &Path,
+        _long_side: LongSide,
+    ) -> Result<(crate::placeholder::Placeholder, (ImgW, ImgH)), CacheError> {
+        Err(CacheError::Off)
+    }
+
     /// The cache is off, so the function stores nothing.
     ///
     /// # Errors

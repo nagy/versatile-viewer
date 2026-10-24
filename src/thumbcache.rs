@@ -9,6 +9,11 @@
 //! The content carries the source stamp (length and modification time) and
 //! the image dimensions in a fixed header, so a changed source file never
 //! shows a stale thumbnail.
+//! The header also carries the [`Placeholder`] of the thumbnail: a `ThumbHash`
+//! of at most 32 bytes.
+//! A launch reads that header only (see [`Cache::load_placeholder`]), so a
+//! warm grid paints every cell from a 200 byte read per file, before any
+//! JPEG XL decode.
 //! A JPEG XL codestream follows the header: lossy at [`QUALITY`], with an
 //! exact alpha channel.
 //! A 512 px entry therefore costs tens of kilobytes, not the megabyte of raw
@@ -46,6 +51,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     DecodedImage,
     dim::{ImgH, ImgW, LongSide},
+    placeholder::Placeholder,
 };
 
 /// The directory under the XDG cache home.
@@ -61,7 +67,8 @@ const MAGIC: [u8; 4] = *b"VVTH";
 /// payload needs a version bump only for a build that reads the same magic.
 /// Version 2 holds a lossy JPEG XL codestream where version 1 held RGBA8
 /// pixels, so every version 1 entry stays unread and the source re-decodes.
-const FORMAT: u32 = 2;
+/// Version 3 adds the [`Placeholder`] payload after the source stamp.
+const FORMAT: u32 = 3;
 /// The JPEG XL quality of an entry, on the `jixel` 0..100 scale
 /// (`distance_from_quality`).
 /// 95 is distance 0.1.
@@ -73,11 +80,11 @@ const QUALITY: f32 = 95.0;
 /// the color channels stay lossy.
 /// A default would follow [`QUALITY`] and band a transparent gradient.
 const ALPHA_DISTANCE: f32 = 0.0;
-/// Header bytes before the codestream.
+/// Header bytes before the source path.
 /// magic, format, thumb width, thumb height, image width, image height,
 /// source length, source mtime seconds, source mtime nanoseconds, source
-/// path length.
-const HEADER: usize = 4 + 4 + 4 + 4 + 4 + 4 + 8 + 8 + 4 + 4;
+/// path length, placeholder length, placeholder bytes.
+const HEADER: usize = 4 + 4 + 4 + 4 + 4 + 4 + 8 + 8 + 4 + 4 + 1 + crate::placeholder::MAX_BYTES;
 /// The longest source path the header stores.
 const MAX_PATH: usize = 4096;
 /// Writes beyond this budget stop for the rest of the run, so a burst of
@@ -111,6 +118,11 @@ pub enum CacheError {
     /// The cache file bytes do not match the format.
     #[display("cache file is corrupt")]
     Corrupt,
+    /// The cache file holds no placeholder payload, so a launch shows the
+    /// plain grey cell until the decode lands.
+    #[display("cache entry holds no placeholder")]
+    #[from(skip)]
+    NoPlaceholder,
     /// The encoder rejected the thumbnail, so this entry never reaches the
     /// disk. The grid already holds the pixels, so the only loss is the warm
     /// launch.
@@ -216,6 +228,49 @@ impl Cache {
             }
         })?;
         decode_entry(&bytes, &Stamp::of(&canonical)?, &canonical)
+    }
+
+    /// Read the placeholder of `path` at `long_side`, plus the source
+    /// dimensions.
+    ///
+    /// The function reads the fixed header and the source path only, so it
+    /// never touches the codestream and never decodes an image.
+    /// That makes it the cheap first pass of a launch: one open per file,
+    /// about 200 bytes of reads, and a DCT render of 32 px on the worker.
+    /// The file must match the source length and modification time, like
+    /// [`Self::load`].
+    /// Run this on a decode worker, never on the main thread.
+    ///
+    /// # Errors
+    ///
+    /// The function errors on a miss, a changed source, a corrupt header, or
+    /// an entry without a placeholder payload.
+    pub fn load_placeholder(
+        &self,
+        path: &Path,
+        long_side: LongSide,
+    ) -> Result<(Placeholder, (ImgW, ImgH)), CacheError> {
+        use std::{io::Read as _, os::unix::ffi::OsStrExt as _};
+        let (file, canonical) = self.entry(path, long_side)?;
+        let mut file = fs::File::open(&file).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                CacheError::NotFound(e)
+            } else {
+                CacheError::Io(e)
+            }
+        })?;
+        let mut head = [0u8; HEADER];
+        file.read_exact(&mut head)
+            .map_err(|_| CacheError::Corrupt)?;
+        let head = parse_head(&head)?;
+        let mut stored_path = vec![0u8; head.path_len];
+        file.read_exact(&mut stored_path)
+            .map_err(|_| CacheError::Corrupt)?;
+        if head.stamp != Stamp::of(&canonical)? || stored_path != canonical.as_os_str().as_bytes() {
+            return Err(CacheError::Stale);
+        }
+        let hash = head.hash.ok_or(CacheError::NoPlaceholder)?;
+        Ok((hash, head.image))
     }
 
     /// Store the thumbnail of `path` at `long_side`.
@@ -418,22 +473,50 @@ fn encode_entry(
     out.extend_from_slice(&stamp.secs.to_le_bytes());
     out.extend_from_slice(&stamp.nanos.to_le_bytes());
     out.extend_from_slice(&(src.len() as u32).to_le_bytes());
+    // The placeholder is a hint, so a payload the encoder cannot fit writes a
+    // zero length and the entry still loads.
+    let hash = Placeholder::encode(thumb);
+    out.push(hash.map_or(0, |h| h.len() as u8));
+    let mut padded = [0u8; crate::placeholder::MAX_BYTES];
+    if let Some(hash) = hash {
+        let bytes = hash.as_bytes();
+        padded
+            .get_mut(..bytes.len())
+            .ok_or(CacheError::Corrupt)?
+            .copy_from_slice(bytes);
+    }
+    out.extend_from_slice(&padded);
     out.extend_from_slice(src);
     out.extend_from_slice(&codestream);
     Ok(out)
 }
 
-/// Parse cache file bytes, with the source stamp and path checked.
-fn decode_entry(bytes: &[u8], stamp: &Stamp, path: &Path) -> Result<CachedThumb, CacheError> {
-    use std::os::unix::ffi::OsStrExt;
+/// The fixed header of an entry, parsed.
+struct Head {
+    /// The thumbnail dimensions.
+    thumb: (ImgW, ImgH),
+    /// The source dimensions.
+    image: (ImgW, ImgH),
+    /// The stamp the entry was written with.
+    stamp: Stamp,
+    /// The length of the source path that follows the header.
+    path_len: usize,
+    /// The placeholder payload, or None when the entry carries none.
+    hash: Option<Placeholder>,
+}
+
+/// Parse the fixed [`HEADER`] bytes of an entry.
+///
+/// The function reads no bytes beyond the header, so a caller that needs only
+/// the placeholder reads that much and stops.
+fn parse_head(bytes: &[u8]) -> Result<Head, CacheError> {
     let mut r = Reader::new(bytes);
     if r.u32()? != u32::from_le_bytes(MAGIC) || r.u32()? != FORMAT {
         return Err(CacheError::Corrupt);
     }
-    let thumb_w = ImgW::new(r.u32()?);
-    let thumb_h = ImgH::new(r.u32()?);
+    let thumb = (ImgW::new(r.u32()?), ImgH::new(r.u32()?));
     let image = (ImgW::new(r.u32()?), ImgH::new(r.u32()?));
-    let stored = Stamp {
+    let stamp = Stamp {
         len: r.u64()?,
         secs: r.u64()?,
         nanos: r.u32()?,
@@ -442,18 +525,43 @@ fn decode_entry(bytes: &[u8], stamp: &Stamp, path: &Path) -> Result<CachedThumb,
     if path_len > MAX_PATH {
         return Err(CacheError::Corrupt);
     }
+    let hash_len = usize::from(r.u8()?);
+    let payload = r.slice(crate::placeholder::MAX_BYTES)?;
+    if hash_len > crate::placeholder::MAX_BYTES {
+        return Err(CacheError::Corrupt);
+    }
+    let hash = payload
+        .get(..hash_len)
+        .filter(|_| hash_len > 0)
+        .and_then(Placeholder::from_bytes);
+    Ok(Head {
+        thumb,
+        image,
+        stamp,
+        path_len,
+        hash,
+    })
+}
+
+/// Parse cache file bytes, with the source stamp and path checked.
+fn decode_entry(bytes: &[u8], stamp: &Stamp, path: &Path) -> Result<CachedThumb, CacheError> {
+    use std::os::unix::ffi::OsStrExt;
+    let head = parse_head(bytes)?;
     let (stored_path, codestream) = bytes
-        .get(HEADER..HEADER + path_len)
-        .zip(bytes.get(HEADER + path_len..))
+        .get(HEADER..HEADER + head.path_len)
+        .zip(bytes.get(HEADER + head.path_len..))
         .ok_or(CacheError::Corrupt)?;
-    if stored != *stamp || stored_path != path.as_os_str().as_bytes() {
+    if head.stamp != *stamp || stored_path != path.as_os_str().as_bytes() {
         return Err(CacheError::Stale);
     }
     let thumb = decode_codestream(codestream)?;
-    if thumb.width != thumb_w || thumb.height != thumb_h {
+    if (thumb.width, thumb.height) != head.thumb {
         return Err(CacheError::Corrupt);
     }
-    Ok(CachedThumb { thumb, image })
+    Ok(CachedThumb {
+        thumb,
+        image: head.image,
+    })
 }
 
 /// Decode the JPEG XL codestream of an entry into RGBA8.
@@ -504,6 +612,21 @@ impl<'a> Reader<'a> {
             .ok_or(CacheError::Corrupt)?;
         self.at = end;
         Ok(u64::from_le_bytes(bytes))
+    }
+
+    /// The next byte.
+    fn u8(&mut self) -> Result<u8, CacheError> {
+        let byte = *self.bytes.get(self.at).ok_or(CacheError::Corrupt)?;
+        self.at += 1;
+        Ok(byte)
+    }
+
+    /// The next `len` bytes.
+    fn slice(&mut self, len: usize) -> Result<&'a [u8], CacheError> {
+        let end = self.at + len;
+        let bytes = self.bytes.get(self.at..end).ok_or(CacheError::Corrupt)?;
+        self.at = end;
+        Ok(bytes)
     }
 }
 
@@ -627,6 +750,70 @@ mod tests {
     }
 
     #[test]
+    fn the_placeholder_reads_before_the_decode() {
+        let (dir, cache) = temp_cache();
+        let src = dir.path().join("img.png");
+        fs::write(&src, b"not really a png").expect("write");
+        let image = varied_thumb(64, 32);
+        let want = (ImgW::new(640), ImgH::new(320));
+        cache
+            .store(&src, LongSide::new(512), &image, want)
+            .expect("store");
+        // The header alone answers the source dimensions and a payload, so a
+        // launch paints the cell without reading the codestream.
+        let (hash, got) = cache
+            .load_placeholder(&src, LongSide::new(512))
+            .expect("placeholder");
+        assert_eq!(got, want);
+        assert!(!hash.is_empty());
+        assert!(hash.len() <= crate::placeholder::MAX_BYTES);
+        let rendered = hash.render().expect("render");
+        assert!(rendered.width.get() > 0 && rendered.height.get() > 0);
+        // The payload of the same entry is stable, so two reads agree.
+        let (again, _) = cache
+            .load_placeholder(&src, LongSide::new(512))
+            .expect("placeholder");
+        assert_eq!(again, hash);
+    }
+
+    #[test]
+    fn a_rewritten_source_has_no_placeholder() {
+        let (dir, cache) = temp_cache();
+        let src = dir.path().join("img.png");
+        fs::write(&src, b"one").expect("write");
+        cache
+            .store(
+                &src,
+                LongSide::new(512),
+                &thumb(4, 4, 7),
+                (ImgW::new(4), ImgH::new(4)),
+            )
+            .expect("store");
+        let mut f = fs::File::create(&src).expect("create");
+        f.write_all(b"much longer content").expect("write");
+        drop(f);
+        assert!(matches!(
+            cache.load_placeholder(&src, LongSide::new(512)),
+            Err(CacheError::Stale)
+        ));
+    }
+
+    #[test]
+    fn a_truncated_entry_has_no_placeholder() {
+        let (dir, cache) = temp_cache();
+        let src = dir.path().join("img.png");
+        fs::write(&src, b"x").expect("write");
+        let file = cache.file(&src, LongSide::new(512)).expect("cache on");
+        fs::create_dir_all(file.parent().expect("parent")).expect("mkdir");
+        // A header cut in the middle of the placeholder field.
+        fs::write(&file, b"VVTH").expect("write");
+        assert!(matches!(
+            cache.load_placeholder(&src, LongSide::new(512)),
+            Err(CacheError::Corrupt)
+        ));
+    }
+
+    #[test]
     fn another_long_side_holds_another_entry() {
         let (dir, cache) = temp_cache();
         let src = dir.path().join("img.png");
@@ -718,6 +905,9 @@ mod tests {
         // A matching path, so the header-only payload reaches the decoder.
         let src_bytes = src.as_os_str().as_bytes();
         bad.extend_from_slice(&(src_bytes.len() as u32).to_le_bytes());
+        // No placeholder payload, then the path and a stub codestream.
+        bad.push(0);
+        bad.extend_from_slice(&[0; crate::placeholder::MAX_BYTES]);
         bad.extend_from_slice(src_bytes);
         bad.extend_from_slice(&[0; 3]);
         fs::write(&file, &bad).expect("write");

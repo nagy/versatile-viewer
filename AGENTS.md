@@ -67,6 +67,12 @@ The binary name is `vv`.
   The decode worker reads the cache first and decodes only on a miss, then stores the new thumbnail.
   A cache hit carries no full-resolution image, so the keep-set refill decodes the file on its own.
   The header carries the source dimensions, so `GridEntry::width`/`height` measure the image and not the thumb, on a hit and on a miss.
+  The header also carries the placeholder of the thumb: a ThumbHash payload of at most `placeholder::MAX_BYTES` (32) bytes, from the `thumbhash` crate (MIT, no dependencies, `src/placeholder.rs`).
+  A launch runs a placeholder pass beside the decodes: one cheap rayon job per entry reads the header only (`Cache::load_placeholder`, about 200 bytes, no codestream) and renders the DCT at 32 px on the worker.
+  The main thread uploads at most `PLACEHOLDER_UPLOADS_PER_FRAME` (16) placeholder textures per frame, a cell draws its placeholder until the decoded thumb lands, and the thumb upload drops it.
+  The image view falls back to the placeholder, and the same header lands the source dimensions, so it fits the picture before the first decode.
+  `FORMAT` 3 adds the placeholder payload, so a version 2 entry stays unread and re-decodes.
+  A cold launch has no entry, so it keeps the grey cell: the placeholder never invents pixels.
   A write beyond the `WRITE_BUDGET` stops the cache for the rest of the run.
   An entry stays past the exit of the viewer, so the next launch starts warm.
   No sweep runs on exit: a stale entry answers `CacheError::Stale` and re-decodes, and an entry whose source is gone stays unread.

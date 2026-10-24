@@ -574,9 +574,11 @@ fn show_entry(
         st.view_loading_since = rl.get_time();
         // Whenever the entry thumb exists, the decode that produced it
         // also recorded the full dimensions.
-        // Set them now, so the draw loop can show the thumb as a placeholder
-        // at the final transform (instead of a black frame) while the
-        // full-res decode catches up.
+        // The cache header of the placeholder pass stores the same pair, so a
+        // warm entry holds them before any decode.
+        // Set them now, so the draw loop can show the thumb (or its
+        // placeholder) at the final transform (instead of a black frame) while
+        // the full-res decode catches up.
         if w.get() > 0 {
             st.img_w = w.as_f32();
             st.img_h = h.as_f32();
@@ -1997,13 +1999,18 @@ fn main() -> Result<()> {
                 && let Some(g) = grid.as_ref()
                 && let Some(id) = st.open_id
                 && let Some(i) = g.index_of(id)
-                && let Some(tex) = g.entries.get(i).and_then(|e| e.texture.as_ref())
+                && let Some(tex) = g
+                    .entries
+                    .get(i)
+                    // The decoded thumb first, then its few-byte placeholder.
+                    .and_then(|e| e.texture.as_ref().or(e.placeholder.as_ref()))
             {
                 // No full-res frame yet (decode in flight): show the entry
-                // thumb instead of flashing black.
-                // The thumb is the whole image downscaled with the aspect
-                // preserved, so it maps 1:1 onto the image rect and the later
-                // swap to the full-res texture is pixel-aligned.
+                // thumb instead of flashing black, or its ThumbHash
+                // placeholder while the thumb itself still decodes.
+                // Both hold the whole image with the aspect preserved, so they
+                // map 1:1 onto the image rect and the later swap to the
+                // full-res texture is pixel-aligned.
                 let scale = st
                     .view_scale
                     .unwrap_or((win_w / st.img_w).min(win_h / st.img_h));
