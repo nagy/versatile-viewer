@@ -35,6 +35,11 @@
 //! Decode stalls then never swallow key taps.
 //! The neighbors are ready to open at once.
 //!
+//! Only the image view keeps full-resolution textures, for the open entry and
+//! its neighbors.
+//! The grid view keeps none, so a grid-only session never uploads a source
+//! texture of hundreds of megabytes.
+//!
 //! Beside the decodes, one cheap worker per entry reads only the header of
 //! its cache entry and renders the [`Placeholder`] it holds (a `ThumbHash` of a
 //! few bytes).
@@ -93,26 +98,18 @@ fn max_inflight() -> usize {
     })
 }
 
-/// Long side of the thumbnail texture stored per grid entry.
-/// The thumbnail holds the whole image with the aspect preserved.
-/// The square crop for grid cells happens at draw time.
-/// The decode worker downscales the full-resolution decode to this size.
-/// The code keeps the full-size texture only for a small keep-set: the
-/// selection or open entry plus its prefetched neighbors.
-/// VRAM therefore stays bounded on large directories.
+/// Long side of the thumbnail texture stored per grid entry, in VRAM and on
+/// disk.
+/// The thumbnail holds the whole image with the aspect preserved, so the
+/// square crop for a grid cell happens at draw time.
+/// The decode worker downscales the full-resolution decode to this size, and
+/// the cache keeps the same size, so a warm cell and a cold one match.
+/// One size serves both, so a decode resizes once and a cache write copies
+/// nothing.
 /// The image view also shows the thumb as a full-frame placeholder while a
 /// decode catches up.
 /// The thumbnail must cover the whole image, not only its center square.
-const THUMB_LONG_SIDE: LongSide = LongSide::new(1024);
-
-/// Long side of the thumbnail the cache keeps on disk.
-/// A cached entry is smaller than [`THUMB_LONG_SIDE`], so a warm cache shows a
-/// softer cell than a fresh decode: the GPU scales the 512 px texture up in a
-/// large cell.
-/// The trade suits a disk cache: a lossy JPEG XL entry costs tens of
-/// kilobytes per file instead of a megabyte of RGBA8.
-/// Bump it with the `thumbcache` format version when the size changes.
-const CACHE_LONG_SIDE: LongSide = LongSide::new(512);
+const THUMB_LONG_SIDE: LongSide = LongSide::new(512);
 
 /// A finished background decode, matched to an entry by its unique id.
 /// Indices shift when entries come and go.
@@ -137,8 +134,9 @@ struct PlaceholderResult {
 /// [`crate::decode_image`] caps the full image to the uploadable
 /// [`crate::MAX_TEXTURE_SIDE`] before it arrives here.
 /// The main thread uploads the thumb for every entry.
-/// It uploads the full texture only for keep-set entries (selection or open
-/// plus prefetched neighbors) and drops the rest.
+/// It uploads the full texture only for keep-set entries (the open image and
+/// its prefetched neighbors) and drops the rest.
+/// The grid view keeps no keep set, so it uploads thumbs only.
 /// The buffers live only until the next frame drains them, bounded by
 /// `max_inflight()`.
 #[derive(Debug)]
@@ -166,9 +164,10 @@ struct Job {
     id: u64,
     path: PathBuf,
     /// The job must return the full-resolution image, because the entry holds
-    /// a full-res texture: it belongs to the keep set (the selection or open
-    /// entry and its prefetched neighbors).
-    /// A thumb-only job decodes outside that set.
+    /// a full-res texture: it belongs to the keep set of the image view (the
+    /// open entry and its prefetched neighbors).
+    /// A thumb-only job decodes outside that set, and the grid view has no set
+    /// at all.
     want_full: bool,
     /// The `VV_BLUR_BG` gimmick settings, read once by the grid.
     blur_enabled: bool,
@@ -310,8 +309,8 @@ pub struct GridEntry {
     /// long side `THUMB_LONG_SIDE`).
     /// The grid cell draws this texture center-cropped at draw time.
     /// The image view shows it as a placeholder while a decode catches up.
-    /// Full-resolution textures live in `full` only for a small keep-set,
-    /// so VRAM stays bounded on large directories.
+    /// Full-resolution textures live in `full` only for the image-view keep
+    /// set, so VRAM stays bounded on large directories.
     pub texture: Option<Texture2D>,
     /// The few-byte [`Placeholder`] of the thumb, uploaded as a small texture.
     /// The grid draws it until `texture` lands, so a warm launch never shows
@@ -319,9 +318,11 @@ pub struct GridEntry {
     /// The code drops it as soon as the decoded thumb uploads.
     pub placeholder: Option<Texture2D>,
     /// The full-resolution texture.
-    /// The code keeps it only for the selection or open entry and its
-    /// prefetched neighbors (see `load_pending`), so opening them is instant.
+    /// The code keeps it only for the open image and its prefetched neighbors
+    /// (see `load_pending`), so opening them is instant.
     /// It drops as soon as the entry leaves that set.
+    /// The grid view keeps none, so a grid-only session uploads no large
+    /// texture.
     pub full: Option<Texture2D>,
     /// A unique, stable id used to match async decode results.
     pub id: u64,
@@ -389,11 +390,13 @@ pub struct Grid {
 fn run_job(job: &Job, cache: &Cache) -> Result<DecodeOk, DecodeError> {
     // A miss is normal and stays silent, because the first launch of a
     // directory misses once per file.
+    // A job that needs the full image skips the cache: the file decode
+    // carries the thumb as well, so a cache read would only add a read.
     if !job.want_full
-        && let Some(hit) = cache.load(&job.path, CACHE_LONG_SIDE).ok()
+        && let Some(hit) = cache.load(&job.path, THUMB_LONG_SIDE).ok()
     {
-        // The cached thumb already sits below [`THUMB_LONG_SIDE`], so the
-        // code uploads it as is and the GPU scales it in the cell.
+        // The cached thumb already measures [`THUMB_LONG_SIDE`], so the code
+        // uploads it as is and the GPU scales it in the cell.
         // A resample here would copy the buffer for nothing.
         let blur = job
             .blur_enabled
@@ -429,9 +432,9 @@ fn run_job(job: &Job, cache: &Cache) -> Result<DecodeOk, DecodeError> {
 /// A cache failure stays silent: the grid already holds the thumbnail, and a
 /// missing cache home is a normal setup.
 fn store_thumb(cache: &Cache, job: &Job, thumb: &DecodedImage, width: ImgW, height: ImgH) {
-    // One resize for the disk copy: the runtime thumb stays at full quality.
-    let cached = crate::downscale_rgba_ref(&thumb.data, thumb.width, thumb.height, CACHE_LONG_SIDE);
-    let _ = cache.store(&job.path, CACHE_LONG_SIDE, &cached, (width, height));
+    // The thumb already measures [`THUMB_LONG_SIDE`], which is the entry size,
+    // so the store copies no pixels.
+    let _ = cache.store(&job.path, THUMB_LONG_SIDE, thumb, (width, height));
 }
 
 /// Run one placeholder job on a worker: the cache header, then the DCT
@@ -439,7 +442,7 @@ fn store_thumb(cache: &Cache, job: &Job, thumb: &DecodedImage, width: ImgW, heig
 /// A miss is normal (a cold directory, a changed source, the cache off), so
 /// the job stays silent and the grid keeps its grey cell.
 fn run_placeholder(cache: &Cache, path: &Path) -> ((ImgW, ImgH), Option<DecodedImage>) {
-    let Ok((hash, image)) = cache.load_placeholder(path, CACHE_LONG_SIDE) else {
+    let Ok((hash, image)) = cache.load_placeholder(path, THUMB_LONG_SIDE) else {
         return ((ImgW::new(0), ImgH::new(0)), None);
     };
     (image, hash.render())
@@ -537,6 +540,14 @@ impl Grid {
     /// visible image gets all the cores.
     /// The function runs every frame and never blocks.
     /// It skips entries whose texture the image view holds now.
+    ///
+    /// With `preload_full` the code keeps full-resolution textures for the
+    /// keep set: the entry at `scan_start` plus the `priority` entries.
+    /// The grid view passes false, so a grid-only session uploads thumbnails
+    /// and nothing else: a 50 MP neighbor would otherwise cost 200 MB of VRAM
+    /// and a 30 ms main-thread upload.
+    /// The image view passes true, so the open image and its neighbors open
+    /// at once.
     pub fn load_pending(
         &mut self,
         rl: &mut RaylibHandle,
@@ -544,20 +555,25 @@ impl Grid {
         priority: &[usize],
         scan_start: usize,
         scan: bool,
+        preload_full: bool,
     ) {
         // Ids that hold a full-resolution texture: the entry the
-        // scan starts at (the selection or the open image) plus the
-        // prefetch priorities (its neighbors).
-        // Everything else stores only the square thumbnail.
-        let keep: HashSet<u64> = priority
-            .iter()
-            .filter_map(|&i| self.entries.get(i).map(|e| e.id))
-            .chain(
-                self.entries
-                    .get(scan_start.min(self.entries.len().saturating_sub(1)))
-                    .map(|e| e.id),
-            )
-            .collect();
+        // scan starts at (the open image) plus the prefetch priorities (its
+        // neighbors).
+        // Everything else stores only the thumbnail.
+        let keep: HashSet<u64> = if preload_full {
+            priority
+                .iter()
+                .filter_map(|&i| self.entries.get(i).map(|e| e.id))
+                .chain(
+                    self.entries
+                        .get(scan_start.min(self.entries.len().saturating_sub(1)))
+                        .map(|e| e.id),
+                )
+                .collect()
+        } else {
+            HashSet::new()
+        };
 
         self.drain_placeholders(rl, thread);
         self.drain_results(rl, thread, &keep);
@@ -720,7 +736,7 @@ impl Grid {
         self.selected = self.selected.min(self.entries.len().saturating_sub(1));
 
         // Evict full-res textures from entries that left the keep set (the
-        // selection or open entry and its neighbors moved on).
+        // open entry and its neighbors moved on).
         // Thumb textures stay.
         // The GPU context lives on this thread, so unloading is safe.
         for e in &mut self.entries {
@@ -1388,7 +1404,7 @@ mod tests {
         assert!(miss.full.is_none(), "a thumb-only job keeps no full image");
         assert_eq!(miss.image, (ImgW::new(64), ImgH::new(32)));
         assert!(
-            cache.load(&job.path, CACHE_LONG_SIDE).is_ok(),
+            cache.load(&job.path, THUMB_LONG_SIDE).is_ok(),
             "the decode stores a thumbnail"
         );
         // The second job takes the cached thumbnail and decodes nothing.

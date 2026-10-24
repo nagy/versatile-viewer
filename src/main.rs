@@ -997,7 +997,7 @@ fn main() -> Result<()> {
         // the visible image gets all the cores.
         // load_pending drains finished decodes (texture uploads happen here,
         // on the main thread) and dispatches new ones to the rayon pool.
-        let (priority, scan_start, scan) = if st.mode == Mode::Image {
+        let (priority, scan_start, scan, preload_full) = if st.mode == Mode::Image {
             match st
                 .open_id
                 .and_then(|id| grid.as_ref().and_then(|g| g.index_of(id)))
@@ -1015,21 +1015,22 @@ fn main() -> Result<()> {
                             v.push(i + 1);
                         }
                     }
-                    (v, i, !st.view_loading)
+                    (v, i, !st.view_loading, true)
                 }
-                None => (Vec::new(), 0, true),
+                None => (Vec::new(), 0, true, true),
             }
         } else if let Some(g) = grid.as_ref() {
             (
                 g.prefetch_neighbors(g.selected, WinW::new(win_w), WinH::new(win_h)),
                 g.selected,
                 true,
+                false,
             )
         } else {
-            (Vec::new(), 0, true)
+            (Vec::new(), 0, true, false)
         };
         if let Some(g) = grid.as_mut() {
-            g.load_pending(&mut rl, &thread, &priority, scan_start, scan);
+            g.load_pending(&mut rl, &thread, &priority, scan_start, scan, preload_full);
         }
 
         // Image mode: drain the streaming loader first.

@@ -18,11 +18,11 @@ lossy JPEG XL codestream (quality 95, exact alpha), so 512 px costs tens of
 kilobytes instead of a megabyte of raw RGBA8. The entry header also carries a
 [ThumbHash] of the thumb (at most 32 bytes), so a warm launch paints every
 cell from a header read of about 200 bytes before any decode starts. The
-cached thumbnail is 512 px, so a warm cell is softer than a fresh one until
-the full-resolution decode catches up. The cache keeps its entries after the viewer exits, so the next
-launch starts warm. A stale entry re-decodes, and a deleted image leaves its
-thumbnail to the user. The `cache` cargo feature (on by default) owns the
-cache; `--no-default-features` decodes every file on every launch.
+cached thumbnail is 512 px and the grid thumb is the same size, so a warm
+cell matches a fresh one. The cache keeps its entries after the viewer exits,
+so the next launch starts warm. A stale entry re-decodes, and a deleted image
+leaves its thumbnail to the user. The `cache` cargo feature (on by default)
+owns the cache; `--no-default-features` decodes every file on every launch.
 
 [jxl-oxide]: https://crates.io/crates/jxl-oxide
 [image]: https://crates.io/crates/image

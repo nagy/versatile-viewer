@@ -58,14 +58,17 @@ The binary name is `vv`.
 - The grid caches its thumbnails on disk through `xdg` under `$XDG_CACHE_HOME/vv/thumbnails`.
   The feature `cache` (a default feature) owns `xdg`, `sha2` and `jixel`.
   Without it `src/thumbcache_off.rs` answers `CacheError::Off` from every call, so every launch decodes every file.
-  A warm grid is therefore softer than a cold one, until the keep-set refill lands.
+  One constant sizes the runtime thumb and the entry: `THUMB_LONG_SIDE` (512).
+  A warm cell and a cold one therefore match, because a decode resizes once to the entry size and a cache write copies no pixels.
   An entry holds a fixed header and a JPEG XL codestream, so a 512 px thumb costs tens of kilobytes instead of one megabyte of RGBA8.
   The encode is `jixel`, pure Rust (BSD-3-Clause OR Apache-2.0), lossy at `QUALITY` (95) with `ALPHA_DISTANCE` 0, so only the alpha channel stays exact.
   The decode is the same `jxl-oxide` the viewer uses for a file.
   Both run on a decode worker.
   A `FORMAT` bump rejects every old entry, so a payload change needs no migration.
   The decode worker reads the cache first and decodes only on a miss, then stores the new thumbnail.
-  A cache hit carries no full-resolution image, so the keep-set refill decodes the file on its own.
+  A cache hit carries no full-resolution image, so a keep-set job (an entry that needs the full texture) skips the cache and decodes the file on its own.
+  Only the image view keeps full textures: `load_pending` takes a `preload_full` flag, the grid view passes false and the image view passes true.
+  A grid-only session therefore uploads thumbnails only, never a 200 MB source texture.
   The header carries the source dimensions, so `GridEntry::width`/`height` measure the image and not the thumb, on a hit and on a miss.
   The header also carries the placeholder of the thumb: a ThumbHash payload of at most `placeholder::MAX_BYTES` (32) bytes, from the `thumbhash` crate (MIT, no dependencies, `src/placeholder.rs`).
   A launch runs a placeholder pass beside the decodes: one cheap rayon job per entry reads the header only (`Cache::load_placeholder`, about 200 bytes, no codestream) and renders the DCT at 32 px on the worker.
