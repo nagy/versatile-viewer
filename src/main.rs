@@ -55,12 +55,13 @@ use versatile_viewer::wmclass;
 use versatile_viewer::{
     DecodedImage, UploadError,
     blurbg::{self, BlurBg},
-    decode_view,
     dim::{ImgH, ImgW, PreviewPx, RampTime, Rect, WinH, WinW},
     grid::{DecodeFailure, Grid, GridAction},
     keyrepeat,
     loader::{DecodeMsg, Loader},
-    mcp, region, rotate, svg,
+    mcp, region, rotate,
+    surface::{Surface, View, open_surface},
+    svg,
     tween::Ramp,
     upload_rgba,
     zoomkeys::TypedKeys,
@@ -234,10 +235,10 @@ struct ViewState {
     /// The code declares it after `rl` (via `ViewState`) so it drops and
     /// unloads before the window.
     blur_bg: Option<BlurBg>,
-    /// The parsed source of the open vector file (None for a raster format).
-    /// The view repaints the region the window shows, so a deep zoom never
-    /// stretches a small raster.
-    vector: Option<Arc<svg::Vector>>,
+    /// The source of the open image, so the view can repaint the region its
+    /// window shows.
+    /// None for a raster format, which has no more detail to give.
+    source: Option<Arc<dyn Surface>>,
     /// The region patch on screen: the visible part of the document, painted
     /// at the scale the window shows it.
     /// None until the first paint lands, and then the whole-image texture in
@@ -279,10 +280,10 @@ struct CropState {
 /// The view carries one generation counter, so a paint of the previous image
 /// never lands on the new one.
 enum CropMsg {
-    /// The parsed source of the open image, or None when the file has none.
+    /// The source of the open image, or None when it needs no repaint.
     Source {
         generation: u64,
-        vector: Option<Arc<svg::Vector>>,
+        source: Option<Arc<dyn Surface>>,
     },
     /// A finished patch of `rect` at `scale` pixels per source pixel.
     Crop {
@@ -316,7 +317,7 @@ impl ViewState {
     /// Drop the region state of the image that was open, and retire every
     /// worker result still in flight.
     fn close_crop(&mut self) {
-        self.vector = None;
+        self.source = None;
         self.crop = None;
         self.crop_pending = false;
         self.crop_seen = None;
@@ -327,14 +328,14 @@ impl ViewState {
 
     /// Adopt a source that arrived with a decode, so the view can repaint the
     /// visible region at any zoom.
-    fn adopt_source(&mut self, source: Option<Arc<svg::Vector>>) {
+    fn adopt_source(&mut self, source: Option<Arc<dyn Surface>>) {
         self.close_crop();
-        self.vector = source;
+        self.source = source;
     }
 
-    /// Ask a worker for the parsed source of `path`.
+    /// Ask a worker for the source of `path`.
     ///
-    /// The grid keeps no tree, so an image opened from the grid parses once
+    /// The grid keeps no source, so an image opened from the grid opens one
     /// here, off the main thread.
     /// A raster file answers None at once.
     fn request_source(&mut self, path: PathBuf) {
@@ -343,12 +344,12 @@ impl ViewState {
         rayon::spawn(move || {
             // The sniff reads the head only, so a 200 MB photo never makes a
             // worker read the whole file.
-            let vector = if svg::sniff(&path) {
-                svg::parse(&path).ok().map(Arc::new)
+            let source: Option<Arc<dyn Surface>> = if svg::sniff(&path) {
+                open_surface(&path).ok().map(Arc::from)
             } else {
                 None
             };
-            let _ = tx.send(CropMsg::Source { generation, vector });
+            let _ = tx.send(CropMsg::Source { generation, source });
         });
     }
 
@@ -359,7 +360,7 @@ impl ViewState {
     /// costs no more than a shallow one.
     /// The guard is one paint in flight: resvg cannot cancel mid-paint.
     fn tick_crop(&mut self, now: Instant, win: Vector2) {
-        if self.vector.is_none() || self.crop_pending || self.img_w <= 0.0 || self.view_loading {
+        if self.source.is_none() || self.crop_pending || self.img_w <= 0.0 || self.view_loading {
             return;
         }
         let Some(scale) = self.view_scale else {
@@ -397,7 +398,7 @@ impl ViewState {
         ) {
             return;
         }
-        let Some(vector) = self.vector.clone() else {
+        let Some(source) = self.source.clone() else {
             return;
         };
         // Paint a margin around what the window shows, so a small pan between
@@ -408,20 +409,22 @@ impl ViewState {
         }
         self.crop_pending = true;
         let (generation, tx) = (self.crop_gen, self.crop_tx.clone());
-        rayon::spawn(move || match vector.render_region(paint, scale) {
-            Ok(image) => {
-                let _ = tx.send(CropMsg::Crop {
-                    generation,
-                    rect: paint,
-                    scale,
-                    image,
-                });
-            }
-            Err(err) => {
-                eprintln!("vv: {err}");
-                let _ = tx.send(CropMsg::Failed { generation });
-            }
-        });
+        rayon::spawn(
+            move || match source.render(View::region(0, paint.into(), scale)) {
+                Ok(image) => {
+                    let _ = tx.send(CropMsg::Crop {
+                        generation,
+                        rect: paint,
+                        scale,
+                        image,
+                    });
+                }
+                Err(err) => {
+                    eprintln!("vv: {err}");
+                    let _ = tx.send(CropMsg::Failed { generation });
+                }
+            },
+        );
     }
 
     /// Apply finished region work.
@@ -435,9 +438,9 @@ impl ViewState {
     ) -> Result<(), UploadError> {
         while let Ok(msg) = self.crop_rx.try_recv() {
             match msg {
-                CropMsg::Source { generation, vector } => {
+                CropMsg::Source { generation, source } => {
                     if generation == self.crop_gen {
-                        self.vector = vector;
+                        self.source = source;
                     }
                 }
                 CropMsg::Crop {
@@ -845,8 +848,16 @@ fn show_entry(
             // file twice in a streaming worker.
             None
         } else {
-            let win_w = rl.get_screen_width().max(rl.get_screen_height()) as u32;
-            Some(Loader::start(path, PreviewPx::new(win_w)))
+            let preview_px =
+                PreviewPx::new(rl.get_screen_width().max(rl.get_screen_height()) as u32);
+            match open_surface(&path) {
+                Ok(surface) => Some(Loader::start(surface, preview_px)),
+                Err(err) => {
+                    eprintln!("vv: {}: {err}", path.display());
+                    grid.mark_failed(id, DecodeFailure::Decode);
+                    None
+                }
+            }
         };
         attach_blur_bg(&mut st.blur_bg, rl, thread, blur.as_ref(), st.open_id);
     }
@@ -956,13 +967,20 @@ fn main() -> Result<()> {
         bail!("no such file or directory: {}", path.display());
     };
 
-    // Single-image launch: decode before opening the window, so the window
+    // Single-image launch: render before opening the window, so the window
     // can be sized to the image.
     // Directory launch: fixed default window size.
-    // A vector file brings its parsed source along, so the image view can
-    // repaint the region its window shows.
+    // A vector file keeps its surface, so the image view can repaint the
+    // region its window shows.
     let single_decoded = if dir_grid.is_none() {
-        Some(decode_view(path, &mut |_, _| {})?)
+        let surface = open_surface(path)?;
+        let image = surface.render(View::whole(0, 1.0))?;
+        let source: Option<Arc<dyn Surface>> = if svg::sniff(path) {
+            Some(Arc::from(surface))
+        } else {
+            None
+        };
+        Some((image, source))
     } else {
         None
     };
@@ -970,13 +988,13 @@ fn main() -> Result<()> {
     // RGBA buffer still exists (before the window and GL context exist).
     // The code uploads it once the window is open.
     let single_blur = if dir_grid.is_none() && blurbg::enabled() {
-        let d = single_decoded.as_ref().expect("single file decoded");
-        Some(blurbg::small_blur(&d.image, blurbg::blur_px()))
+        let (image, _) = single_decoded.as_ref().expect("single file decoded");
+        Some(blurbg::small_blur(image, blurbg::blur_px()))
     } else {
         None
     };
-    let (win0_w, win0_h) = single_decoded.as_ref().map_or((1024, 768), |d| {
-        (d.image.width.get() as i32, d.image.height.get() as i32)
+    let (win0_w, win0_h) = single_decoded.as_ref().map_or((1024, 768), |(image, _)| {
+        (image.width.get() as i32, image.height.get() as i32)
     });
 
     let (mut rl, thread) = raylib::init()
@@ -1041,7 +1059,7 @@ fn main() -> Result<()> {
         pixelated: false,
         loader: None,
         blur_bg: BlurBg::from_env(),
-        vector: None,
+        source: None,
         crop: None,
         crop_pending: false,
         crop_gen: 0,
@@ -1051,22 +1069,22 @@ fn main() -> Result<()> {
         crop_tx,
         crop_rx,
     };
-    if let Some(decoded) = single_decoded {
+    if let Some((image, source)) = single_decoded {
         st.view_tex = Some(upload_rgba(
             &mut rl,
             &thread,
-            &decoded.image.data,
-            decoded.image.width,
-            decoded.image.height,
+            &image.data,
+            image.width,
+            image.height,
         )?);
         apply_view_filter(
             &thread,
             st.view_tex.as_ref().expect("just uploaded"),
             st.pixelated,
         );
-        st.vector = decoded.vector;
-        st.img_w = win0_w as f32;
-        st.img_h = win0_h as f32;
+        st.adopt_source(source);
+        st.img_w = image.width.as_f32();
+        st.img_h = image.height.as_f32();
         if let Some(data) = single_blur {
             attach_blur_bg(&mut st.blur_bg, &mut rl, &thread, Some(&data), None);
         }
@@ -1329,9 +1347,6 @@ fn main() -> Result<()> {
                     None => open_failed = true, // entry vanished (decode failed)
                 }
             }
-            // A vector source arrives with the final raster, so the region
-            // state changes after the loader loop ends its borrow.
-            let mut source_ready: Option<Option<Arc<svg::Vector>>> = None;
             if let Some(loader) = &st.loader {
                 while let Some(msg) = loader.try_recv() {
                     match msg {
@@ -1364,11 +1379,7 @@ fn main() -> Result<()> {
                                 st.open_id,
                             );
                         }
-                        Ok(DecodeMsg::Done {
-                            image,
-                            blur,
-                            vector,
-                        }) => {
+                        Ok(DecodeMsg::Done { image, blur }) => {
                             // Non-JXL formats only learn dimensions here.
                             if st.img_w == 0.0 {
                                 st.img_w = image.width.as_f32();
@@ -1395,10 +1406,6 @@ fn main() -> Result<()> {
                                 st.open_id,
                             );
                             st.view_loading = false;
-                            // A vector file keeps its parsed source, so a
-                            // deeper zoom repaints the visible region instead
-                            // of stretching this raster.
-                            source_ready = Some(vector);
                         }
                         Err(err) => {
                             eprintln!("vv: {err}");
@@ -1406,9 +1413,6 @@ fn main() -> Result<()> {
                         }
                     }
                 }
-            }
-            if let Some(source) = source_ready {
-                st.adopt_source(source);
             }
             if open_failed {
                 st.loader = None; // cancel the worker

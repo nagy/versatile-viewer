@@ -36,8 +36,19 @@ cached thumbnail is 512 px and the grid thumb is the same size, so a warm
 cell matches a fresh one. The cache keeps its entries after the viewer exits,
 so the next launch starts warm. A stale entry re-decodes, and a deleted image
 leaves its thumbnail to the user. The `cache` cargo feature (on by default)
-owns the cache; `--no-default-features` decodes every file on every launch. The `svg` cargo feature (on by default) owns the
-SVG path; `--no-default-features --features cache` leaves it out.
+owns the cache; `--no-default-features` decodes every file on every launch.
+The `svg` cargo feature (on by default) owns the SVG path;
+`--no-default-features --features cache` leaves it out.
+
+## Architecture
+
+Every showable source is a `Surface` (`src/surface.rs`): an image file is a
+one-plane surface, and a raster file and a vector file differ only in the
+backend behind the trait. A surface renders a `View` (a plane index, an
+optional region and a scale) into an RGBA buffer, and it reports the natural
+size of each plane. The grid, the streaming loader and the image view speak
+surfaces, plane indices and regions, never file formats. `src/sign.rs`
+decides the decoder from the file content, not the file name.
 
 [jxl-oxide]: https://crates.io/crates/jxl-oxide
 [image]: https://crates.io/crates/image

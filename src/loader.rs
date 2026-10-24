@@ -1,13 +1,15 @@
 //! Background streaming loader for the image view.
 //!
-//! The loader opens an image off the main thread.
+//! The loader renders one [`Surface`] plane off the main thread.
 //! It streams results back over a channel.
 //! JPEG XL decodes progressively.
-//! The worker memory-maps the file and feeds slices of the map into
-//! jxl-oxide.
+//! The worker reads the surface's byte stream and feeds it into jxl-oxide.
+//! The file behind a JPEG XL source stays memory-mapped, so the worker feeds
+//! slices of the map instead of copies of a read buffer.
 //! jxl-oxide renders a blurry full-size preview long before all bytes arrive.
 //! The worker sends the final full-quality render when decoding completes.
-//! Every other format decodes in one step.
+//! Every other content renders in one step, and it announces the plane size
+//! from [`Surface::bounds`] first, so the window fits the picture at once.
 //!
 //! Cancellation: dropping the `Loader` sets a flag.
 //! The worker checks this flag between chunks and closes the channel.
@@ -18,7 +20,7 @@
 //! short data, so the viewer assumes the files it opens stay put.
 
 use std::{
-    path::{Path, PathBuf},
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -31,12 +33,12 @@ use derive_more::{Display, Error, From};
 use jxl_oxide::{InitializeResult, JxlImage};
 
 use crate::{
-    DecodedImage, blurbg, cap_texture_side, decode_view,
+    DecodedImage, blurbg, cap_texture_side,
     dim::{ImgH, ImgW, LongSide, PreviewPx},
     downscale_rgba,
     error::DecodeError,
-    fb_to_rgba, is_jxl,
-    svg::Vector,
+    fb_to_rgba,
+    surface::{Surface, SurfaceError, View},
 };
 
 /// A failed streaming load.
@@ -55,6 +57,13 @@ pub enum LoadError {
     /// The decode failed before the header completed.
     #[display("file ended before the image header was complete")]
     Incomplete,
+    /// The surface could not describe or render its plane.
+    #[display("{_0}")]
+    Surface(
+        #[from]
+        #[error(source)]
+        SurfaceError,
+    ),
     /// A single-step decode failed.
     #[display("decode failed")]
     Decode(#[from] DecodeError),
@@ -111,14 +120,10 @@ pub enum DecodeMsg {
     Done {
         image: DecodedImage,
         blur: Option<DecodedImage>,
-        /// The parsed source of a vector file, so the view can repaint the
-        /// region its window shows.
-        /// None for a raster format.
-        vector: Option<std::sync::Arc<Vector>>,
     },
 }
 
-/// Handle for one image load in flight.
+/// Handle for one surface load in flight.
 /// Drop the handle to cancel the load.
 #[derive(Debug)]
 pub struct Loader {
@@ -127,12 +132,12 @@ pub struct Loader {
 }
 
 impl Loader {
-    /// Start the worker for `path`.
+    /// Start the worker for `surface`, which renders plane 0.
     /// `preview_px` limits the long side of progressive-preview buffers.
     /// The screen never shows more pixels than that.
     /// Full-size RGBA every `PREVIEW_INTERVAL` wastes allocations.
     #[must_use]
-    pub fn start(path: PathBuf, preview_px: PreviewPx) -> Loader {
+    pub fn start(surface: Box<dyn Surface>, preview_px: PreviewPx) -> Loader {
         let (tx, rx) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
@@ -143,7 +148,7 @@ impl Loader {
         let blur_px = blurbg::blur_px();
         std::thread::spawn(move || {
             match stream(
-                &path,
+                surface.as_ref(),
                 &worker_cancel,
                 &tx,
                 blur_enabled,
@@ -185,6 +190,52 @@ impl Drop for Loader {
 /// directly.
 #[allow(clippy::too_many_arguments)]
 fn stream(
+    surface: &dyn Surface,
+    cancel: &AtomicBool,
+    tx: &Sender<Result<DecodeMsg, LoadError>>,
+    blur_enabled: bool,
+    blur_px: LongSide,
+    preview_px: PreviewPx,
+) -> Result<Option<DecodeMsg>, LoadError> {
+    if let Some(path) = surface.stream_path() {
+        // A JPEG XL source: the byte stream carries progressive previews.
+        return stream_jxl(path, cancel, tx, blur_enabled, blur_px, preview_px);
+    }
+
+    // Dimensions first, so the view fits the plane before the render lands.
+    let info = surface.bounds(0)?;
+    let (width, height) = (
+        ImgW::new(info.w.ceil() as u32),
+        ImgH::new(info.h.ceil() as u32),
+    );
+    let _ = tx.send(Ok(DecodeMsg::Header { width, height }));
+
+    // A slow rasterizer sends a cheap low-res render first.
+    // The code skips it when it would not be smaller than the window.
+    if surface.previews() {
+        let long = info.w.max(info.h).max(1.0);
+        let scale = (preview_px.get() as f32 / long).min(1.0);
+        if scale < 1.0
+            && let Ok(preview) = surface.render(View::whole(0, scale))
+        {
+            let blur = blur_enabled.then(|| blurbg::small_blur(&preview, blur_px));
+            let _ = tx.send(Ok(DecodeMsg::Preview {
+                image: preview,
+                blur,
+            }));
+        }
+    }
+
+    let image = surface.render(View::whole(0, 1.0))?;
+    let blur = blur_enabled.then(|| blurbg::small_blur(&image, blur_px));
+    Ok(Some(DecodeMsg::Done { image, blur }))
+}
+
+/// JPEG XL progressive decode.
+/// The function feeds chunks of the mapped file into jxl-oxide.
+/// jxl-oxide renders previews while the first frame still loads.
+/// The worker sends the full render at the end.
+fn stream_jxl(
     path: &Path,
     cancel: &AtomicBool,
     tx: &Sender<Result<DecodeMsg, LoadError>>,
@@ -192,24 +243,6 @@ fn stream(
     blur_px: LongSide,
     preview_px: PreviewPx,
 ) -> Result<Option<DecodeMsg>, LoadError> {
-    if !is_jxl(path) {
-        // No progressive data for the common formats: one full decode.
-        // A vector file announces its base size before it paints, so the
-        // window fits the picture while the raster arrives.
-        let decoded = {
-            let mut announce = |width: ImgW, height: ImgH| {
-                let _ = tx.send(Ok(DecodeMsg::Header { width, height }));
-            };
-            decode_view(path, &mut announce)?
-        };
-        let blur = blur_enabled.then(|| blurbg::small_blur(&decoded.image, blur_px));
-        return Ok(Some(DecodeMsg::Done {
-            image: decoded.image,
-            blur,
-            vector: decoded.vector,
-        }));
-    }
-
     // Map the file instead of reading it through a buffer.
     // The kernel pages the bytes in on demand, so a large JXL costs no user
     // space copy and no read loop.
@@ -312,11 +345,7 @@ fn stream(
     // Cap here, on the worker: the main thread uploads the buffer as is.
     let image = cap_texture_side(image);
     let blur = blur_enabled.then(|| blurbg::small_blur(&image, blur_px));
-    Ok(Some(DecodeMsg::Done {
-        image,
-        blur,
-        vector: None,
-    }))
+    Ok(Some(DecodeMsg::Done { image, blur }))
 }
 
 #[cfg(test)]
@@ -363,16 +392,18 @@ mod tests {
     }
 
     #[test]
-    fn png_loads_as_single_done_message() {
-        // Non-JXL formats have no progressive data: exactly one Done, no
-        // Header/Preview, correct dimensions.
+    fn png_loads_as_header_then_done() {
+        // Non-JXL content has no progressive data: a Header with the natural
+        // dimensions (so the view fits at once), then exactly one Done.
+        // No Preview: an image does not set `previews()`.
         let tmp = temp_dir();
         let dir = tmp.path();
         let path = dir.join("img.png");
         image::DynamicImage::new_rgb8(4, 3).save(&path).unwrap();
 
-        let loader = Loader::start(path, PreviewPx::new(512));
-        let mut saw_header_or_preview = false;
+        let surface = crate::surface::open_surface(&path).unwrap();
+        let loader = Loader::start(surface, PreviewPx::new(512));
+        let mut header = None;
         let done;
         loop {
             match wait(&loader, Duration::from_secs(10))
@@ -383,14 +414,52 @@ mod tests {
                     done = image;
                     break;
                 }
-                DecodeMsg::Header { .. } | DecodeMsg::Preview { .. } => {
-                    saw_header_or_preview = true;
-                }
+                DecodeMsg::Header { width, height } => header = Some((width, height)),
+                DecodeMsg::Preview { .. } => panic!("an image does not preview"),
             }
         }
-        assert!(!saw_header_or_preview);
+        assert_eq!(header, Some((ImgW::new(4), ImgH::new(3))));
         assert_eq!((done.width, done.height), (ImgW::new(4), ImgH::new(3)));
         assert_eq!(done.data.len(), 4 * 3 * 4);
+    }
+
+    #[cfg(feature = "svg")]
+    #[test]
+    fn a_vector_file_announces_its_base_size_then_paints() {
+        // A vector file parses in a few milliseconds and paints in tens, so
+        // the Header goes out first and the window fits the picture while the
+        // base raster arrives.
+        let tmp = temp_dir();
+        let dir = tmp.path();
+        let path = dir.join("drawing.svg");
+        std::fs::write(
+            &path,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50">
+                <rect width="100" height="50" fill="#ff0000"/>
+            </svg>"##,
+        )
+        .unwrap();
+
+        let surface = crate::surface::open_surface(&path).unwrap();
+        let loader = Loader::start(surface, PreviewPx::new(512));
+        let mut header = None;
+        let done;
+        loop {
+            match wait(&loader, Duration::from_secs(10))
+                .expect("loader timed out")
+                .expect("decode failed")
+            {
+                DecodeMsg::Done { image, .. } => {
+                    done = image;
+                    break;
+                }
+                DecodeMsg::Header { width, height } => header = Some((width, height)),
+                DecodeMsg::Preview { .. } => panic!("a vector file does not preview"),
+            }
+        }
+        // The header carries the base raster size, and so does the render.
+        assert_eq!(header, Some((ImgW::new(1024), ImgH::new(512))));
+        assert_eq!((done.width, done.height), (ImgW::new(1024), ImgH::new(512)));
     }
 
     #[test]
@@ -402,7 +471,8 @@ mod tests {
         let path = dir.join("x.jxl");
         std::fs::write(&path, b"not really jxl").unwrap();
 
-        let loader = Loader::start(path, PreviewPx::new(512));
+        let surface = crate::surface::open_surface(&path).expect("the extension selects JXL");
+        let loader = Loader::start(surface, PreviewPx::new(512));
         loop {
             match wait(&loader, Duration::from_secs(10)).expect("loader timed out") {
                 Err(_) => break,
@@ -420,7 +490,8 @@ mod tests {
         let path = dir.join("truncated.jxl");
         std::fs::write(&path, [0xffu8, 0x0a, 0x01, 0x02]).unwrap();
 
-        let loader = Loader::start(path, PreviewPx::new(512));
+        let surface = crate::surface::open_surface(&path).unwrap();
+        let loader = Loader::start(surface, PreviewPx::new(512));
         loop {
             match wait(&loader, Duration::from_secs(10)).expect("loader timed out") {
                 Err(_) => break,
@@ -441,7 +512,8 @@ mod tests {
         let path = dir.join("img.png");
         image::DynamicImage::new_rgb8(16, 16).save(&path).unwrap();
 
-        let loader = Loader::start(path, PreviewPx::new(512));
+        let surface = crate::surface::open_surface(&path).unwrap();
+        let loader = Loader::start(surface, PreviewPx::new(512));
         drop(loader);
         std::thread::sleep(Duration::from_millis(50));
         // Nothing to assert beyond "no panic, no hang".

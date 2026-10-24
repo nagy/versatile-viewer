@@ -4,13 +4,11 @@
 //! decoders and a `.svg` path fails there with the normal image error.
 //! [`parse`] answers [`DecodeError::VectorOff`], so a caller that reaches it
 //! by another route still gets a clear reason.
-//! [`Vector`] exists only to name the type, so the code that holds a parsed
-//! source compiles in both builds.
 
 use std::path::Path;
 
 use crate::{
-    DecodeError, Decoded, DecodedImage,
+    DecodeError, DecodedImage,
     dim::{ImgH, ImgW, LongSide},
 };
 
@@ -74,29 +72,11 @@ pub fn parse(_path: &Path) -> Result<Vector, DecodeError> {
     Err(DecodeError::VectorOff)
 }
 
-/// A build without the `svg` feature cannot measure a vector file.
+/// A build without the `svg` feature cannot decode a vector file.
 ///
 /// # Errors
 ///
 /// The function always errors with [`DecodeError::VectorOff`].
 pub(crate) fn measure(_path: &Path) -> Result<(ImgW, ImgH), DecodeError> {
-    Err(DecodeError::VectorOff)
-}
-
-/// A build without the `svg` feature cannot decode a vector file.
-///
-/// # Errors
-///
-/// The function always errors with [`DecodeError::VectorOff`].
-pub(crate) fn decode_base(_path: &Path) -> Result<Decoded, DecodeError> {
-    Err(DecodeError::VectorOff)
-}
-
-/// A build without the `svg` feature cannot decode a vector file.
-///
-/// # Errors
-///
-/// The function always errors with [`DecodeError::VectorOff`].
-pub(crate) fn decode_thumb(_path: &Path, _long: LongSide) -> Result<Decoded, DecodeError> {
     Err(DecodeError::VectorOff)
 }

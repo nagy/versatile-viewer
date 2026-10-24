@@ -65,7 +65,7 @@ use crate::{
     DecodedImage,
     blurbg::{self},
     dim::{ImgH, ImgW, LongSide, Rect, WinH, WinW},
-    error::DecodeError,
+    surface::{SurfaceError, View, open_surface},
     thumbcache::Cache,
 };
 
@@ -117,7 +117,7 @@ const THUMB_LONG_SIDE: LongSide = LongSide::new(512);
 #[derive(Debug)]
 struct DecodeResult {
     id: u64,
-    res: Result<DecodeOk, DecodeError>,
+    res: Result<DecodeOk, SurfaceError>,
 }
 
 /// A finished placeholder read, matched to an entry by its stable id.
@@ -131,7 +131,7 @@ struct PlaceholderResult {
 }
 
 /// Successful decode payload: the thumbnail and the full-resolution image.
-/// [`crate::decode_image`] caps the full image to the uploadable
+/// [`crate::surface::Surface::render`] caps the full image to the uploadable
 /// [`crate::MAX_TEXTURE_SIDE`] before it arrives here.
 /// The main thread uploads the thumb for every entry.
 /// It uploads the full texture only for keep-set entries (the open image and
@@ -144,8 +144,8 @@ struct DecodeOk {
     /// The whole image with the aspect preserved, long side
     /// [`THUMB_LONG_SIDE`].
     thumb: DecodedImage,
-    /// The source dimensions, as a decode capped at
-    /// [`crate::MAX_TEXTURE_SIDE`] reports them.
+    /// The source dimensions, as [`crate::surface::Surface::bounds`] reports
+    /// them (capped at [`crate::MAX_TEXTURE_SIDE`]).
     /// The entry keeps them as the image size, not the thumb size, so the
     /// image view fits and zooms the picture, not its thumbnail.
     image: (ImgW, ImgH),
@@ -387,7 +387,7 @@ pub struct Grid {
 }
 
 /// Run one decode job on a worker: the cache first, the file on a miss.
-fn run_job(job: &Job, cache: &Cache) -> Result<DecodeOk, DecodeError> {
+fn run_job(job: &Job, cache: &Cache) -> Result<DecodeOk, SurfaceError> {
     // A miss is normal and stays silent, because the first launch of a
     // directory misses once per file.
     // A job that needs the full image skips the cache: the file decode
@@ -408,47 +408,57 @@ fn run_job(job: &Job, cache: &Cache) -> Result<DecodeOk, DecodeError> {
             full: None,
         });
     }
+    let surface = open_surface(&job.path)?;
+    // The plane size is the source size the entry keeps, so a vector file
+    // measures its base raster and never its thumbnail.
+    let bounds = surface.bounds(0)?;
+    let image = (
+        ImgW::new(bounds.w.round() as u32),
+        ImgH::new(bounds.h.round() as u32),
+    );
     if !job.want_full {
         // Thumbnail only, so no full-resolution texture is needed.
         // A vector file paints the thumbnail size directly; a raster format
-        // decodes in full and downscales here, on the worker.
-        let d = crate::decode_thumb(&job.path, THUMB_LONG_SIDE)?;
+        // decodes in full and downscales inside the surface render, on the
+        // worker.
+        let thumb = surface.render(View::whole(0, thumb_scale(bounds)))?;
         let blur = job
             .blur_enabled
-            .then(|| blurbg::small_blur(&d.image, job.blur_px));
-        store_thumb(cache, job, &d.image, d.source.0, d.source.1);
+            .then(|| blurbg::small_blur(&thumb, job.blur_px));
+        store_thumb(cache, job, &thumb, image.0, image.1);
         return Ok(DecodeOk {
-            thumb: d.image,
-            image: d.source,
+            thumb,
+            image,
             blur,
             full: None,
         });
     }
-    let full = crate::decode_full(&job.path)?;
+    let full = surface.render(View::whole(0, 1.0))?;
     let blur = job
         .blur_enabled
-        .then(|| blurbg::small_blur(&full.image, job.blur_px));
+        .then(|| blurbg::small_blur(&full, job.blur_px));
     // Borrow the decoded buffer for the thumb: a clone of a large image costs
     // hundreds of megabytes.
-    let thumb = crate::downscale_rgba_ref(
-        &full.image.data,
-        full.image.width,
-        full.image.height,
-        THUMB_LONG_SIDE,
-    );
-    store_thumb(cache, job, &thumb, full.source.0, full.source.1);
-    // A vector file measures its base raster, so the entry keeps that pair
-    // and never the thumbnail size.
-    let image = full.source;
+    let thumb = crate::downscale_rgba_ref(&full.data, full.width, full.height, THUMB_LONG_SIDE);
+    store_thumb(cache, job, &thumb, image.0, image.1);
     // The keep-set refill is the only job that carries the full image to the
     // main thread; otherwise the large buffer drops here.
-    let full = job.want_full.then_some(full.image);
+    let full = job.want_full.then_some(full);
     Ok(DecodeOk {
         thumb,
         image,
         blur,
         full,
     })
+}
+
+/// The render scale that lands the long side of `bounds` on
+/// [`THUMB_LONG_SIDE`].
+///
+/// The scale never goes past 1.0, so a small picture is not upscaled into its
+/// thumbnail.
+fn thumb_scale(bounds: crate::surface::Size) -> f32 {
+    (THUMB_LONG_SIDE.get() as f32 / bounds.w.max(bounds.h).max(1.0)).min(1.0)
 }
 
 /// Put the thumbnail of a fresh decode into the cache.

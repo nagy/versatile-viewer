@@ -34,7 +34,7 @@ use std::{
 };
 
 use crate::{
-    DecodeError, Decoded, DecodedImage, MAX_TEXTURE_SIDE, cap_texture_side,
+    DecodeError, DecodedImage, MAX_TEXTURE_SIDE, cap_texture_side,
     dim::{ImgH, ImgW, LongSide},
 };
 
@@ -349,13 +349,13 @@ pub(crate) fn measure(path: &Path) -> Result<(ImgW, ImgH), DecodeError> {
 /// A gzip payload sniffs its decompressed head.
 #[must_use]
 pub fn sniff(path: &Path) -> bool {
-    let Some(magic) = super::file_magic(path) else {
+    let Some(magic) = crate::sign::file_magic(path) else {
         return false;
     };
     if is_gzip(&magic) {
         return sniff_gzip(path);
     }
-    if super::is_common_magic(magic) || magic == [0xff, 0x0a] {
+    if crate::sign::is_common_magic(magic) || magic == [0xff, 0x0a] {
         return false;
     }
     head(path).is_some_and(|bytes| looks_like_svg(&bytes))
@@ -425,35 +425,6 @@ fn looks_like_svg(bytes: &[u8]) -> bool {
         )
 }
 
-/// Decode a vector file at the base raster size.
-///
-/// # Errors
-///
-/// The function errors when the parse or the paint fails.
-pub(crate) fn decode_base(path: &Path) -> Result<Decoded, DecodeError> {
-    let vector = parse(path)?;
-    Ok(Decoded {
-        source: vector.base_size(),
-        image: vector.render_base()?,
-    })
-}
-
-/// Decode a vector file with its long side on `long`.
-///
-/// The grid takes the thumbnail this way, so a cell never paints a full-size
-/// pixmap only to shrink it.
-///
-/// # Errors
-///
-/// The function errors when the parse or the paint fails.
-pub(crate) fn decode_thumb(path: &Path, long: LongSide) -> Result<Decoded, DecodeError> {
-    let vector = parse(path)?;
-    Ok(Decoded {
-        source: vector.base_size(),
-        image: vector.rasterize(long)?,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,9 +464,9 @@ mod tests {
         let path = dir.path().join("drawing.svgz");
         std::fs::write(&path, gzip(SQUARE.as_bytes())).expect("write");
         assert!(sniff(&path));
-        let decoded = decode_base(&path).expect("decode");
-        assert_eq!(decoded.image.width, ImgW::new(1024));
-        assert_eq!(decoded.image.height, ImgH::new(512));
+        let decoded = parse(&path).expect("parse").render_base().expect("paint");
+        assert_eq!(decoded.width, ImgW::new(1024));
+        assert_eq!(decoded.height, ImgH::new(512));
     }
 
     #[test]
@@ -553,13 +524,19 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("drawing.svg");
         std::fs::write(&path, SQUARE).expect("write");
-        let thumb = decode_thumb(&path, LongSide::new(512)).expect("thumb");
+        let thumb = parse(&path)
+            .expect("parse")
+            .rasterize(LongSide::new(512))
+            .expect("thumb");
         assert_eq!(
-            (thumb.image.width, thumb.image.height),
+            (thumb.width, thumb.height),
             (ImgW::new(512), ImgH::new(256))
         );
         // The source pair never reports the thumbnail size.
-        assert_eq!(thumb.source, (ImgW::new(1024), ImgH::new(512)));
+        assert_eq!(
+            parse(&path).expect("parse").base_size(),
+            (ImgW::new(1024), ImgH::new(512))
+        );
     }
 
     #[test]
@@ -580,9 +557,17 @@ mod tests {
         let path = dir.path().join("drawing.svg");
         std::fs::write(&path, SQUARE).expect("write");
         let cache = Cache::in_dir(dir.path().join("cache"));
-        let thumb = decode_thumb(&path, LongSide::new(512)).expect("thumb");
+        let thumb = parse(&path)
+            .expect("parse")
+            .rasterize(LongSide::new(512))
+            .expect("thumb");
         cache
-            .store(&path, LongSide::new(512), &thumb.image, thumb.source)
+            .store(
+                &path,
+                LongSide::new(512),
+                &thumb,
+                (ImgW::new(1024), ImgH::new(512)),
+            )
             .expect("store");
         let hit = cache.load(&path, LongSide::new(512)).expect("load");
         // The header keeps the base raster size, so a warm launch fits the
@@ -608,11 +593,11 @@ mod tests {
             </svg>"##,
         )
         .expect("write");
-        let d = decode_thumb(&path, LongSide::new(512)).expect("thumb");
-        assert_eq!(
-            (d.image.width, d.image.height),
-            (ImgW::new(512), ImgH::new(256))
-        );
+        let d = parse(&path)
+            .expect("parse")
+            .rasterize(LongSide::new(512))
+            .expect("thumb");
+        assert_eq!((d.width, d.height), (ImgW::new(512), ImgH::new(256)));
     }
 
     #[test]

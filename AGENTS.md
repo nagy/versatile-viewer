@@ -18,25 +18,30 @@ The binary name is `vv`.
   A vector file has no pixel size, so it bakes one: `svg::base_side` clamps the declared long side into `BASE_MIN_SIDE` (1024) ..= `MAX_TEXTURE_SIDE` (8192).
   The aspect stays exact, so the base raster and the thumbnail share one shape.
   The base size is the source size: the grid entry, the cache header and the image fit all measure that pair, never the thumbnail.
-  `decode_thumb` paints a vector file at the thumbnail size directly, so a cell never paints a big pixmap only to shrink it.
-  `decode_announce` sends the header of a vector file before the paint, so the window fits the picture while the raster arrives.
+  `svg::Vector` paints the base raster and any region of it, so one parsed tree serves the thumbnail, the base raster and the window patch.
+  A [`surface::VectorSurface`] is that tree behind the `Surface` trait.
   Sniffing reads content: magic, then a BOM, comments, a prolog and a doctype, then an `<svg` root. A gzip head sniffs its decompressed head.
   `MAX_INPUT` (32 MiB) caps the read and the decompression, so a gzip bomb fails.
   External references never resolve (`resources_dir` stays `None`), so no file makes the viewer read another path.
   The host font database loads once per process (`fontdb`, `OnceLock`), so `<text>` renders with real fonts and a whole directory pays one scan.
   `resvg` covers the static subset only: no script, no animation, and `raster-images` stays off, so an embedded JPEG/WebP/GIF draws nothing while an embedded PNG does.
   A retained `usvg::Tree` (`svg::Vector`) paints the view again, so the seam for a deeper zoom stays.
-- The image view repaints the region its window shows, from that tree.
+- Every showable source is a `src/surface.rs` `Surface`: `plane_count`, `bounds`, `render`, `stream_path` and `previews`.
+  `open_surface` sniffs the content with `src/sign.rs` and picks the backend: a raster file (`ImageSurface`) or a vector file (`VectorSurface`).
+  A `View` names a plane, an optional `Region` and a scale (output pixels per surface unit), so the grid asks for a thumbnail, the loader for the whole plane and the image view for the patch it shows.
+  `src/sign.rs` owns the content sniffing (`is_jxl`, `file_magic`, `is_common_magic`, `format`, `dimensions`), and both the surface layer and `svg.rs` use it.
+  A raster plane measures the capped size it renders, so `bounds` and the pixels of a scale-1.0 render agree.
+- The image view repaints the region its window shows, from the open surface.
   `src/region.rs` holds the pure geometry and policy: `crop`, `to_screen`, `to_image`, `Crop`, `worth_painting`, `MARGIN`, `SCALE_SLACK`, `QUIET`.
   A patch covers the window plus `MARGIN` (0.25 of each side), in source pixels, so the paint area follows the window and a deep zoom costs no more pixels than a shallow one.
-  `Vector::render_region` paints that rect at the view scale, so the patch lands 1:1 on screen.
+  `Surface::render` paints that rect at the view scale, so the patch lands 1:1 on screen; a `VectorSurface` paints only those pixels.
   The region rect lives in base raster pixels, and `Vector::declared_per_base` converts to the tree's declared units.
   The view repaints when it held still for `QUIET` (150 ms) and `worth_painting` pays: a scale step past `SCALE_SLACK` (1.05) or a consumed margin.
   One paint in flight, because resvg cannot cancel mid-paint.
-  `ViewState` keeps `Arc<svg::Vector>`, the `CropState` (texture, source rect, raster scale), the pending flag and one generation counter.
+  `ViewState` keeps `Arc<dyn Surface>`, the `CropState` (texture, source rect, raster scale), the pending flag and one generation counter.
   Every open, every n/p step and every return to the grid bumps that counter, so the result of a worker for an earlier image drops.
-  An image opened from the grid parses its own tree on a worker (`request_source`), because the grid keeps no tree.
-  A single-file launch and the streaming loader hand the tree over with `decode_view`.
+  An image opened from the grid opens its own surface on a worker (`request_source`), because the grid keeps none.
+  A single-file launch keeps the surface it already opened.
   `img_w`/`img_h` keep measuring the source, never the patch, so a bigger texture never disturbs fit, pan or zoom.
   The whole-image texture (`view_tex`) stays as the fallback and draws only where the patch cannot reach (`patch_covers`), so a resize or a pan that outruns the repaint never shows background.
   Drawing both over the same pixels would double the alpha of an antialiased edge, so the patch hides the whole image where it covers.
@@ -45,7 +50,7 @@ The binary name is `vv`.
 - Dispatch decode on sniffed content.
   Do not dispatch decode on the file name.
 - Decode and every pixel resize stay off the main thread.
-  Decode workers cap the buffer with `cap_texture_side` (`src/lib.rs`), so `upload_rgba` on the main thread uploads a buffer that already fits `MAX_TEXTURE_SIDE`.
+  The raster backend caps its buffer with `cap_texture_side` (`src/lib.rs`), and `ImageSurface::bounds` reports that capped pair, so `upload_rgba` on the main thread uploads a buffer that already fits `MAX_TEXTURE_SIDE`.
   Never add a main-thread resize: a large image then freezes the window for seconds.
   Downscale a borrowed buffer with `downscale_rgba_ref`, not `downscale_rgba` on a clone.
   `BlurBg::attach` and `upload` take `&DecodedImage`, so a caller never clones the blur buffer.
@@ -53,13 +58,13 @@ The binary name is `vv`.
   Do not call `image::imageops::resize` for a downscale: it is several times slower.
   Keep the `rayon` feature of `fast_image_resize` off, so a resize never spawns nested workers inside a decode job.
   `VV_TIMING=1` prints upload cost and slow frames.
-- Sort grid entries in natural order with `natord`, so `img2` comes before `img10`.
 - The streaming JXL loader memory-maps the file (`memmap2`) and feeds slices of the map to jxl-oxide.
   A file rewritten under the map faults with SIGBUS instead of reading short data.
+- Sort grid entries in natural order with `natord`, so `img2` comes before `img10`.
 - Tests: `proptest` covers the pure helpers (layout, visual selection, selection step, the resize fit, the ramp).
   Property tests are dev-only and never gate a release build.
 - Public error types derive `derive_more::{Display, Error, From}` (feature `from` on).
-  Each module owns its error enum: `src/error.rs` (`DecodeError`, `UploadError`), `src/grid.rs` (`GridError`), `src/loader.rs` (`LoadError`), `src/mcp.rs` (`SpawnError`), `src/thumbcache.rs` (`CacheError`).
+  Each module owns its error enum: `src/error.rs` (`DecodeError`, `UploadError`), `src/sign.rs` (`SignError`), `src/surface.rs` (`SurfaceError`), `src/grid.rs` (`GridError`), `src/loader.rs` (`LoadError`), `src/mcp.rs` (`SpawnError`), `src/thumbcache.rs` (`CacheError`).
   `main.rs` keeps `anyhow`.
 - Wrap raw pixel and window primitives in the `src/dim.rs` newtypes (`ImgW`, `ImgH`, `WinW`, `WinH`, `LongSide`, `PreviewPx`, `Delay`, `Rate`, `RampTime`, `Rect`).
   Public API boundaries take the newtype, not the bare primitive.

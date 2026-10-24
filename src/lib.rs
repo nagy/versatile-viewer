@@ -17,14 +17,14 @@
 //! It holds image decoding, RGBA helpers and the modules behind the grid,
 //! loader and gimmicks.
 //!
-//! Decoding dispatches by sniffed content, not by file name.
+//! Decoding dispatches by sniffed content, not by file name (see [`sign`]).
 //! JPEG XL decodes with pure-Rust jxl-oxide and streams progressively in
 //! [`loader`].
 //! The common formats decode with the `image` crate.
 //! SVG and SVGZ rasterize with pure-Rust resvg in [`svg`], which bakes a base
 //! raster because a vector file has no pixels of its own.
-//! A decode returns a [`Decoded`]: the pixels plus the source size the viewer
-//! fits and zooms.
+//! Every showable source is a [`surface::Surface`], so the grid, the loader
+//! and the image view ask for a plane at a scale and never for a file format.
 //! [`downscale_rgba`], [`cap_texture_side`] and [`upload_rgba`] keep the
 //! pixel and texture budget.
 //! Decode workers cap the buffer, so the main thread never resizes a large
@@ -54,6 +54,8 @@ pub mod mcp;
 pub mod placeholder;
 pub mod region;
 pub mod rotate;
+pub mod sign;
+pub mod surface;
 #[cfg(feature = "svg")]
 pub mod svg;
 #[cfg(not(feature = "svg"))]
@@ -159,7 +161,7 @@ const fn to_u8(v: f32) -> u8 {
 /// The function applies [`cap_texture_side`], so the result is uploadable as
 /// is.
 /// This runs on a decode worker, never on the main thread.
-fn decode_common(path: &Path) -> Result<DecodedImage, DecodeError> {
+pub(crate) fn decode_common(path: &Path) -> Result<DecodedImage, DecodeError> {
     let rgba = image::ImageReader::open(path)?
         .with_guessed_format()?
         .decode()?
@@ -172,128 +174,17 @@ fn decode_common(path: &Path) -> Result<DecodedImage, DecodeError> {
     }))
 }
 
-/// Decide the decoder by file content, not by the file name.
+/// Decode a non-vector file with the JXL or the common-format decoder.
 ///
-/// The code sniffs the 2-byte magic first (JXL codestream against the
-/// common formats).
-/// The .jxl extension only acts as a tiebreaker for unknown magic.
-/// JXL container files start with a box header, not the codestream magic.
-fn is_jxl(path: &Path) -> bool {
-    match file_magic(path) {
-        Some([0xff, 0x0a]) => true, // raw JXL codestream
-        Some(m) if is_common_magic(m) => false,
-        _ => path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("jxl")),
+/// The function applies [`cap_texture_side`], so the result is uploadable as
+/// is.
+/// It runs on a decode worker, never on the main thread.
+pub(crate) fn decode_raster(path: &Path) -> Result<DecodedImage, DecodeError> {
+    if sign::is_jxl(path) {
+        decode_jxl(path)
+    } else {
+        decode_common(path)
     }
-}
-
-/// The first two bytes of the file.
-/// The function returns None for a missing or short file.
-fn file_magic(path: &Path) -> Option<[u8; 2]> {
-    use std::io::Read;
-    let mut magic = [0u8; 2];
-    std::fs::File::open(path)
-        .and_then(|mut f| f.read_exact(&mut magic))
-        .ok()
-        .map(|()| magic)
-}
-
-/// The magics the image crate can decode.
-/// `with_guessed_format` sniffs the full header.
-/// This function only needs to steer files away from the JXL decoder.
-// The magic table stays flat and grouped by format on purpose.
-// The clippy nested suggestion reorders it into a byte soup.
-#[allow(clippy::unnested_or_patterns)]
-const fn is_common_magic(m: [u8; 2]) -> bool {
-    let [a, b] = m;
-    matches!(
-        (a, b),
-        (0x89, b'P') // PNG
-            | (0xff, 0xd8) // JPEG
-            | (b'R', b'I') // RIFF (WebP)
-            | (b'G', b'I') // GIF
-            | (b'B', b'M') // BMP
-            | (b'I', b'I')
-            | (b'I', b'M') // TIFF, both byte orders
-            | (b'M', b'I')
-            | (b'M', b'M')
-    )
-}
-
-/// A decoded raster plus the source dimensions it measures.
-///
-/// A raster format decodes at its own size, so `image` and `source` agree.
-/// A vector file has no pixels, so the code bakes a base raster and reports
-/// that size as the source: the aspect stays exact, and the long side stays
-/// between 1024 px and [`MAX_TEXTURE_SIDE`].
-/// The grid entry, the cache header and the image fit all read `source`, so a
-/// 512 px thumbnail and a 1024 px base raster of one file measure the same
-/// picture.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Decoded {
-    /// The pixels to upload.
-    pub image: DecodedImage,
-    /// The dimensions the viewer fits and zooms, as [`ImgW`] and [`ImgH`].
-    pub source: (ImgW, ImgH),
-}
-
-impl Decoded {
-    /// A raster decode, where the pixels and the source size agree.
-    fn raster(image: DecodedImage) -> Self {
-        Self {
-            source: (image.width, image.height),
-            image,
-        }
-    }
-}
-
-/// Decode an image file and dispatch by content-sniffed format.
-///
-/// A vector file decodes at its base raster size (see [`Decoded`]).
-///
-/// # Errors
-///
-/// The function errors when it cannot open, sniff or decode the file
-/// (missing file, garbage bytes, unsupported content).
-pub fn decode_image(path: &Path) -> Result<DecodedImage, DecodeError> {
-    decode_full(path).map(|d| d.image)
-}
-
-/// Decode an image file into its full-size raster.
-///
-/// A raster format decodes at its own size.
-/// A vector file paints its base raster, which [`Decoded::source`] reports.
-///
-/// # Errors
-///
-/// The function errors when it cannot open, sniff or decode the file.
-pub fn decode_full(path: &Path) -> Result<Decoded, DecodeError> {
-    if svg::sniff(path) {
-        return svg::decode_base(path);
-    }
-    decode_raster(path)
-}
-
-/// Decode an image file into a thumbnail whose long side lands on `long`.
-///
-/// A vector file paints that size directly, so a cell never paints a
-/// full-size pixmap only to shrink it.
-/// A raster format decodes in full and downscales here, on the worker.
-///
-/// # Errors
-///
-/// The function errors when it cannot open, sniff or decode the file.
-pub fn decode_thumb(path: &Path, long: LongSide) -> Result<Decoded, DecodeError> {
-    if svg::sniff(path) {
-        return svg::decode_thumb(path, long);
-    }
-    let full = decode_raster(path)?;
-    let thumb = downscale_rgba_ref(&full.image.data, full.image.width, full.image.height, long);
-    Ok(Decoded {
-        image: thumb,
-        source: full.source,
-    })
 }
 
 /// The source size of a vector file, measured without painting it.
@@ -307,72 +198,6 @@ pub(crate) fn measure_vector(path: &Path) -> Option<(ImgW, ImgH)> {
         return None;
     }
     svg::measure(path).ok()
-}
-
-/// Decode a non-vector file with the JXL or the common-format decoder.
-fn decode_raster(path: &Path) -> Result<Decoded, DecodeError> {
-    let image = if is_jxl(path) {
-        decode_jxl(path)?
-    } else {
-        decode_common(path)?
-    };
-    Ok(Decoded::raster(image))
-}
-
-/// Decode a file for the image view, announcing the dimensions when the code
-/// learns them before the pixels.
-///
-/// A vector file parses in a few milliseconds and paints in tens, so the
-/// header goes out first and the window fits the picture while the raster
-/// arrives.
-/// A raster format announces nothing, because a one-step decode reports its
-/// size with the pixels.
-/// A decode for the image view: the raster to show, plus the parsed vector
-/// source when the file has one.
-pub struct ViewDecode {
-    /// The pixels to upload.
-    pub image: DecodedImage,
-    /// The parsed source of a vector file, so the view can repaint the region
-    /// its window shows (see [`region`]).
-    /// None for a raster format, which has no more detail to give.
-    pub vector: Option<std::sync::Arc<svg::Vector>>,
-}
-
-/// Decode a file for the image view, announcing the dimensions when the code
-/// learns them before the pixels.
-///
-/// A vector file parses in a few milliseconds and paints in tens, so the
-/// header goes out first and the window fits the picture while the raster
-/// arrives.
-/// The vector source comes back with the raster, so the view re-rasterizes
-/// without another XML parse.
-/// A raster format announces nothing, because a one-step decode reports its
-/// size with the pixels.
-///
-/// # Errors
-///
-/// The function errors when it cannot open, sniff or decode the file.
-pub fn decode_view(
-    path: &Path,
-    announce: &mut dyn FnMut(ImgW, ImgH),
-) -> Result<ViewDecode, DecodeError> {
-    #[cfg(feature = "svg")]
-    if svg::sniff(path) {
-        let vector = std::sync::Arc::new(svg::parse(path)?);
-        let (width, height) = vector.base_size();
-        announce(width, height);
-        return Ok(ViewDecode {
-            image: vector.render_base()?,
-            vector: Some(vector),
-        });
-    }
-    // Without SVG support no decode reports its size early.
-    #[cfg(not(feature = "svg"))]
-    let _ = announce;
-    Ok(ViewDecode {
-        image: decode_image(path)?,
-        vector: None,
-    })
 }
 
 /// The longest texture side the code uploads.
@@ -498,7 +323,7 @@ pub fn downscale_rgba(image: DecodedImage, long_side: LongSide) -> DecodedImage 
 /// The dimensions of `width` x `height` scaled so the long side is
 /// `long_side`, with the aspect preserved and each side at least 1.
 #[must_use]
-fn fitted(width: u32, height: u32, long_side: u32) -> (u32, u32) {
+pub(crate) fn fitted(width: u32, height: u32, long_side: u32) -> (u32, u32) {
     let scale = long_side as f32 / width.max(height) as f32;
     (
         ((width as f32 * scale).round() as u32).max(1),
@@ -516,7 +341,7 @@ fn fitted(width: u32, height: u32, long_side: u32) -> (u32, u32) {
 ///
 /// The function panics if `rgba` does not hold exactly `w * h * 4` bytes.
 #[must_use]
-fn resample_rgba(rgba: &[u8], w: u32, h: u32, nw: u32, nh: u32) -> Vec<u8> {
+pub(crate) fn resample_rgba(rgba: &[u8], w: u32, h: u32, nw: u32, nh: u32) -> Vec<u8> {
     use fast_image_resize::{
         FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer,
         images::{Image, ImageRef},
@@ -719,47 +544,6 @@ mod tests {
     }
 
     #[test]
-    fn is_jxl_detects_codestream_magic() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let bare = tmp.path().join("bare");
-        // A raw codestream starts with 0xFF 0x0A, so it is JXL even without
-        // an extension.
-        std::fs::write(&bare, [0xffu8, 0x0a, 0x01, 0x02]).unwrap();
-        assert!(is_jxl(&bare));
-        // PNG magic is not a codestream, even without an extension.
-        std::fs::write(&bare, [0x89u8, b'P', 0x4e, 0x47]).unwrap();
-        assert!(!is_jxl(&bare));
-    }
-
-    #[test]
-    fn content_decides_over_extension() {
-        // Content-first dispatch: a PNG renamed to .jxl decodes as PNG, a
-        // JXL codestream renamed to .png is still JXL. Unknown magic with a
-        // .jxl suffix (e.g. a container-format file) falls back to JXL.
-        let dir = TempDir::new().unwrap();
-        let dir = dir.path();
-
-        let png = dir.join("real.png");
-        image::DynamicImage::new_rgb8(2, 3).save(&png).unwrap();
-        let renamed_jxl = dir.join("renamed.jxl");
-        std::fs::copy(&png, &renamed_jxl).unwrap();
-        assert!(!is_jxl(&renamed_jxl));
-        let decoded = decode_image(&renamed_jxl).unwrap();
-        assert_eq!(
-            (decoded.width, decoded.height),
-            (ImgW::new(2), ImgH::new(3))
-        );
-
-        let renamed_png = dir.join("renamed.png");
-        std::fs::write(&renamed_png, [0xffu8, 0x0a, 0x01, 0x02]).unwrap();
-        assert!(is_jxl(&renamed_png));
-
-        let container = dir.join("container.jxl");
-        std::fs::write(&container, [0x00, 0x00, 0x00, 0x0c, b'J', b'X', b'L', b' ']).unwrap();
-        assert!(is_jxl(&container));
-    }
-
-    #[test]
     fn fb_to_rgba_replicates_grayscale() {
         // 1 channel (grayscale): the gray sample goes to R, G and B.
         // The code sets alpha = 255.
@@ -782,35 +566,35 @@ mod tests {
     }
 
     #[test]
-    fn decode_common_reads_png() {
+    fn decode_raster_reads_a_png() {
         let dir = TempDir::new().unwrap();
         let dir = dir.path();
         let path = dir.join("img.png");
         image::DynamicImage::new_rgb8(3, 2).save(&path).unwrap();
-        let decoded = decode_image(&path).unwrap();
+        let decoded = decode_raster(&path).unwrap();
         assert_eq!(decoded.width, ImgW::new(3));
         assert_eq!(decoded.height, ImgH::new(2));
         assert_eq!(decoded.data.len(), 3 * 2 * 4);
     }
 
     #[test]
-    fn decode_image_reads_webp() {
+    fn decode_raster_reads_webp() {
         // Lossless encode via image-webp, then decode back through
-        // decode_image (format sniffed from bytes, not extension).
+        // decode_raster (format sniffed from bytes, not extension).
         let dir = TempDir::new().unwrap();
         let dir = dir.path();
         let path = dir.join("img.webp");
         image::DynamicImage::new_rgb8(5, 4)
             .save_with_format(&path, image::ImageFormat::WebP)
             .unwrap();
-        let decoded = decode_image(&path).unwrap();
+        let decoded = decode_raster(&path).unwrap();
         assert_eq!(decoded.width, ImgW::new(5));
         assert_eq!(decoded.height, ImgH::new(4));
         assert_eq!(decoded.data.len(), 5 * 4 * 4);
     }
 
     #[test]
-    fn decode_image_reads_grid_filter_formats() {
+    fn decode_raster_reads_grid_filter_formats() {
         // Every format the grid filter accepts (grid.rs is_image_path) must
         // decode.
         // The filter and the image-crate features must stay in sync (see
@@ -827,7 +611,7 @@ mod tests {
             image::DynamicImage::new_rgb8(4, 2)
                 .save_with_format(&path, format)
                 .unwrap_or_else(|e| panic!("encode {ext}: {e}"));
-            let decoded = decode_image(&path).unwrap_or_else(|e| panic!("decode {ext}: {e}"));
+            let decoded = decode_raster(&path).unwrap_or_else(|e| panic!("decode {ext}: {e}"));
             assert_eq!(
                 (decoded.width, decoded.height),
                 (ImgW::new(4), ImgH::new(2)),
@@ -838,12 +622,12 @@ mod tests {
     }
 
     #[test]
-    fn decode_image_fails_cleanly_on_garbage() {
+    fn decode_raster_fails_cleanly_on_garbage() {
         let dir = TempDir::new().unwrap();
         let dir = dir.path();
         let path = dir.join("x.png");
         std::fs::write(&path, b"garbage").unwrap();
-        assert!(decode_image(&path).is_err());
+        assert!(decode_raster(&path).is_err());
     }
 
     proptest::proptest! {
