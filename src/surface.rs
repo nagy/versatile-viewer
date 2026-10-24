@@ -241,6 +241,17 @@ pub trait Surface: Send + Sync {
     fn previews(&self) -> bool {
         false
     }
+
+    /// Whether a settled zoom can render a sharper picture of the same plane.
+    ///
+    /// True for a resolution-independent source (a vector file, a document
+    /// page): the image view re-renders the visible region at the settled
+    /// scale.
+    /// False for a raster image: a re-render only decodes the same pixels
+    /// again, so the view scales the existing texture on the GPU instead.
+    fn can_refine(&self) -> bool {
+        false
+    }
 }
 
 /// Why a surface could not open, describe or render a plane.
@@ -472,6 +483,12 @@ impl Surface for VectorSurface {
     fn progressive(&self) -> Result<Option<Box<dyn ChunkSource>>, SurfaceError> {
         // A vector file parses and paints in one step.
         Ok(None)
+    }
+
+    // The tree paints at any scale, so a settled zoom pays for a sharper patch
+    // of the same picture.
+    fn can_refine(&self) -> bool {
+        true
     }
 }
 
@@ -856,6 +873,8 @@ mod tests {
         assert_eq!(&base.data[..4], &[255, 0, 0, 255]);
         assert!(surface.progressive().unwrap().is_none());
         assert!(!surface.previews());
+        // The tree paints at any scale, so the view repaints a settled zoom.
+        assert!(surface.can_refine());
     }
 
     #[cfg(feature = "svg")]
@@ -911,6 +930,29 @@ mod tests {
         let dir = temp_dir();
         let path = write_svg(dir.path(), "drawing.svg", SQUARE);
         assert!(open_surface(&path).is_err());
+    }
+
+    #[test]
+    fn a_region_converts_from_a_crop_and_back() {
+        // The image view computes its patch as a `region::Crop`, and a surface
+        // takes a `Region`, so the two must keep the same fields.
+        let crop = crate::region::Crop {
+            x: 1.0,
+            y: 2.0,
+            w: 3.0,
+            h: 4.0,
+        };
+        let region = Region::from(crop);
+        assert_eq!(
+            region,
+            Region {
+                x: 1.0,
+                y: 2.0,
+                w: 3.0,
+                h: 4.0
+            }
+        );
+        assert_eq!(crate::region::Crop::from(region), crop);
     }
 
     /// A backend that writes only `render_whole`: it inherits region support
@@ -1023,5 +1065,21 @@ mod tests {
         };
         let err = NoAnchor.render(View::region(0, region, 1.0));
         assert!(matches!(err, Err(SurfaceError::Unsupported(_))));
+    }
+
+    #[test]
+    fn default_backend_does_not_refine() {
+        // A backend that does not override `can_refine` is a raster source:
+        // the image view never re-renders it on a zoom settle.
+        assert!(!WholeOnly.can_refine());
+        assert!(!NoAnchor.can_refine());
+    }
+
+    #[test]
+    fn a_raster_image_does_not_refine() {
+        let dir = temp_dir();
+        let path = write_png(dir.path(), "img.png", 4, 2);
+        let surface = open_surface(&path).unwrap();
+        assert!(!surface.can_refine());
     }
 }

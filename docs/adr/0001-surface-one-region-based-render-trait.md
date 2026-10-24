@@ -42,6 +42,7 @@ pub trait Surface: Send + Sync {
 
     fn progressive(&self) -> Result<Option<Box<dyn ChunkSource>>, SurfaceError> { Ok(None) }
     fn previews(&self) -> bool;
+    fn can_refine(&self) -> bool { false }
 }
 ```
 
@@ -86,6 +87,11 @@ view fits a scale. `bounds` is cheap and must not decode.
 - `progressive` returns a `ChunkSource`, not a path. Progressive decoding no
   longer needs a filesystem name, so an in-memory or network source can
   stream. A source with no progressive path answers `Ok(None)`.
+- `can_refine` separates a resolution-independent source (a vector tree, a
+  document page) from a raster one. The image view re-renders the visible
+  region after a zoom settles only when it is true, so it no longer guesses
+  the source from a file format. Without it, a raster image would re-decode
+  the same pixels on every settle.
 - A grid cell holds an `EntrySource`: either a file to open lazily, or the
   surface handle and plane of an already-open source. So an in-memory source
   browses like a directory, with no file behind it.

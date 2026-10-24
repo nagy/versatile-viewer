@@ -61,7 +61,6 @@ use versatile_viewer::{
     loader::{DecodeMsg, Loader},
     mcp, region, rotate,
     surface::{Surface, View, open_surface},
-    svg,
     tween::Ramp,
     upload_rgba,
     zoomkeys::TypedKeys,
@@ -348,7 +347,9 @@ impl ViewState {
         self.close_crop();
         self.source_plane = entry.plane();
         if let EntrySource::Plane { surface, .. } = entry {
-            self.source = Some(Arc::clone(surface));
+            // The grid already paid for the open source, so the view shares
+            // it, and only when it can render a sharper picture.
+            self.source = surface.can_refine().then(|| Arc::clone(surface));
             return;
         }
         let Some(path) = entry.path() else {
@@ -357,13 +358,13 @@ impl ViewState {
         let path = path.to_path_buf();
         let (generation, tx) = (self.crop_gen, self.crop_tx.clone());
         rayon::spawn(move || {
-            // The sniff reads the head only, so a 200 MB photo never makes a
-            // worker read the whole file.
-            let source: Option<Arc<dyn Surface>> = if svg::sniff(&path) {
-                open_surface(&path).ok().map(Arc::from)
-            } else {
-                None
-            };
+            // The open reads the head and, for a vector file, parses the tree
+            // once. A source that cannot refine keeps no handle: a repaint
+            // would only decode the same pixels again.
+            let source: Option<Arc<dyn Surface>> = open_surface(&path)
+                .ok()
+                .filter(|surface| surface.can_refine())
+                .map(Arc::from);
             let _ = tx.send(CropMsg::Source { generation, source });
         });
     }
@@ -1000,7 +1001,14 @@ fn main() -> Result<()> {
     } else {
         None
     };
-    let single_source = if single_plane && svg::sniff(path) {
+    // Only a source that can render a sharper picture of the same plane keeps
+    // its handle: a vector file repaints the region its window shows, while a
+    // raster file has nothing to add past its own pixels.
+    let single_source = if single_plane
+        && single_surface
+            .as_ref()
+            .is_some_and(|surface| surface.can_refine())
+    {
         single_surface
     } else {
         None

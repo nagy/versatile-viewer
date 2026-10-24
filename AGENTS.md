@@ -33,9 +33,10 @@ The binary name is `vv`.
   A `View` names a plane, an optional `Region` and a scale (output pixels per surface unit), so the grid asks for a thumbnail, the loader for the whole plane and the image view for the patch it shows.
   `src/sign.rs` owns the content sniffing (`is_jxl`, `file_magic`, `is_common_magic`, `format`, `dimensions`), and both the surface layer and `svg.rs` use it.
   `Surface::progressive` returns a `Box<dyn ChunkSource>` and not a path, so an in-memory or network source can stream, and the default `Ok(None)` means one step.
+  `Surface::can_refine` says whether a settled zoom can yield a sharper picture of the same plane: a vector tree answers true, a raster image false.
   A raster plane measures the capped size it renders, so `bounds` and the pixels of a scale-1.0 render agree.
   The trait decisions live in `docs/adr/0001-surface-one-region-based-render-trait.md`.
-- The image view repaints the region its window shows, from the open surface.
+- The image view repaints the region its window shows, from the open surface, when `Surface::can_refine` says a sharper picture is possible.
   `src/region.rs` holds the pure geometry and policy: `crop`, `to_screen`, `to_image`, `Crop`, `worth_painting`, `MARGIN`, `SCALE_SLACK`, `QUIET`.
   A patch covers the window plus `MARGIN` (0.25 of each side), in source pixels, so the paint area follows the window and a deep zoom costs no more pixels than a shallow one.
   `Surface::render` paints that rect at the view scale, so the patch lands 1:1 on screen; a `VectorSurface` paints only those pixels.
@@ -44,8 +45,8 @@ The binary name is `vv`.
   One paint in flight, because resvg cannot cancel mid-paint.
   `ViewState` keeps `Arc<dyn Surface>`, the `CropState` (texture, source rect, raster scale), the pending flag and one generation counter.
   Every open, every n/p step and every return to the grid bumps that counter, so the result of a worker for an earlier image drops.
-  An image opened from the grid opens its own surface on a worker (`request_source`), because the grid keeps none.
-  A single-file launch keeps the surface it already opened.
+  An image opened from the grid opens its own surface on a worker (`request_source`), because the grid keeps none, and keeps it only when `can_refine` is true.
+  A single-file launch keeps the surface it already opened, under the same rule.
   `img_w`/`img_h` keep measuring the source, never the patch, so a bigger texture never disturbs fit, pan or zoom.
   The whole-image texture (`view_tex`) stays as the fallback and draws only where the patch cannot reach (`patch_covers`), so a resize or a pan that outruns the repaint never shows background.
   Drawing both over the same pixels would double the alpha of an antialiased edge, so the patch hides the whole image where it covers.
