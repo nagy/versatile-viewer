@@ -56,11 +56,11 @@ use versatile_viewer::{
     DecodedImage, UploadError,
     blurbg::{self, BlurBg},
     decode_view,
-    dim::{ImgH, ImgW, LongSide, PreviewPx, RampTime, Rect, WinH, WinW},
+    dim::{ImgH, ImgW, PreviewPx, RampTime, Rect, WinH, WinW},
     grid::{DecodeFailure, Grid, GridAction},
     keyrepeat,
     loader::{DecodeMsg, Loader},
-    mcp, rotate, svg, tier,
+    mcp, region, rotate, svg,
     tween::Ramp,
     upload_rgba,
     zoomkeys::TypedKeys,
@@ -235,41 +235,60 @@ struct ViewState {
     /// unloads before the window.
     blur_bg: Option<BlurBg>,
     /// The parsed source of the open vector file (None for a raster format).
-    /// It paints again at a larger size when the zoom settles, so a deep zoom
-    /// never stretches a small raster.
+    /// The view repaints the region the window shows, so a deep zoom never
+    /// stretches a small raster.
     vector: Option<Arc<svg::Vector>>,
-    /// The long side of the texture on screen now, in pixels.
-    /// The tier ladder compares it against the size the zoom asks for.
-    tier_side: LongSide,
-    /// The rung a worker paints now, if any.
+    /// The region patch on screen: the visible part of the document, painted
+    /// at the scale the window shows it.
+    /// None until the first paint lands, and then the whole-image texture in
+    /// `view_tex` takes over only where the patch cannot reach.
+    crop: Option<CropState>,
+    /// Whether a worker paints a patch now.
     /// One paint in flight, because resvg cannot cancel one mid-paint.
-    tier_pending: Option<LongSide>,
+    crop_pending: bool,
     /// Bumped on every open, every n/p step and every return to the grid, so
     /// the result of a worker for an earlier image drops instead of landing.
-    tier_gen: u64,
+    crop_gen: u64,
+    /// The region the window needed when the debounce last saw it move.
+    crop_seen: Option<region::Crop>,
     /// The scale the debounce last saw.
-    tier_scale_seen: f32,
-    /// When the scale last moved.
-    tier_quiet_at: Instant,
-    /// The tier workers talk back over this pair.
-    tier_tx: Sender<TierMsg>,
-    tier_rx: Receiver<TierMsg>,
+    crop_seen_scale: f32,
+    /// When the view last moved.
+    crop_quiet_at: Instant,
+    /// The region workers talk back over this pair.
+    crop_tx: Sender<CropMsg>,
+    crop_rx: Receiver<CropMsg>,
 }
 
-/// A message from a tier worker to the image view.
+/// The visible part of the open image, painted at the scale the window shows
+/// it.
+///
+/// The patch carries its own texture, so the whole-image texture stays as the
+/// fallback of a pan or a resize that outruns the repaint.
+struct CropState {
+    /// The pixels of the patch.
+    texture: Texture2D,
+    /// The source rect the patch covers, in base raster pixels.
+    rect: region::Crop,
+    /// The raster scale, in texture pixels per source pixel.
+    scale: f32,
+}
+
+/// A message from a region worker to the image view.
 ///
 /// The view carries one generation counter, so a paint of the previous image
 /// never lands on the new one.
-enum TierMsg {
+enum CropMsg {
     /// The parsed source of the open image, or None when the file has none.
     Source {
         generation: u64,
         vector: Option<Arc<svg::Vector>>,
     },
-    /// A finished paint whose long side measures `side` pixels.
-    Raster {
+    /// A finished patch of `rect` at `scale` pixels per source pixel.
+    Crop {
         generation: u64,
-        side: LongSide,
+        rect: region::Crop,
+        scale: f32,
         image: DecodedImage,
     },
     /// A paint that failed, so the view drops the pending flag and may ask
@@ -294,26 +313,23 @@ impl ViewState {
         self.ramps = Ramps::default();
     }
 
-    /// Drop the tier state of the image that was open, and retire every worker
-    /// result still in flight.
-    fn close_tier(&mut self) {
+    /// Drop the region state of the image that was open, and retire every
+    /// worker result still in flight.
+    fn close_crop(&mut self) {
         self.vector = None;
-        self.tier_pending = None;
-        self.tier_side = LongSide::new(0);
-        self.tier_scale_seen = 0.0;
-        self.tier_quiet_at = Instant::now();
-        self.tier_gen = self.tier_gen.wrapping_add(1);
+        self.crop = None;
+        self.crop_pending = false;
+        self.crop_seen = None;
+        self.crop_seen_scale = 0.0;
+        self.crop_quiet_at = Instant::now();
+        self.crop_gen = self.crop_gen.wrapping_add(1);
     }
 
-    /// Adopt a source that arrived with a decode, so the zoom can paint a
-    /// larger tier later.
-    ///
-    /// The decode painted the base raster, so its long side names the texture
-    /// on screen.
-    fn adopt_source(&mut self, source: Option<Arc<svg::Vector>>, side: LongSide) {
-        self.close_tier();
+    /// Adopt a source that arrived with a decode, so the view can repaint the
+    /// visible region at any zoom.
+    fn adopt_source(&mut self, source: Option<Arc<svg::Vector>>) {
+        self.close_crop();
         self.vector = source;
-        self.tier_side = side;
     }
 
     /// Ask a worker for the parsed source of `path`.
@@ -322,8 +338,8 @@ impl ViewState {
     /// here, off the main thread.
     /// A raster file answers None at once.
     fn request_source(&mut self, path: PathBuf) {
-        self.close_tier();
-        let (generation, tx) = (self.tier_gen, self.tier_tx.clone());
+        self.close_crop();
+        let (generation, tx) = (self.crop_gen, self.crop_tx.clone());
         rayon::spawn(move || {
             // The sniff reads the head only, so a 200 MB photo never makes a
             // worker read the whole file.
@@ -332,105 +348,123 @@ impl ViewState {
             } else {
                 None
             };
-            let _ = tx.send(TierMsg::Source { generation, vector });
+            let _ = tx.send(CropMsg::Source { generation, vector });
         });
     }
 
-    /// Ask for a tier once the zoom settles, when the texture on screen no
-    /// longer matches the pixels the screen shows.
+    /// Repaint the visible region once the view holds still, when the patch on
+    /// screen no longer covers the window at the right scale.
     ///
-    /// The guard is one paint in flight: resvg cannot cancel mid-paint, and a
-    /// 4096 px pixmap costs up to 64 MB.
-    fn tick_tier(&mut self, now: Instant) {
-        if self.vector.is_none()
-            || self.tier_pending.is_some()
-            || self.img_w <= 0.0
-            || self.view_loading
-        {
+    /// The paint area follows the window, not the document, so a deep zoom
+    /// costs no more than a shallow one.
+    /// The guard is one paint in flight: resvg cannot cancel mid-paint.
+    fn tick_crop(&mut self, now: Instant, win: Vector2) {
+        if self.vector.is_none() || self.crop_pending || self.img_w <= 0.0 || self.view_loading {
             return;
         }
         let Some(scale) = self.view_scale else {
             return;
         };
-        // The debounce: any visible scale movement restarts the timer, so a
-        // drag or an ease never queues a paint per frame.
-        if (scale - self.tier_scale_seen).abs() > self.tier_scale_seen.max(0.001) * 0.002 {
-            self.tier_scale_seen = scale;
-            self.tier_quiet_at = now;
+        if !(scale.is_finite() && scale > 0.0) {
             return;
         }
-        if now.duration_since(self.tier_quiet_at) < tier::QUIET {
+        let img = Vector2::new(self.img_w, self.img_h);
+        let needed = region::crop(img, win, self.pan, scale, self.angle, 0.0);
+        // The debounce: any movement of the seen region restarts the timer, so
+        // a drag, a pan or an ease never queues a paint per frame.
+        let moved = self.crop_seen.is_none_or(|seen| {
+            (seen.x - needed.x).abs() > 0.5
+                || (seen.y - needed.y).abs() > 0.5
+                || (seen.w - needed.w).abs() > 0.5
+                || (seen.h - needed.h).abs() > 0.5
+                || (self.crop_seen_scale - scale).abs() > scale * 0.002
+        });
+        if moved {
+            self.crop_seen = Some(needed);
+            self.crop_seen_scale = scale;
+            self.crop_quiet_at = now;
+            return;
+        }
+        if now.duration_since(self.crop_quiet_at) < region::QUIET {
+            return;
+        }
+        let painted = self.crop.as_ref().map(|c| (c.rect, c.scale));
+        if !region::worth_painting(
+            &needed,
+            painted.as_ref().map(|(rect, _)| rect),
+            scale,
+            painted.map_or(0.0, |(_, painted_scale)| painted_scale),
+        ) {
             return;
         }
         let Some(vector) = self.vector.clone() else {
             return;
         };
-        let (w, h) = vector.base_size();
-        let base = LongSide::new(w.get().max(h.get()));
-        let need = tier::needed(self.img_w.max(self.img_h), scale);
-        let next = tier::rung(need, base, tier::TIER_CAP);
-        if !tier::worth_painting(next, self.tier_side) {
+        // Paint a margin around what the window shows, so a small pan between
+        // two paints stays covered, and a filter keeps its outer context.
+        let paint = region::crop(img, win, self.pan, scale, self.angle, region::MARGIN);
+        if paint.is_empty() {
             return;
         }
-        self.tier_pending = Some(next);
-        let (generation, tx) = (self.tier_gen, self.tier_tx.clone());
-        rayon::spawn(move || match vector.rasterize(next) {
+        self.crop_pending = true;
+        let (generation, tx) = (self.crop_gen, self.crop_tx.clone());
+        rayon::spawn(move || match vector.render_region(paint, scale) {
             Ok(image) => {
-                let _ = tx.send(TierMsg::Raster {
+                let _ = tx.send(CropMsg::Crop {
                     generation,
-                    side: next,
+                    rect: paint,
+                    scale,
                     image,
                 });
             }
             Err(err) => {
                 eprintln!("vv: {err}");
-                let _ = tx.send(TierMsg::Failed { generation });
+                let _ = tx.send(CropMsg::Failed { generation });
             }
         });
     }
 
-    /// Apply finished tier work.
-    /// A source lands as is, and a raster uploads when it still beats the
-    /// texture on screen.
+    /// Apply finished region work.
+    /// A source lands as is, and a patch uploads and replaces the one on
+    /// screen.
     /// A result of an earlier image drops.
-    fn drain_tiers(
+    fn drain_crops(
         &mut self,
         rl: &mut RaylibHandle,
         thread: &RaylibThread,
     ) -> Result<(), UploadError> {
-        while let Ok(msg) = self.tier_rx.try_recv() {
+        while let Ok(msg) = self.crop_rx.try_recv() {
             match msg {
-                TierMsg::Source { generation, vector } => {
-                    if generation == self.tier_gen {
+                CropMsg::Source { generation, vector } => {
+                    if generation == self.crop_gen {
                         self.vector = vector;
                     }
                 }
-                TierMsg::Raster {
+                CropMsg::Crop {
                     generation,
-                    side,
+                    rect,
+                    scale,
                     image,
                 } => {
-                    if generation != self.tier_gen {
+                    if generation != self.crop_gen {
                         continue;
                     }
-                    self.tier_pending = None;
-                    if !tier::worth_painting(side, self.tier_side) {
-                        continue;
-                    }
-                    show_frame(
-                        rl,
-                        thread,
-                        &mut self.view_tex,
-                        &image.data,
-                        image.width,
-                        image.height,
-                        self.pixelated,
-                    )?;
-                    self.tier_side = side;
+                    self.crop_pending = false;
+                    let texture = upload_rgba(rl, thread, &image.data, image.width, image.height)?;
+                    apply_view_filter(thread, &texture, self.pixelated);
+                    // The old patch drops here, so one patch lives at a time.
+                    self.crop = Some(CropState {
+                        texture,
+                        rect,
+                        scale,
+                    });
                 }
-                TierMsg::Failed { generation } => {
-                    if generation == self.tier_gen {
-                        self.tier_pending = None;
+                CropMsg::Failed { generation } => {
+                    if generation == self.crop_gen {
+                        // A failure waits for the next quiet window instead of
+                        // retrying every frame.
+                        self.crop_pending = false;
+                        self.crop_quiet_at = Instant::now();
                     }
                 }
             }
@@ -646,6 +680,28 @@ fn draw_turned(
     );
 }
 
+/// Whether the region patch covers the whole window at the current transform.
+///
+/// The draw skips the whole-image texture then, because the patch already
+/// holds every pixel the window shows.
+/// A patch whose margin a pan or a resize consumed leaves the rest to the
+/// whole-image texture until the repaint lands.
+fn patch_covers(st: &ViewState, win_w: f32, win_h: f32) -> bool {
+    let Some(crop) = &st.crop else {
+        return false;
+    };
+    let Some(scale) = st.view_scale else {
+        return false;
+    };
+    if st.img_w <= 0.0 || !(scale.is_finite() && scale > 0.0) {
+        return false;
+    }
+    let img = Vector2::new(st.img_w, st.img_h);
+    let win = Vector2::new(win_w, win_h);
+    let needed = region::crop(img, win, st.pan, scale, st.angle, 0.0);
+    crop.rect.contains(&needed)
+}
+
 /// Keep the pivot of a turned image on its window spot.
 ///
 /// The angle already ran from `from` to the value `st.angle` shows, so the code
@@ -741,9 +797,9 @@ fn show_entry(
     st.open_id = Some(id);
     st.mode = Mode::Image;
     st.reset_view();
-    // A new image starts with no tier: the decode or the source request
-    // names the texture size.
-    st.close_tier();
+    // A new image starts with no region patch: the decode or the source
+    // request names what the window shows.
+    st.close_crop();
     if let Some(tex) = tex {
         grid.entries[idx].viewing = true;
         st.view_from_grid = Some(id);
@@ -754,9 +810,8 @@ fn show_entry(
         st.loader = None;
         st.view_loading = false;
         // The grid keeps no parsed tree, so the view parses it on a worker
-        // before a deeper zoom can paint.
+        // before a deeper zoom can repaint.
         st.request_source(path);
-        st.tier_side = LongSide::new(w.get().max(h.get()));
         if set_scale_now {
             st.view_scale = Some((win_w / st.img_w).min(win_h / st.img_h));
         }
@@ -905,7 +960,7 @@ fn main() -> Result<()> {
     // can be sized to the image.
     // Directory launch: fixed default window size.
     // A vector file brings its parsed source along, so the image view can
-    // paint a larger tier when the zoom settles.
+    // repaint the region its window shows.
     let single_decoded = if dir_grid.is_none() {
         Some(decode_view(path, &mut |_, _| {})?)
     } else {
@@ -962,7 +1017,7 @@ fn main() -> Result<()> {
     // Image-view state: what is shown and how it is framed.
     // Its Loader field drops (and cancels the worker) before the window
     // closes, like `grid`.
-    let (tier_tx, tier_rx) = channel();
+    let (crop_tx, crop_rx) = channel();
     let mut st = ViewState {
         mode: if grid.is_none() {
             Mode::Image
@@ -987,13 +1042,14 @@ fn main() -> Result<()> {
         loader: None,
         blur_bg: BlurBg::from_env(),
         vector: None,
-        tier_side: LongSide::new(0),
-        tier_pending: None,
-        tier_gen: 0,
-        tier_scale_seen: 0.0,
-        tier_quiet_at: Instant::now(),
-        tier_tx,
-        tier_rx,
+        crop: None,
+        crop_pending: false,
+        crop_gen: 0,
+        crop_seen: None,
+        crop_seen_scale: 0.0,
+        crop_quiet_at: Instant::now(),
+        crop_tx,
+        crop_rx,
     };
     if let Some(decoded) = single_decoded {
         st.view_tex = Some(upload_rgba(
@@ -1008,7 +1064,6 @@ fn main() -> Result<()> {
             st.view_tex.as_ref().expect("just uploaded"),
             st.pixelated,
         );
-        st.tier_side = LongSide::new(decoded.image.width.get().max(decoded.image.height.get()));
         st.vector = decoded.vector;
         st.img_w = win0_w as f32;
         st.img_h = win0_h as f32;
@@ -1274,9 +1329,9 @@ fn main() -> Result<()> {
                     None => open_failed = true, // entry vanished (decode failed)
                 }
             }
-            // A vector source arrives with the final raster, so the tier
+            // A vector source arrives with the final raster, so the region
             // state changes after the loader loop ends its borrow.
-            let mut tier_ready: Option<(Option<Arc<svg::Vector>>, LongSide)> = None;
+            let mut source_ready: Option<Option<Arc<svg::Vector>>> = None;
             if let Some(loader) = &st.loader {
                 while let Some(msg) = loader.try_recv() {
                     match msg {
@@ -1341,12 +1396,9 @@ fn main() -> Result<()> {
                             );
                             st.view_loading = false;
                             // A vector file keeps its parsed source, so a
-                            // deeper zoom paints a larger tier instead of
-                            // stretching this raster.
-                            tier_ready = Some((
-                                vector,
-                                LongSide::new(image.width.get().max(image.height.get())),
-                            ));
+                            // deeper zoom repaints the visible region instead
+                            // of stretching this raster.
+                            source_ready = Some(vector);
                         }
                         Err(err) => {
                             eprintln!("vv: {err}");
@@ -1355,12 +1407,12 @@ fn main() -> Result<()> {
                     }
                 }
             }
-            if let Some((source, side)) = tier_ready {
-                st.adopt_source(source, side);
+            if let Some(source) = source_ready {
+                st.adopt_source(source);
             }
             if open_failed {
                 st.loader = None; // cancel the worker
-                st.close_tier();
+                st.close_crop();
                 // Keep the entry: mark it as failed, so its cell stays
                 // visible (dimmed, error glyph) instead of vanishing
                 // silently.
@@ -1673,6 +1725,9 @@ fn main() -> Result<()> {
                 if let Some(tex) = &st.view_tex {
                     apply_view_filter(&thread, tex, st.pixelated);
                 }
+                if let Some(crop) = &st.crop {
+                    apply_view_filter(&thread, &crop.texture, st.pixelated);
+                }
             }
             // `f` tap action: it needs known geometry, and the hit test uses
             // the drawn image rect (offset + pan at the on-screen scale).
@@ -1743,7 +1798,7 @@ fn main() -> Result<()> {
                 }
                 st.loader = None; // cancels a still-running stream
                 st.view_loading = false;
-                st.close_tier();
+                st.close_crop();
             }
 
             // Prev/next while viewing (only with a grid to navigate).
@@ -2166,13 +2221,13 @@ fn main() -> Result<()> {
             } // st.img_w > 0.0: fit/pan math needs known dimensions
         }
 
-        // Vector tiers: adopt a parsed source and a finished paint, then ask
-        // for the next rung when the zoom settled.
-        // The upload needs the main thread, and the request reads the scale of
-        // this frame.
+        // The visible-region patch of a vector file: adopt a parsed source and
+        // a finished paint, then repaint once the view holds still.
+        // The upload needs the main thread, and the request reads the scale
+        // and the pan of this frame.
         if st.mode == Mode::Image {
-            st.drain_tiers(&mut rl, &thread)?;
-            st.tick_tier(Instant::now());
+            st.drain_crops(&mut rl, &thread)?;
+            st.tick_crop(Instant::now(), Vector2::new(win_w, win_h));
         }
 
         // VV_BLUR_BG in grid mode: the background follows the selected
@@ -2207,40 +2262,72 @@ fn main() -> Result<()> {
             if let Some(bg) = &mut st.blur_bg {
                 bg.draw(&mut d, WinW::new(win_w), WinH::new(win_h));
             }
-            if let Some(texture) = &st.view_tex {
-                // The image turns around its own center on screen, which is
-                // the pan offset on top of the window middle.
-                let center = Vector2::new(win_w / 2.0 + st.pan.x, win_h / 2.0 + st.pan.y);
+            // The region patch covers the window on its own with the sharp
+            // pixels of the visible part, so the whole-image texture draws only
+            // where the patch cannot reach: the frames of a resize or a pan
+            // that outran the repaint.
+            // Both over the same pixels would double the alpha of an
+            // antialiased edge.
+            if !patch_covers(&st, win_w, win_h) {
+                if let Some(texture) = &st.view_tex {
+                    // The image turns around its own center on screen, which
+                    // is the pan offset on top of the window middle.
+                    let center = Vector2::new(win_w / 2.0 + st.pan.x, win_h / 2.0 + st.pan.y);
+                    draw_turned(
+                        &mut d,
+                        texture,
+                        st.img_w,
+                        st.img_h,
+                        st.view_scale.unwrap(),
+                        center,
+                        st.angle,
+                    );
+                } else if st.img_w > 0.0
+                    && let Some(g) = grid.as_ref()
+                    && let Some(id) = st.open_id
+                    && let Some(i) = g.index_of(id)
+                    && let Some(tex) = g
+                        .entries
+                        .get(i)
+                        // The decoded thumb first, then its few-byte
+                        // placeholder.
+                        .and_then(|e| e.texture.as_ref().or(e.placeholder.as_ref()))
+                {
+                    // No full-res frame yet (decode in flight): show the entry
+                    // thumb instead of flashing black, or its ThumbHash
+                    // placeholder while the thumb itself still decodes.
+                    // Both hold the whole image with the aspect preserved, so
+                    // they map 1:1 onto the image rect and the later swap to
+                    // the full-res texture is pixel-aligned.
+                    let scale = st
+                        .view_scale
+                        .unwrap_or((win_w / st.img_w).min(win_h / st.img_h));
+                    let center = Vector2::new(win_w / 2.0 + st.pan.x, win_h / 2.0 + st.pan.y);
+                    draw_turned(&mut d, tex, st.img_w, st.img_h, scale, center, st.angle);
+                }
+            }
+            // The region patch draws turned and scaled like the image, so its
+            // pixels land where the whole-image texture would put them.
+            if let Some(crop) = &st.crop
+                && st.img_w > 0.0
+                && let Some(scale) = st.view_scale
+            {
+                let img = Vector2::new(st.img_w, st.img_h);
+                let win = Vector2::new(win_w, win_h);
+                let rect = crop.rect;
+                let middle = Vector2::new(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+                let center = region::to_screen(middle, img, win, st.pan, scale, st.angle);
+                // The dest size follows the current view scale, so the patch
+                // stretches by at most `region::SCALE_SLACK`.
                 draw_turned(
                     &mut d,
-                    texture,
-                    st.img_w,
-                    st.img_h,
-                    st.view_scale.unwrap(),
+                    &crop.texture,
+                    rect.w,
+                    rect.h,
+                    scale,
                     center,
                     st.angle,
                 );
-            } else if st.img_w > 0.0
-                && let Some(g) = grid.as_ref()
-                && let Some(id) = st.open_id
-                && let Some(i) = g.index_of(id)
-                && let Some(tex) = g
-                    .entries
-                    .get(i)
-                    // The decoded thumb first, then its few-byte placeholder.
-                    .and_then(|e| e.texture.as_ref().or(e.placeholder.as_ref()))
-            {
-                // No full-res frame yet (decode in flight): show the entry
-                // thumb instead of flashing black, or its ThumbHash
-                // placeholder while the thumb itself still decodes.
-                // Both hold the whole image with the aspect preserved, so they
-                // map 1:1 onto the image rect and the later swap to the
-                // full-res texture is pixel-aligned.
-                let scale = st
-                    .view_scale
-                    .unwrap_or((win_w / st.img_w).min(win_h / st.img_h));
-                let center = Vector2::new(win_w / 2.0 + st.pan.x, win_h / 2.0 + st.pan.y);
-                draw_turned(&mut d, tex, st.img_w, st.img_h, scale, center, st.angle);
             }
             // VV_DEBUG: while the pointer is captured, draw a crosshair at
             // the virtual cursor position (clamped to the window).

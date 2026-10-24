@@ -44,6 +44,19 @@ impl Vector {
     pub fn rasterize(&self, _long: LongSide) -> Result<DecodedImage, DecodeError> {
         Err(DecodeError::VectorOff)
     }
+
+    /// A stub never paints.
+    ///
+    /// # Errors
+    ///
+    /// The function always errors with [`DecodeError::VectorOff`].
+    pub fn render_region(
+        &self,
+        _region: crate::region::Crop,
+        _scale: f32,
+    ) -> Result<DecodedImage, DecodeError> {
+        Err(DecodeError::VectorOff)
+    }
 }
 
 /// No build without the `svg` feature reads a vector file.

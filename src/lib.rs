@@ -33,9 +33,9 @@
 //! with `--mcp`.
 //! [`keyrepeat`] steps a held key for discrete moves, and [`tween`] ramps a
 //! held key for continuous motion.
-//! [`tier`] holds the pixel-tier ladder of the image view: a vector source
-//! paints a larger raster when the zoom settles, so a deep zoom never
-//! stretches the base raster.
+//! [`region`] holds the visible-region raster of the image view: a vector
+//! source repaints the part of the window it shows, at the scale it shows it,
+//! so a deep zoom never stretches the base raster.
 //! [`rotate`] holds the image-view rotation angle behind the `r` hold.
 //! [`thumbcache`] keeps the grid thumbnails in `$XDG_CACHE_HOME`, so a warm
 //! cache fills the grid without a decode, across the exit of the viewer.
@@ -52,6 +52,7 @@ pub mod keyrepeat;
 pub mod loader;
 pub mod mcp;
 pub mod placeholder;
+pub mod region;
 pub mod rotate;
 #[cfg(feature = "svg")]
 pub mod svg;
@@ -63,7 +64,6 @@ pub mod thumbcache;
 #[cfg(not(feature = "cache"))]
 #[path = "thumbcache_off.rs"]
 pub mod thumbcache;
-pub mod tier;
 pub mod tween;
 #[cfg(target_os = "linux")]
 pub mod wmclass;
@@ -332,8 +332,8 @@ fn decode_raster(path: &Path) -> Result<Decoded, DecodeError> {
 pub struct ViewDecode {
     /// The pixels to upload.
     pub image: DecodedImage,
-    /// The parsed source of a vector file, so the view can paint a larger tier
-    /// when the zoom settles (see [`tier`]).
+    /// The parsed source of a vector file, so the view can repaint the region
+    /// its window shows (see [`region`]).
     /// None for a raster format, which has no more detail to give.
     pub vector: Option<std::sync::Arc<svg::Vector>>,
 }

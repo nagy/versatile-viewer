@@ -18,9 +18,11 @@
 //! The aspect stays exact, so the base raster and the 512 px thumbnail share
 //! one shape.
 //!
-//! `Vector` keeps the parsed tree, so a later re-raster tier asks the same
-//! value for another size.
-//! No caller holds a tree across frames today.
+//! `Vector` keeps the parsed tree, so [`Vector::render_region`] paints the
+//! region the window shows at the scale it shows it, and a deep zoom never
+//! stretches the base raster (see [`crate::region`]).
+//! The image view holds one tree behind an `Arc` for the length of an open
+//! image.
 //!
 //! External references never resolve: `resources_dir` stays `None` and the
 //! code passes no custom resolver, so an `<image href="file:///etc/passwd">`
@@ -58,7 +60,7 @@ const DEFAULT_SIDE: f32 = 100.0;
 /// A parsed SVG, ready to paint at any size.
 ///
 /// The tree holds geometry with text already turned into paths, so it paints
-/// again at any tier without the font database and without another XML parse.
+/// again at any scale without the font database and without another XML parse.
 /// [`crate::svg::parse`] returns one, and the image view keeps it behind an
 /// `Arc` for the length of an open image.
 #[derive(Debug)]
@@ -79,6 +81,21 @@ impl Vector {
         w.max(h)
     }
 
+    /// The declared units that one base raster pixel spans.
+    ///
+    /// The viewer measures the base raster, and the tree stays in declared
+    /// units, so a region that arrives in base pixels converts with this
+    /// factor.
+    fn declared_per_base(&self) -> f32 {
+        let (w, h) = self.declared();
+        let (bw, bh) = self.base_size();
+        let base_long = bw.get().max(bh.get());
+        if base_long == 0 {
+            return 1.0;
+        }
+        w.max(h) / base_long as f32
+    }
+
     /// The pixel size of the base raster.
     ///
     /// The grid entry and the cache header store this pair, because a vector
@@ -97,6 +114,63 @@ impl Vector {
     /// The function errors when the pixmap allocation fails.
     pub fn render_base(&self) -> Result<DecodedImage, DecodeError> {
         self.rasterize(base_side(self.declared_long()))
+    }
+
+    /// Paint the part of the tree under `region` at `scale` pixels per source
+    /// pixel.
+    ///
+    /// The image view paints the region its window shows, so the paint area
+    /// tracks window pixels and a deep zoom costs no more than a shallow one
+    /// (see [`crate::region`]).
+    /// A filter that samples past the region loses its outer context, so the
+    /// caller paints a margin around what it shows.
+    ///
+    /// # Errors
+    ///
+    /// The function errors when the pixmap allocation fails.
+    pub fn render_region(
+        &self,
+        region: crate::region::Crop,
+        scale: f32,
+    ) -> Result<DecodedImage, DecodeError> {
+        let scale = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
+        // A window wider than the texture limit at a diagonal turn would ask
+        // for more pixels than an upload takes, so the patch drops resolution
+        // instead of clipping, and the draw stretches it back to the region.
+        let wanted = (region.w * scale).max(region.h * scale).max(1.0);
+        let limit = MAX_TEXTURE_SIDE as f32;
+        let fit = if wanted > limit { limit / wanted } else { 1.0 };
+        let width = (region.w * scale * fit).round().max(1.0);
+        let height = (region.h * scale * fit).round().max(1.0);
+        let (rw, rh) = (width as u32, height as u32);
+        let mut pixmap = tiny_skia::Pixmap::new(rw, rh).ok_or(DecodeError::Raster)?;
+        // The region arrives in base raster pixels, and the tree paints in
+        // declared units.
+        let per_base = self.declared_per_base();
+        let region_scale = scale * fit / per_base;
+        let (rx, ry) = (region.x * per_base, region.y * per_base);
+        // The region corner lands on pixel 0: scale around the origin, then
+        // shift that corner to the top-left pixel.
+        let transform = tiny_skia::Transform {
+            sx: region_scale,
+            kx: 0.0,
+            ky: 0.0,
+            sy: region_scale,
+            tx: -rx * region_scale,
+            ty: -ry * region_scale,
+        };
+        resvg::render(&self.tree, transform, &mut pixmap.as_mut());
+        let mut data = pixmap.take();
+        demultiply(&mut data);
+        Ok(DecodedImage {
+            width: ImgW::new(rw),
+            height: ImgH::new(rh),
+            data,
+        })
     }
 
     /// Paint the tree with its long side on `long`, keeping the aspect.
@@ -572,21 +646,79 @@ mod tests {
     }
 
     #[test]
-    fn a_tier_paints_past_the_base() {
+    fn a_region_paints_the_visible_part_at_the_view_scale() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("drawing.svg");
-        std::fs::write(&path, SQUARE).expect("write");
+        let path = dir.path().join("split.svg");
+        // The left half red, the right half blue, in declared units.
+        std::fs::write(
+            &path,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50">
+                <rect width="50" height="50" fill="#ff0000"/>
+                <rect x="50" width="50" height="50" fill="#0000ff"/>
+            </svg>"##,
+        )
+        .expect("write");
         let vector = parse(&path).expect("parse");
-        // The same parsed tree paints again at a larger size, so the image
-        // view never reparses the XML for a deeper zoom.
-        let tier = vector.rasterize(crate::tier::TIER_CAP).expect("tier");
-        assert_eq!(
-            (tier.width, tier.height),
-            (ImgW::new(4096), ImgH::new(2048))
-        );
-        assert_eq!(tier.data.len(), 4096 * 2048 * 4);
-        // The source pair never grows with the tier.
         assert_eq!(vector.base_size(), (ImgW::new(1024), ImgH::new(512)));
+        // The region arrives in base raster pixels, so the right half starts
+        // at x = 512 and covers 512 pixels of the 1024 px source.
+        let right = crate::region::Crop {
+            x: 512.0,
+            y: 0.0,
+            w: 512.0,
+            h: 512.0,
+        };
+        let patch = vector.render_region(right, 1.0).expect("paint");
+        assert_eq!(
+            (patch.width, patch.height),
+            (ImgW::new(512), ImgH::new(512))
+        );
+        assert_eq!(&patch.data[..4], &[0, 0, 255, 255]);
+        assert_eq!(&patch.data[patch.data.len() - 4..], &[0, 0, 255, 255]);
+        // The left half paints red, so the region origin lands on pixel 0.
+        let left = crate::region::Crop {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 50.0,
+        };
+        let patch = vector.render_region(left, 2.0).expect("paint");
+        assert_eq!(
+            (patch.width, patch.height),
+            (ImgW::new(200), ImgH::new(100))
+        );
+        assert_eq!(&patch.data[..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn a_region_measures_in_base_pixels_when_the_base_rounds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("wide.svg");
+        // Declared 300x100 bakes at 1024x341, so one base pixel spans
+        // 0.2929 declared units and the halves meet at base x = 512.
+        std::fs::write(
+            &path,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="300" height="100">
+                <rect width="150" height="100" fill="#ff0000"/>
+                <rect x="150" width="150" height="100" fill="#0000ff"/>
+            </svg>"##,
+        )
+        .expect("write");
+        let vector = parse(&path).expect("parse");
+        assert_eq!(vector.base_size(), (ImgW::new(1024), ImgH::new(341)));
+        let right = crate::region::Crop {
+            x: 512.0,
+            y: 0.0,
+            w: 512.0,
+            h: 341.0,
+        };
+        let patch = vector.render_region(right, 2.0).expect("paint");
+        // The patch measures base pixels times the view scale.
+        assert_eq!(
+            (patch.width, patch.height),
+            (ImgW::new(1024), ImgH::new(682))
+        );
+        assert_eq!(&patch.data[..4], &[0, 0, 255, 255]);
     }
 
     #[test]

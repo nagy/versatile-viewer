@@ -1,0 +1,358 @@
+//! The visible-region raster of the image view.
+//!
+//! A vector file bakes one base raster (see [`crate::svg`]), and a zoom past
+//! that size would stretch pixels.
+//! The view therefore paints the region the window shows, at the scale the
+//! window shows it, and blits that patch over the image.
+//! The paint area then tracks window pixels, not document pixels, so a deep
+//! zoom costs no more than a shallow one and the stretch stays exact.
+//!
+//! [`crop`] maps the window rect back into source pixels and expands it by
+//! [`MARGIN`], [`worth_painting`] guards the repaint with [`SCALE_SLACK`] plus
+//! a containment test, and [`QUIET`] debounces the request past the ease.
+//!
+//! The mapping mirrors the draw: the image center sits at the window middle
+//! plus the pan, and the image turns clockwise around that point.
+//! [`to_screen`] and [`to_image`] are inverses, and `proptest` holds that.
+//!
+//! # Examples
+//!
+//! ```
+//! use raylib::prelude::Vector2;
+//! use versatile_viewer::region;
+//!
+//! let img = Vector2::new(1024.0, 512.0);
+//! let win = Vector2::new(800.0, 600.0);
+//! let pan = Vector2::ZERO;
+//! // The whole document fits the window at this scale, so the crop covers it
+//! // all.
+//! let whole = region::crop(img, win, pan, 0.5, 0.0, 0.0);
+//! assert_eq!((whole.w, whole.h), (1024.0, 512.0));
+//! // Zoomed in, the crop covers the window only, around the image center.
+//! let zoomed = region::crop(img, win, pan, 4.0, 0.0, 0.0);
+//! assert!((zoomed.w - 200.0).abs() < 1e-3);
+//! assert!((zoomed.h - 150.0).abs() < 1e-3);
+//! ```
+
+use std::time::Duration;
+
+use raylib::prelude::Vector2;
+
+/// The fraction of the window each side adds to the painted region.
+///
+/// The margin covers a small pan or nudge between two paints, so the patch
+/// still fills the window while the debounce waits.
+/// A quarter of a window per side costs 1.5x the linear size, and rotation
+/// already grows the region on its own.
+pub const MARGIN: f32 = 0.25;
+
+/// The scale ratio that pays for a repaint.
+///
+/// A paint is exact at its own scale, and a small zoom keeps the patch
+/// stretched by less than this, so a nudge never pays for a pixmap.
+pub const SCALE_SLACK: f32 = 1.05;
+
+/// How long the view must hold still before the region repaints.
+///
+/// The ease settles in about three of its time constants, so 150 ms sits just
+/// past it, and a continuous drag never queues a paint per frame.
+pub const QUIET: Duration = Duration::from_millis(150);
+
+/// An axis-aligned rectangle in source pixels.
+///
+/// `x` and `y` give the top-left corner, and the axes grow right and down,
+/// like the base raster the region belongs to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Crop {
+    /// The left edge, in source pixels.
+    pub x: f32,
+    /// The top edge, in source pixels.
+    pub y: f32,
+    /// The width, in source pixels.
+    pub w: f32,
+    /// The height, in source pixels.
+    pub h: f32,
+}
+
+impl Crop {
+    /// The right edge.
+    #[must_use]
+    pub fn right(&self) -> f32 {
+        self.x + self.w
+    }
+
+    /// The bottom edge.
+    #[must_use]
+    pub fn bottom(&self) -> f32 {
+        self.y + self.h
+    }
+
+    /// Whether this rect covers all of `other`.
+    #[must_use]
+    pub fn contains(&self, other: &Self) -> bool {
+        other.x >= self.x
+            && other.y >= self.y
+            && other.right() <= self.right()
+            && other.bottom() <= self.bottom()
+    }
+
+    /// Whether the rect covers no pixels.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.w <= 0.0 || self.h <= 0.0
+    }
+}
+
+/// The window position of a source point, matching the draw transform.
+///
+/// The image center sits at the window middle plus the pan, the image scales
+/// around that point, and a positive `angle` turns it clockwise.
+#[must_use]
+pub fn to_screen(
+    point: Vector2,
+    img: Vector2,
+    win: Vector2,
+    pan: Vector2,
+    scale: f32,
+    angle: f32,
+) -> Vector2 {
+    let (sin, cos) = angle.to_radians().sin_cos();
+    let dx = (point.x - img.x / 2.0) * scale;
+    let dy = (point.y - img.y / 2.0) * scale;
+    Vector2::new(
+        win.x / 2.0 + pan.x + dx * cos - dy * sin,
+        win.y / 2.0 + pan.y + dx * sin + dy * cos,
+    )
+}
+
+/// The source point under a window position, the inverse of [`to_screen`].
+///
+/// A zero or non-finite `scale` reads as one, so the mapping never divides by
+/// zero.
+#[must_use]
+pub fn to_image(
+    point: Vector2,
+    img: Vector2,
+    win: Vector2,
+    pan: Vector2,
+    scale: f32,
+    angle: f32,
+) -> Vector2 {
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let (sin, cos) = angle.to_radians().sin_cos();
+    let dx = point.x - win.x / 2.0 - pan.x;
+    let dy = point.y - win.y / 2.0 - pan.y;
+    Vector2::new(
+        img.x / 2.0 + (dx * cos + dy * sin) / scale,
+        img.y / 2.0 + (-dx * sin + dy * cos) / scale,
+    )
+}
+
+/// The source rect that the window shows, grown by `margin` and clipped to the
+/// document.
+///
+/// The function maps the four window corners back into source pixels and takes
+/// their bounding box, so a turned image grows the rect to cover its corners.
+/// A zero `margin` gives the rect the paint must cover, and [`MARGIN`] gives
+/// the rect worth painting.
+#[must_use]
+pub fn crop(img: Vector2, win: Vector2, pan: Vector2, scale: f32, angle: f32, margin: f32) -> Crop {
+    let margin = margin.max(0.0);
+    if !(img.x > 0.0 && img.y > 0.0 && win.x > 0.0 && win.y > 0.0) {
+        return Crop {
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 0.0,
+        };
+    }
+    let (x0, y0) = (-margin * win.x, -margin * win.y);
+    let (x1, y1) = (win.x * (1.0 + margin), win.y * (1.0 + margin));
+    let corners = [
+        Vector2::new(x0, y0),
+        Vector2::new(x1, y0),
+        Vector2::new(x1, y1),
+        Vector2::new(x0, y1),
+    ];
+    let mut min = Vector2::new(f32::INFINITY, f32::INFINITY);
+    let mut max = Vector2::new(f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for corner in corners {
+        let point = to_image(corner, img, win, pan, scale, angle);
+        min.x = min.x.min(point.x);
+        min.y = min.y.min(point.y);
+        max.x = max.x.max(point.x);
+        max.y = max.y.max(point.y);
+    }
+    let x = min.x.clamp(0.0, img.x);
+    let y = min.y.clamp(0.0, img.y);
+    let right = max.x.clamp(x, img.x);
+    let bottom = max.y.clamp(y, img.y);
+    Crop {
+        x,
+        y,
+        w: right - x,
+        h: bottom - y,
+    }
+}
+
+/// Whether the view must repaint its region.
+///
+/// A repaint pays when the scale moved past [`SCALE_SLACK`], or when the
+/// painted rect no longer covers what the window shows.
+/// The caller passes the rect without a margin, so a consumed margin alone
+/// never pays for a paint.
+#[must_use]
+pub fn worth_painting(
+    needed: &Crop,
+    painted: Option<&Crop>,
+    need_scale: f32,
+    painted_scale: f32,
+) -> bool {
+    if needed.is_empty() {
+        return false;
+    }
+    let Some(painted) = painted else {
+        return true;
+    };
+    let scaled =
+        need_scale > painted_scale * SCALE_SLACK || need_scale * SCALE_SLACK < painted_scale;
+    scaled || !painted.contains(needed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_fit_scale_covers_the_whole_document() {
+        let img = Vector2::new(1024.0, 512.0);
+        let win = Vector2::new(800.0, 600.0);
+        let pan = Vector2::ZERO;
+        let whole = crop(img, win, pan, 600.0 / 1024.0, 0.0, 0.0);
+        assert!((whole.w - 1024.0).abs() < 1.0);
+        assert!((whole.h - 512.0).abs() < 1.0);
+        assert!(whole.x.abs() < 1.0 && whole.y.abs() < 1.0);
+    }
+
+    #[test]
+    fn a_zoomed_crop_covers_about_one_window() {
+        let img = Vector2::new(1024.0, 512.0);
+        let win = Vector2::new(800.0, 600.0);
+        let zoomed = crop(img, win, Vector2::ZERO, 4.0, 0.0, 0.0);
+        // 800/4 by 600/4 source pixels, centered.
+        assert!((zoomed.w - 200.0).abs() < 1e-3);
+        assert!((zoomed.h - 150.0).abs() < 1e-3);
+        assert!((zoomed.x - 412.0).abs() < 1e-3);
+        assert!((zoomed.y - 181.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn the_margin_grows_the_rect_and_the_clip_bounds_it() {
+        let img = Vector2::new(1024.0, 512.0);
+        let win = Vector2::new(800.0, 600.0);
+        let plain = crop(img, win, Vector2::ZERO, 4.0, 0.0, 0.0);
+        let grown = crop(img, win, Vector2::ZERO, 4.0, 0.0, MARGIN);
+        assert!(grown.contains(&plain));
+        assert!(grown.w > plain.w && grown.h > plain.h);
+        // A pan far outside the document still clips to it.
+        let out = crop(img, win, Vector2::new(9000.0, 9000.0), 1.0, 0.0, MARGIN);
+        assert!(out.w <= img.x && out.h <= img.y);
+        assert!(out.x >= 0.0 && out.y >= 0.0);
+    }
+
+    #[test]
+    fn the_paint_rule_covers_scale_and_coverage() {
+        let img = Vector2::new(1024.0, 512.0);
+        let win = Vector2::new(800.0, 600.0);
+        let pan = Vector2::ZERO;
+        let needed = crop(img, win, pan, 4.0, 0.0, 0.0);
+        let painted = crop(img, win, pan, 4.0, 0.0, MARGIN);
+        // A fresh region and a covered one.
+        assert!(worth_painting(&needed, None, 4.0, 4.0));
+        assert!(!worth_painting(&needed, Some(&painted), 4.0, 4.0));
+        // A small scale nudge stays inside the slack.
+        assert!(!worth_painting(&needed, Some(&painted), 4.1, 4.0));
+        // A real zoom step, and a pan past the margin, both pay.
+        assert!(worth_painting(&needed, Some(&painted), 6.0, 4.0));
+        let far = crop(img, win, Vector2::new(300.0, 0.0), 4.0, 0.0, 0.0);
+        assert!(worth_painting(&far, Some(&painted), 4.0, 4.0));
+        // An empty need never pays.
+        let none = Crop {
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 0.0,
+        };
+        assert!(!worth_painting(&none, None, 4.0, 4.0));
+    }
+}
+
+#[cfg(test)]
+mod property_tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    fn view() -> impl Strategy<Value = (f32, f32, f32, f32)> {
+        (
+            1.0f32..64.0,       // scale
+            -360.0f32..360.0,   // angle
+            -4000.0f32..4000.0, // pan x
+            -4000.0f32..4000.0, // pan y
+        )
+    }
+
+    proptest! {
+        /// The two mappings undo each other, so the region lines up with the
+        /// draw.
+        #[test]
+        fn the_mapping_round_trips(
+            (scale, angle, px, py) in view(),
+            x in 0.0f32..1024.0,
+            y in 0.0f32..512.0,
+        ) {
+            let img = Vector2::new(1024.0, 512.0);
+            let win = Vector2::new(800.0, 600.0);
+            let pan = Vector2::new(px, py);
+            let point = Vector2::new(x, y);
+            let screen = to_screen(point, img, win, pan, scale, angle);
+            let back = to_image(screen, img, win, pan, scale, angle);
+            prop_assert!((back.x - point.x).abs() < 1e-2);
+            prop_assert!((back.y - point.y).abs() < 1e-2);
+        }
+
+        /// Every window corner lands inside the region the view paints, so the
+        /// patch always covers the screen.
+        #[test]
+        fn the_crop_covers_the_window((scale, angle, px, py) in view()) {
+            let img = Vector2::new(1024.0, 512.0);
+            let win = Vector2::new(800.0, 600.0);
+            let pan = Vector2::new(px, py);
+            let painted = crop(img, win, pan, scale, angle, MARGIN);
+            let needed = crop(img, win, pan, scale, angle, 0.0);
+            prop_assert!(painted.contains(&needed));
+            prop_assert!(painted.x >= 0.0 && painted.y >= 0.0);
+            prop_assert!(painted.right() <= img.x + 1e-3);
+            prop_assert!(painted.bottom() <= img.y + 1e-3);
+        }
+
+        /// The painted area stays bounded by the window, so a deeper zoom
+        /// costs no more pixels than a shallow one.
+        #[test]
+        fn the_paint_area_stays_bounded((scale, angle, px, py) in view()) {
+            let img = Vector2::new(1024.0, 512.0);
+            let win = Vector2::new(800.0, 600.0);
+            let pan = Vector2::new(px, py);
+            let painted = crop(img, win, pan, scale, angle, MARGIN);
+            // A turned rect grows its bounding box by at most its own
+            // diagonal, so that diagonal bounds both axes.
+            let limit = (1.0 + 2.0 * MARGIN) * (win.x * win.x + win.y * win.y).sqrt();
+            prop_assert!(painted.w * scale <= limit);
+            prop_assert!(painted.h * scale <= limit);
+        }
+    }
+}

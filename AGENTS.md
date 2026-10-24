@@ -25,17 +25,21 @@ The binary name is `vv`.
   External references never resolve (`resources_dir` stays `None`), so no file makes the viewer read another path.
   The host font database loads once per process (`fontdb`, `OnceLock`), so `<text>` renders with real fonts and a whole directory pays one scan.
   `resvg` covers the static subset only: no script, no animation, and `raster-images` stays off, so an embedded JPEG/WebP/GIF draws nothing while an embedded PNG does.
-  A retained `usvg::Tree` (`svg::Vector`) is the hook for a later zoom-tier re-raster.
-- The image view paints a deeper zoom tier from that tree.
-  `src/tier.rs` holds the pure decision math: `needed`, `rung`, `worth_painting`, `QUIET`.
-  The ladder snaps to `RUNG_STEP` (256 px) and stops at `TIER_CAP` (4096), which halves the photo cap: 64 MB instead of 268 MB.
-  The view paints when the zoom settles (`QUIET` 150 ms), when the rung beats the texture on screen by `HYSTERESIS` (1.25), and only with one paint in flight, because resvg cannot cancel mid-paint.
-  `ViewState` keeps `Arc<svg::Vector>`, the current texture side, the pending rung and one generation counter.
+  A retained `usvg::Tree` (`svg::Vector`) paints the view again, so the seam for a deeper zoom stays.
+- The image view repaints the region its window shows, from that tree.
+  `src/region.rs` holds the pure geometry and policy: `crop`, `to_screen`, `to_image`, `Crop`, `worth_painting`, `MARGIN`, `SCALE_SLACK`, `QUIET`.
+  A patch covers the window plus `MARGIN` (0.25 of each side), in source pixels, so the paint area follows the window and a deep zoom costs no more pixels than a shallow one.
+  `Vector::render_region` paints that rect at the view scale, so the patch lands 1:1 on screen.
+  The region rect lives in base raster pixels, and `Vector::declared_per_base` converts to the tree's declared units.
+  The view repaints when it held still for `QUIET` (150 ms) and `worth_painting` pays: a scale step past `SCALE_SLACK` (1.05) or a consumed margin.
+  One paint in flight, because resvg cannot cancel mid-paint.
+  `ViewState` keeps `Arc<svg::Vector>`, the `CropState` (texture, source rect, raster scale), the pending flag and one generation counter.
   Every open, every n/p step and every return to the grid bumps that counter, so the result of a worker for an earlier image drops.
-  A paint of an image opened from the grid parses its own tree on a worker (`request_source`), because the grid keeps no tree.
+  An image opened from the grid parses its own tree on a worker (`request_source`), because the grid keeps no tree.
   A single-file launch and the streaming loader hand the tree over with `decode_view`.
-  `img_w`/`img_h` keep measuring the source, never the tier, so a bigger texture never disturbs fit, pan or zoom.
-  Zooming out paints a smaller rung, so one texture lives at a time.
+  `img_w`/`img_h` keep measuring the source, never the patch, so a bigger texture never disturbs fit, pan or zoom.
+  The whole-image texture (`view_tex`) stays as the fallback and draws only where the patch cannot reach (`patch_covers`), so a resize or a pan that outruns the repaint never shows background.
+  Drawing both over the same pixels would double the alpha of an antialiased edge, so the patch hides the whole image where it covers.
 - Grid extension filter: `src/grid.rs` `is_image_path`.
   Keep the crate features in sync.
 - Dispatch decode on sniffed content.

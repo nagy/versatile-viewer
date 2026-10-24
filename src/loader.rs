@@ -111,8 +111,8 @@ pub enum DecodeMsg {
     Done {
         image: DecodedImage,
         blur: Option<DecodedImage>,
-        /// The parsed source of a vector file, so the view can paint a larger
-        /// tier when the zoom settles.
+        /// The parsed source of a vector file, so the view can repaint the
+        /// region its window shows.
         /// None for a raster format.
         vector: Option<std::sync::Arc<Vector>>,
     },
