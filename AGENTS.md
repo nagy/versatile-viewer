@@ -69,10 +69,12 @@ The binary name is `vv`.
   Drawing both over the same pixels would double the alpha of an antialiased edge, so the patch hides the whole image where it covers.
 - Grid extension filter: `src/grid.rs` `is_image_path` (also `pdf`).
   Keep the crate features in sync (`pdf` is not an image crate feature).
-- A grid cell holds an `EntrySource`: a `File` opened (and sniffed) lazily at decode time, or a `Plane` with the surface handle and plane index of an already-open source.
-  `Grid::from_surface` makes one cell per plane, with the natural size from `Surface::bounds`, so the layout runs before any decode.
-  A plane cell has no file, so it skips the thumbnail cache and the placeholder pass.
-  The launch turns a multi-plane surface into a plane grid and puts a one-plane surface straight into the image view.
+- A grid cell holds an `EntrySource`, which is a path opened (and sniffed) lazily at decode time.
+  One file is one cell, so a document cell shows page 0 and never a second page.
+  `Grid::from_paths` builds a grid from a path list, and `Grid::from_dir` hands it the sorted directory listing.
+  A single-file launch of a document hands it one path, so ESC still has a grid to return to.
+  `EntrySource::open` opens the plain surface (the cell thumbnail); `EntrySource::open_spread` opens the spread surface (the image view), where plane 0 is the first spread.
+  `run_job` answers `no_full` for a multi-plane source, because a spread is not the page its cell holds, so the entry never keeps a full-res texture and `dispatch` never re-decodes it for one.
   `Loader::start_plane` renders one plane, and `Loader::start` is the plane-0 shorthand.
 - Dispatch decode on sniffed content.
   Do not dispatch decode on the file name.
@@ -200,6 +202,10 @@ Both views share it, so the letterbox bars and the grid gaps match.
   The hold captures and hides the pointer like a plain `r`, so the travel stays unbounded and the pivot sits under the hidden pointer at the grab point.
   A Shift+R hold therefore also doubles the pan and zoom speed, like every other Shift chord.
 - Mouse side buttons step next / previous in image view, like `n` / `p` (`read_nav_mouse` in `main.rs`).
+  In an open document the step walks spreads first, and only the step past the last spread moves to the next grid entry.
+  `ViewState::step_spread` reads the surface as `crate::spread`, so a spread step needs no grid entry.
+  It refits like a file step: upright, fit-all, no pan, and the loader renders the new spread.
+  `source_pending` holds a press while the async source of a document still opens, because only that source answers how many spreads exist; a raster entry never sets it, so its n/p keeps no delay.
 - Env vars `VV_DEBUG`, `VV_TIMING`, `VV_SLOW_STREAM`, `VV_BLUR_BG`, `VV_BG_DIM`, `VV_BLUR_PX`, `VV_CACHE`: see the README table.
 - Window title uses en-dash separators: `<file> – <dir> – versatile-viewer`.
   The grid title is `(<n> image(s)) – <dir> – versatile-viewer`.
@@ -208,6 +214,7 @@ Both views share it, so the letterbox bars and the grid gaps match.
   The image view title follows the open image.
   The grid keeps the launch title.
   A one-image directory skips the grid at launch.
+  A document launched directly (two planes or more) opens its first spread at once, over a one-cell grid that waits behind ESC, and its title stays the image title.
   ESC returns to the grid.
 - X11 WM_CLASS is `vv` (res_name + res_class) — `src/wmclass.rs`.
   Wayland is a no-op.

@@ -60,7 +60,7 @@ use versatile_viewer::{
     keyrepeat,
     loader::{DecodeMsg, Loader},
     mcp, region, rotate,
-    surface::{Surface, View, open_surface},
+    surface::{Surface, View, open_spread_surface},
     tween::Ramp,
     upload_rgba,
     zoomkeys::TypedKeys,
@@ -182,6 +182,10 @@ enum Mode {
 }
 
 /// The image-view state: what the code shows and how it frames it.
+// The view holds several independent flags by nature: a load in flight, a
+// paint in flight, the filter choice and a source still opening. Each one
+// drives a different frame decision, so one enum would only blur them.
+#[allow(clippy::struct_excessive_bools)]
 struct ViewState {
     mode: Mode,
     /// The grid entry open in image mode, by stable id (None on a single-file
@@ -239,8 +243,14 @@ struct ViewState {
     /// None for a raster format, which has no more detail to give.
     source: Option<Arc<dyn Surface>>,
     /// The plane of the open source that the view shows.
-    /// It is 0 for a one-plane source, and the entry's plane for a page.
+    /// It is 0 for a one-plane source, and the spread index of an open
+    /// document (see [`crate::spread`]).
     source_plane: usize,
+    /// A worker still opens the source of the open image.
+    /// Until it answers, the view cannot know whether the entry holds spreads,
+    /// so an n/p press waits for the answer instead of stepping a
+    /// neighboring file.
+    source_pending: bool,
     /// The region patch on screen: the visible part of the document, painted
     /// at the scale the window shows it.
     /// None until the first paint lands, and then the whole-image texture in
@@ -320,6 +330,11 @@ impl ViewState {
     /// worker result still in flight.
     fn close_crop(&mut self) {
         self.source = None;
+        self.reset_crop();
+    }
+
+    /// Drop the region state, and keep the source handle.
+    fn reset_crop(&mut self) {
         self.crop = None;
         self.crop_pending = false;
         self.crop_seen = None;
@@ -341,32 +356,69 @@ impl ViewState {
     /// The grid keeps no source, so an image opened from the grid opens its
     /// own here, off the main thread.
     /// A raster file answers None at once.
-    /// A plane entry already holds an open surface, so the view shares it
-    /// without a read.
-    fn request_source(&mut self, entry: &EntrySource) {
+    /// A document arrives as book spreads, so the patch covers a spread and
+    /// not a page.
+    /// `spreads` says whether the entry may hold more than one plane: only
+    /// then does an n/p press wait for the answer, because only then can the
+    /// press step a spread instead of a file.
+    fn request_source(&mut self, entry: &EntrySource, spreads: bool) {
         self.close_crop();
-        self.source_plane = entry.plane();
-        if let EntrySource::Plane { surface, .. } = entry {
-            // The grid already paid for the open source, so the view shares
-            // it, and only when it can render a sharper picture.
-            self.source = surface.can_refine().then(|| Arc::clone(surface));
-            return;
-        }
-        let Some(path) = entry.path() else {
-            return;
-        };
-        let path = path.to_path_buf();
+        self.source_plane = 0;
+        self.source_pending = spreads;
+        let path = entry.path().to_path_buf();
         let (generation, tx) = (self.crop_gen, self.crop_tx.clone());
         rayon::spawn(move || {
             // The open reads the head and, for a vector file, parses the tree
             // once. A source that cannot refine keeps no handle: a repaint
             // would only decode the same pixels again.
-            let source: Option<Arc<dyn Surface>> = open_surface(&path)
+            let source: Option<Arc<dyn Surface>> = open_spread_surface(&path)
                 .ok()
                 .filter(|surface| surface.can_refine())
                 .map(Arc::from);
             let _ = tx.send(CropMsg::Source { generation, source });
         });
+    }
+
+    /// Show the next or the previous spread of the open document.
+    ///
+    /// The spread index is the plane index of a [`crate::spread`] surface, so
+    /// the whole view (fit, pan, turn, region patch) follows without knowing
+    /// what a spread is.
+    /// The function answers false when the view holds no multi-plane source or
+    /// the step leaves the document, and the caller then steps the grid
+    /// entries.
+    fn step_spread(&mut self, delta: i64, rl: &mut RaylibHandle) -> bool {
+        let Some(source) = self.source.clone() else {
+            return false;
+        };
+        let planes = source.plane_count();
+        if planes < 2 {
+            return false;
+        }
+        let target = self.source_plane as i64 + delta;
+        if target < 0 || target as usize >= planes {
+            return false;
+        }
+        let plane = target as usize;
+        let Ok(size) = source.bounds(plane) else {
+            return false;
+        };
+        // A spread step shows a new figure of the same document, so it refits
+        // like an n/p step over files: upright, fit-all, no pan.
+        self.reset_crop();
+        self.source_plane = plane;
+        self.view_from_grid = None;
+        self.view_tex = None;
+        self.reset_view();
+        self.view_loading = true;
+        self.img_w = size.w;
+        self.img_h = size.h;
+        self.loader = Some(Loader::start_plane(
+            source,
+            plane,
+            PreviewPx::new(rl.get_screen_width().max(rl.get_screen_height()) as u32),
+        ));
+        true
     }
 
     /// Repaint the visible region once the view holds still, when the patch on
@@ -458,6 +510,7 @@ impl ViewState {
                 CropMsg::Source { generation, source } => {
                     if generation == self.crop_gen {
                         self.source = source;
+                        self.source_pending = false;
                     }
                 }
                 CropMsg::Crop {
@@ -801,7 +854,7 @@ fn show_entry(
     set_scale_now: bool,
 ) {
     let (win_w, win_h) = (win.0.get(), win.1.get());
-    let (id, tex, w, h, source, queued, thumb, blur) = {
+    let (id, tex, w, h, source, queued, thumb, blur, no_full) = {
         let e = &mut grid.entries[idx];
         (
             e.id,
@@ -812,6 +865,7 @@ fn show_entry(
             e.queued,
             e.texture.is_some(),
             e.blur.clone(),
+            e.no_full,
         )
     };
     st.open_id = Some(id);
@@ -819,7 +873,7 @@ fn show_entry(
     st.reset_view();
     // A new image starts with no region patch: the source request names what
     // the window shows.
-    st.request_source(&source);
+    st.request_source(&source, no_full);
     if let Some(tex) = tex {
         grid.entries[idx].viewing = true;
         st.view_from_grid = Some(id);
@@ -854,17 +908,21 @@ fn show_entry(
             st.img_w = 0.0; // dimensions arrive with the header/texture
             st.img_h = 0.0;
         }
-        st.loader = if queued || thumb {
+        st.loader = if queued || (thumb && !no_full) {
             // A grid decode for this entry is in flight, or the entry has
             // a thumb and the keep-set refill dispatched (or will dispatch)
             // the missing full-res decode.
             // Wait for the decode-landed takeover instead of decoding the
             // file twice in a streaming worker.
+            // A document keeps no full-res texture, so its cell waits for
+            // nothing: the loader renders the spread now.
             None
         } else {
             let preview_px =
                 PreviewPx::new(rl.get_screen_width().max(rl.get_screen_height()) as u32);
-            match source.open() {
+            // The image view opens a document as book spreads, so plane 0 is
+            // the first spread and not the cover page alone.
+            match source.open_spread() {
                 Ok((surface, plane)) => Some(Loader::start_plane(surface, plane, preview_px)),
                 Err(err) => {
                     eprintln!("vv: {}: {err}", source.label());
@@ -973,29 +1031,32 @@ fn main() -> Result<()> {
     // title shows the image count).
     // No GL is involved yet.
     // Single-file launch: open the surface now.
-    // A multi-plane surface (a document, say) becomes a grid of its planes;
-    // a one-plane surface goes straight into the image view.
+    // A document opens as book spreads (see `spread.rs`) and keeps a one-cell
+    // grid, so ESC still has a target and that cell shows the cover page.
+    // A one-plane surface goes straight into the image view with no grid.
     let (dir_grid, single_surface) = if path.is_dir() {
         (Some(Grid::from_dir(path)?), None)
     } else if path.is_file() {
-        let surface: Arc<dyn Surface> = open_surface(path)?.into();
-        let grid = (surface.plane_count() > 1).then(|| Grid::from_surface(&surface));
-        (grid, Some(surface))
+        let surface = open_spread_surface(path)?;
+        let grid = (surface.plane_count() > 1).then(|| Grid::from_paths(vec![path.to_path_buf()]));
+        (grid, Some(Arc::<dyn Surface>::from(surface)))
     } else {
         bail!("no such file or directory: {}", path.display());
     };
-    let single_plane = dir_grid.is_none();
+    // A document launch opens the first spread at once, like a single image,
+    // and the one-cell grid waits behind it for ESC.
+    let single_plane = single_surface.is_some();
 
     // Single-plane launch: render before opening the window, so the window
     // can be sized to the image.
-    // Directory or plane-grid launch: fixed default window size.
-    // A vector file keeps the surface it opened, so the image view can repaint
-    // the region its window shows.
+    // Directory launch: fixed default window size.
+    // A vector file or a document keeps the surface it opened, so the image
+    // view can repaint the region its window shows.
     let single_decoded = if single_plane {
         Some(
             single_surface
                 .as_ref()
-                .expect("a single-plane launch has a surface")
+                .expect("a single-file launch has a surface")
                 .render(View::whole(0, 1.0))?,
         )
     } else {
@@ -1028,7 +1089,10 @@ fn main() -> Result<()> {
 
     let (mut rl, thread) = raylib::init()
         .size(win0_w, win0_h)
-        .title(&window_title(path, dir_grid.as_ref()))
+        .title(&window_title(
+            path,
+            dir_grid.as_ref().filter(|_| !single_plane),
+        ))
         .resizable()
         // Vsync on: the compositor or driver paces the frame loop to the
         // monitor refresh rate and removes tearing (most visible during the
@@ -1066,7 +1130,9 @@ fn main() -> Result<()> {
     // closes, like `grid`.
     let (crop_tx, crop_rx) = channel();
     let mut st = ViewState {
-        mode: if grid.is_none() {
+        // A single-file launch shows its picture (a document shows its first
+        // spread) and keeps the grid, if any, behind it for ESC.
+        mode: if single_plane {
             Mode::Image
         } else {
             Mode::Grid
@@ -1090,6 +1156,7 @@ fn main() -> Result<()> {
         blur_bg: BlurBg::from_env(),
         source: None,
         source_plane: 0,
+        source_pending: false,
         crop: None,
         crop_pending: false,
         crop_gen: 0,
@@ -1121,7 +1188,9 @@ fn main() -> Result<()> {
     }
     // A one-image directory skips the grid: jump straight into that image
     // (ESC still returns to the grid view).
-    if grid.as_ref().is_some_and(|g| g.entries.len() == 1) {
+    // A single-file launch already shows its picture (a document shows its
+    // first spread), so it keeps what the launch rendered.
+    if !single_plane && grid.as_ref().is_some_and(|g| g.entries.len() == 1) {
         let win = (
             WinW::new(rl.get_screen_width() as f32),
             WinH::new(rl.get_screen_height() as f32),
@@ -1290,7 +1359,7 @@ fn main() -> Result<()> {
                         .entries
                         .iter()
                         .find(|e| e.id == id)
-                        .and_then(|e| e.source.path().map(image_title))
+                        .map(|e| image_title(e.source.path()))
                 })
                 .unwrap_or_else(|| launch_title.clone());
             rl.set_window_title(&thread, &title);
@@ -1353,7 +1422,14 @@ fn main() -> Result<()> {
                     .and_then(|g| g.entries.iter().position(|e| e.id == id).map(|i| (g, i)))
                 {
                     Some((g, i)) => {
-                        if g.entries[i].full.is_some() {
+                        // A document keeps no full-res texture, so a finished
+                        // decode re-enters here and starts the spread loader.
+                        // A failed entry never re-enters, because its loader
+                        // would fail the same way and spin.
+                        let ready = g.entries[i].failed.is_none()
+                            && (g.entries[i].full.is_some()
+                                || (g.entries[i].no_full && !g.entries[i].queued));
+                        if ready {
                             // Decode landed: the code kept its full-res
                             // texture for the open entry (keep set), and
                             // show_entry takes it over.
@@ -1835,17 +1911,26 @@ fn main() -> Result<()> {
                 st.close_crop();
             }
 
-            // Prev/next while viewing (only with a grid to navigate).
+            // Prev/next while viewing.
+            // A document open in the view steps its spreads first, so a 40-page
+            // PDF reads with n presses inside one open file, and the step past
+            // the last spread moves to the next grid entry.
             // A ready texture swaps in the same frame.
             // A decode in flight is waited on (auto-swap when it lands).
             // Otherwise the streaming loader takes over.
             // The priority list at the top of the loop prefetches the
             // neighbors of the new entry.
-            if !return_to_grid && let Some(delta) = nav {
-                let cur = st
-                    .open_id
-                    .and_then(|id| grid.as_ref().and_then(|g| g.index_of(id)));
-                if let Some(cur) = cur {
+            if !return_to_grid
+                && let Some(delta) = nav
+                && !st.source_pending
+            {
+                // A spread step of the open document needs no grid entry, and
+                // a document holds no grid texture to hand back.
+                if !st.step_spread(delta, &mut rl)
+                    && let Some(cur) = st
+                        .open_id
+                        .and_then(|id| grid.as_ref().and_then(|g| g.index_of(id)))
+                {
                     let n = grid.as_ref().unwrap().entries.len();
                     let t = cur as i64 + delta;
                     if t >= 0 && (t as usize) < n {
