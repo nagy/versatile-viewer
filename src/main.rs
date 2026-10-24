@@ -119,6 +119,13 @@ const ROTATE_DRAG_SPEED: f32 = 1.0;
 /// About 95% of the remaining difference closes after three of them.
 const EASE_TIME: f32 = 0.05;
 
+/// The exponential ease time constant of a spread step, in seconds.
+///
+/// A Shift+J/K step moves the view by a whole spread, so it glides at its own
+/// pace instead of jumping: five time constants land the spread after a
+/// quarter of a second, and the motion reads as a scroll.
+const SPREAD_EASE_TIME: f32 = 0.05 * 4.0;
+
 /// Target pan that centers the fill view on the image point under `mouse`.
 ///
 /// The code clamps both axes to `[-|offset|, |offset|]`.
@@ -263,6 +270,12 @@ struct ViewState {
     /// A pan or a target that moved away from it marks a user move, and the
     /// align then stops.
     open_pan: Vector2,
+    /// The pan a Shift+J/K spread step glides to.
+    /// A step eases at [`SPREAD_EASE_TIME`], a slower pace than the ordinary
+    /// pan ease, so the move from one spread to the next reads as a scroll.
+    /// The field clears itself when the pan lands or the target moves away
+    /// from it, so any other motion uses the ordinary ease again.
+    spread_glide: Option<Vector2>,
     /// The region patch on screen: the visible part of the document, painted
     /// at the scale the window shows it.
     /// None until the first paint lands, and then the whole-image texture in
@@ -334,6 +347,7 @@ impl ViewState {
         self.pan = Vector2::ZERO;
         self.target_pan = Vector2::ZERO;
         self.zoom_anchor = None;
+        self.spread_glide = None;
         self.view_scale = None;
         // A newly opened image starts upright: a turn never carries over to
         // the next image.
@@ -351,6 +365,7 @@ impl ViewState {
         self.pan = Vector2::ZERO;
         self.target_pan = Vector2::ZERO;
         self.open_pan = Vector2::ZERO;
+        self.spread_glide = None;
         // The frame computes the scale from the fit mode.
         self.view_scale = None;
         self.top_pending = self.open_box.is_some();
@@ -381,6 +396,47 @@ impl ViewState {
         self.pan = top;
         self.target_pan = top;
         self.open_pan = top;
+    }
+
+    /// Ease the view to the spread `step` spreads away from the one the window
+    /// shows now.
+    ///
+    /// A document shows as a book: every spread spans the plane and stacks one
+    /// page high, so a step moves the pan by one spread and leaves the scale
+    /// alone.
+    /// The target spread lands at the top of the window, which is where the
+    /// open framing put the first one.
+    /// The row comes from the pan the view aims at, so a step pressed at any
+    /// point of the document counts from the spread the reader looks at.
+    /// A step past either end does nothing, so the view stops on the first and
+    /// the last spread instead of showing background.
+    ///
+    /// The function returns whether it aimed at a spread.
+    fn step_spread(&mut self, step: isize, win_h: f32) -> bool {
+        let (Some(scale), Some(source)) = (self.view_scale, self.source.as_ref()) else {
+            return false;
+        };
+        if !(scale.is_finite() && scale > 0.0) {
+            return false;
+        }
+        let count = source.spread_count();
+        let Some(first) = source.spread_box(0) else {
+            return false;
+        };
+        if count < 2 || !(first.h.is_finite() && first.h > 0.0) {
+            return false;
+        }
+        let row = spread_row(self.img_h, self.target_pan.y, scale, win_h, first.h).min(count - 1);
+        let next = row as isize + step;
+        if next < 0 || next as usize >= count {
+            return false;
+        }
+        let Some(target) = source.spread_box(next as usize) else {
+            return false;
+        };
+        self.target_pan = Vector2::new(0.0, spread_pan(self.img_h, target.y, scale, win_h));
+        self.spread_glide = Some(self.target_pan);
+        true
     }
 
     /// Drop the region state of the image that was open, and retire every
@@ -765,6 +821,27 @@ fn draw_turned(
 /// the window stays centered.
 fn top_pan(img_h: f32, scale: f32, win_h: f32) -> f32 {
     (img_h * scale - win_h).max(0.0) / 2.0
+}
+
+/// The pan that puts the top of a spread on the top edge of the window.
+///
+/// `origin_y` is the top of the spread in plane units, so spread 0 answers
+/// [`top_pan`]: a step to the first spread frames it like a fresh open does.
+fn spread_pan(img_h: f32, origin_y: f32, scale: f32, win_h: f32) -> f32 {
+    top_pan(img_h, scale, win_h) - origin_y * scale
+}
+
+/// The spread a pan shows at the top of the window, rounded to the nearest.
+///
+/// The code reads the row from the pan the view aims at, so a step pressed
+/// while an earlier step still glides counts from the spread that step aims
+/// at, never from the pixels on the way.
+fn spread_row(img_h: f32, pan_y: f32, scale: f32, win_h: f32, spread_h: f32) -> usize {
+    if !(spread_h > 0.0 && scale.is_finite() && scale > 0.0) {
+        return 0;
+    }
+    let top = (top_pan(img_h, scale, win_h) - pan_y) / scale;
+    (top / spread_h).round().max(0.0) as usize
 }
 
 /// Whether the region patch covers the whole window at the current transform.
@@ -1198,6 +1275,7 @@ fn main() -> Result<()> {
         open_box: None,
         top_pending: false,
         open_pan: Vector2::ZERO,
+        spread_glide: None,
         crop: None,
         crop_pending: false,
         crop_gen: 0,
@@ -1268,6 +1346,11 @@ fn main() -> Result<()> {
     // Auto-repeat state for image-mode prev/next (xset r rate values).
     let mut rep_nav_fwd = keyrepeat::RepeatState::default();
     let mut rep_nav_back = keyrepeat::RepeatState::default();
+    // One spread step per press: a step disarms the next one, and the release
+    // of `j`/`k` arms it again.
+    // The key queue already reports a press once, so this only guards the
+    // input setups whose auto-repeat arrives as a second press.
+    let mut spread_armed = true;
     // Previous frame window size: self-tracked resize detection (see the
     // `resized` computation in the loop).
     let mut last_win: Option<(f32, f32)> = None;
@@ -1655,6 +1738,12 @@ fn main() -> Result<()> {
             let mut nav_prev_edge = false;
             let mut jump_first = false;
             let mut jump_last = false;
+            // Shift+J/K step one spread in a book (see
+            // [`ViewState::step_spread`]).
+            // The press edge fires once per press, so the X server auto-repeat
+            // never chains two steps from one hold.
+            let mut spread_next = false;
+            let mut spread_prev = false;
             // The key that went down this frame, if any.
             // A typed `+`/`-` pairs with it to learn which physical key holds
             // that character (see zoomkeys::TypedKeys).
@@ -1690,6 +1779,8 @@ fn main() -> Result<()> {
                             jump_first = true;
                         }
                     }
+                    KeyboardKey::KEY_J => spread_next = shift,
+                    KeyboardKey::KEY_K => spread_prev = shift,
                     _ => {}
                 }
             }
@@ -1870,6 +1961,20 @@ fn main() -> Result<()> {
                     _ => {}
                 }
             }
+
+            // One spread step per press of Shift+J/K: the press queue reports a
+            // press once, and the latch covers an input setup whose auto-repeat
+            // arrives as a second press.
+            let spread_press = if spread_next {
+                Some(1)
+            } else if spread_prev {
+                Some(-1)
+            } else {
+                None
+            };
+            let spread_step = spread_press.filter(|_| spread_armed);
+            spread_armed =
+                !(rl.is_key_down(KeyboardKey::KEY_J) || rl.is_key_down(KeyboardKey::KEY_K));
 
             let mut return_to_grid = false;
             if quit_pressed {
@@ -2070,14 +2175,20 @@ fn main() -> Result<()> {
                     || rl.is_key_down(KeyboardKey::KEY_RIGHT_CONTROL);
                 let ctrl_zoom_in = ctrl && rl.is_key_down(KeyboardKey::KEY_J);
                 let ctrl_zoom_out = ctrl && rl.is_key_down(KeyboardKey::KEY_K);
+                // Shift+J/K step a spread when the open surface names a
+                // spread column, so those two keys do not pan while the step
+                // can run.
+                // Every other source, and a book whose surface has not landed
+                // yet, keeps the doubled pan.
+                let spread_keys = shift && st.source.as_ref().is_some_and(|s| s.spread_count() > 0);
                 let nav = NavKeys {
                     left: rl.is_key_down(KeyboardKey::KEY_H)
                         || rl.is_key_down(KeyboardKey::KEY_LEFT),
                     right: rl.is_key_down(KeyboardKey::KEY_L)
                         || rl.is_key_down(KeyboardKey::KEY_RIGHT),
-                    up: (rl.is_key_down(KeyboardKey::KEY_K) && !ctrl_zoom_out)
+                    up: (rl.is_key_down(KeyboardKey::KEY_K) && !ctrl_zoom_out && !spread_keys)
                         || rl.is_key_down(KeyboardKey::KEY_UP),
-                    down: (rl.is_key_down(KeyboardKey::KEY_J) && !ctrl_zoom_in)
+                    down: (rl.is_key_down(KeyboardKey::KEY_J) && !ctrl_zoom_in && !spread_keys)
                         || rl.is_key_down(KeyboardKey::KEY_DOWN),
                     // US layouts put the zoom keys on the `=` and `-`
                     // keycodes (numpad included).
@@ -2368,6 +2479,14 @@ fn main() -> Result<()> {
                 // A fresh open shows the top of the plane: the fit frames
                 // the opening box, and that box starts at the top.
                 st.align_open_box(win_h);
+                // Shift+J/K: one spread per press, eased to the top of the
+                // window.
+                // The step runs after the align, and the align then sees a
+                // target that it did not write, so it stays out of the way and
+                // the view keeps the spread the step landed on.
+                if let Some(step) = spread_step {
+                    st.step_spread(step, win_h);
+                }
                 // On a resize frame, snap pan too, so it does not glide after
                 // the new fit offset (matches the scale snap above).
                 if resized {
@@ -2378,7 +2497,18 @@ fn main() -> Result<()> {
                 if dragging {
                     st.pan = st.target_pan;
                 }
-                let pan_alpha = 1.0 - (-dt / EASE_TIME).exp();
+                // A spread step glides at its own slower pace, so the move
+                // from one spread to the next reads as a scroll.
+                // Any other motion of the target ends the glide, and the
+                // ordinary ease takes over again.
+                let gliding = st
+                    .spread_glide
+                    .is_some_and(|goal| (goal - st.target_pan).length() <= 0.5);
+                if !gliding {
+                    st.spread_glide = None;
+                }
+                let ease_time = if gliding { SPREAD_EASE_TIME } else { EASE_TIME };
+                let pan_alpha = 1.0 - (-dt / ease_time).exp();
                 st.pan.x += (st.target_pan.x - st.pan.x) * pan_alpha;
                 st.pan.y += (st.target_pan.y - st.pan.y) * pan_alpha;
                 // Snap when the residual glide is sub-pixel.
@@ -2387,6 +2517,10 @@ fn main() -> Result<()> {
                 }
                 if (st.target_pan.y - st.pan.y).abs() < 0.25 {
                     st.pan.y = st.target_pan.y;
+                }
+                // The step stops once the pan lands on the spread.
+                if st.pan == st.target_pan {
+                    st.spread_glide = None;
                 }
             } // st.img_w > 0.0: fit/pan math needs known dimensions
         }
@@ -2549,5 +2683,45 @@ mod tests {
     #[test]
     fn a_plane_that_fits_stays_centered() {
         assert_eq!(top_pan(200.0, 1.0, 768.0), 0.0);
+    }
+
+    #[test]
+    fn a_spread_step_frames_a_row_like_the_open_frames_the_first() {
+        // A book of 40 letter pages, fit into the window.
+        let (img_h, scale, win_h, row_h) = (16632.0f32, 0.9f32, 768.0f32, 792.0f32);
+        assert_eq!(
+            spread_pan(img_h, 0.0, scale, win_h),
+            top_pan(img_h, scale, win_h)
+        );
+        for row in [0, 1, 3, 20] {
+            let pan = spread_pan(img_h, row as f32 * row_h, scale, win_h);
+            // The top of that spread lands on the top edge of the window.
+            let top = (win_h - img_h * scale) / 2.0 + pan + row as f32 * row_h * scale;
+            assert!(top.abs() < 1e-3, "row {row} top {top}");
+            assert_eq!(spread_row(img_h, pan, scale, win_h, row_h), row);
+        }
+    }
+
+    #[test]
+    fn a_row_reads_from_the_aimed_pan_not_the_pixels() {
+        // Half a spread of travel still names the spread the pan aims at, so a
+        // step pressed while an earlier step glides never stalls.
+        let (img_h, scale, win_h, row_h) = (4000.0f32, 0.5f32, 768.0f32, 800.0f32);
+        let row = 2;
+        let pan = spread_pan(img_h, row as f32 * row_h, scale, win_h);
+        assert_eq!(spread_row(img_h, pan, scale, win_h, row_h), row);
+        // Above the plane top the row stays the first one.
+        assert_eq!(
+            spread_row(
+                img_h,
+                top_pan(img_h, scale, win_h) + 500.0,
+                scale,
+                win_h,
+                row_h
+            ),
+            0
+        );
+        // A book that fits the window has no row to read.
+        assert_eq!(spread_row(200.0, 0.0, 1.0, 768.0, 100.0), 0);
     }
 }

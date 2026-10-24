@@ -65,6 +65,7 @@ The binary name is `vv`.
   `src/sign.rs` owns the content sniffing (`is_jxl`, `file_magic`, `is_common_magic`, `format`, `dimensions`), and both the surface layer and `svg.rs` use it.
   `Surface::progressive` returns a `Box<dyn ChunkSource>` and not a path, so an in-memory or network source can stream, and the default `Ok(None)` means one step.
   `Surface::can_refine` says whether a settled zoom can yield a sharper picture of the same plane: a vector tree or a document page answers true, a raster image false.
+  `Surface::spread_count` and `Surface::spread_box` name the spread column of a book (0 and `None` for every other source), so the image view steps a spread with the book's own geometry.
   A raster plane measures the capped size it renders, so `bounds` and the pixels of a scale-1.0 render agree.
   The trait decisions live in `docs/adr/0001-surface-one-region-based-render-trait.md`.
 - The image view repaints the region its window shows, from the open surface, when `Surface::can_refine` says a sharper picture is possible.
@@ -127,6 +128,13 @@ The binary name is `vv`.
   `SHIFT_SPEED_MULTIPLIER` (`src/lib.rs`) is the one constant.
   The grid takes it as the `step` argument of `handle_input` (`step_selection` clamps the move).
   The image view passes it as the `speed` argument of `Ramps::tick`, which scales the pan and the zoom rate but not the ramp, so the ease keeps its length at any speed.
+- A book view takes `Shift+J` / `Shift+K` as a spread step instead of a pan.
+  `ViewState::step_spread` (`main.rs`) reads the row from `Surface::spread_count` and `Surface::spread_box`, eases one spread to the top of the window with `spread_pan`, and stops there: a press past the first or the last spread does nothing.
+  The image view drops `Shift+J`/`Shift+K` from the pan while the open surface names a spread column, so those two keys step and never pan on a book.
+  The press queue fires once per press, and the `spread_armed` latch in `main` needs a `j`/`k` release before the next step, so a hold never chains steps.
+  The row comes from the aimed pan (`spread_row`), not the pixels on screen, so a step pressed while an earlier step still glides continues from the spread that step aimed at.
+  The step glides at `SPREAD_EASE_TIME` (4x `EASE_TIME`) while `ViewState::spread_glide` holds the goal, and any other pan motion clears that field.
+  A book answers both methods from `BookSurface`, and every other source keeps the defaults (0 and `None`), so its `Shift+J`/`Shift+K` still pans at double speed.
 - Read the held state of a key that no `KeyboardKey` names by learning its keycode.
   `src/zoomkeys.rs` pairs a typed `+`/`-` with the key that went down in the same frame, then the code polls that keycode.
   The X server repeats only the key that went down last, so a time window cannot stand in for the held state.

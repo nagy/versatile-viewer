@@ -264,6 +264,24 @@ pub trait Surface: Send + Sync {
     fn open_box(&self, _plane: usize) -> Option<Size> {
         None
     }
+
+    /// How many spreads the plane stacks, or 0 for a source that shows no
+    /// spread column.
+    ///
+    /// A book answers its row count (see [`crate::book`]), so the image view
+    /// can step from one spread to the next.
+    fn spread_count(&self) -> usize {
+        0
+    }
+
+    /// The box of spread `spread` inside the plane, in surface units, or
+    /// `None` when the source holds no such spread.
+    ///
+    /// A book answers the full width of the plane and one page tall, at the
+    /// row the spread stacks in, so the image view can aim a step at it.
+    fn spread_box(&self, _spread: usize) -> Option<Region> {
+        None
+    }
 }
 
 /// Why a surface could not open, describe or render a plane.

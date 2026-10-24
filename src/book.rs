@@ -25,6 +25,10 @@
 //!
 //! The grid never uses this wrapper: a cell shows page 0 and nothing else.
 //!
+//! [`BookSurface::spread_count`] and [`BookSurface::spread_box`] publish the
+//! geometry the image view needs to step from one spread to the next, so the
+//! step reads the book's own numbers instead of guessing them from the plane.
+//!
 //! The constants at the top of the file hold every book setting, so a
 //! configuration system can lift them later without a code motion.
 
@@ -349,6 +353,24 @@ impl Surface for BookSurface {
         // The reader starts on the cover spread, not on the whole book.
         (plane == 0).then(|| self.first_spread())
     }
+
+    fn spread_count(&self) -> usize {
+        self.rows
+    }
+
+    fn spread_box(&self, spread: usize) -> Option<Region> {
+        if spread >= self.rows {
+            return None;
+        }
+        // Every spread spans the whole canvas and stands one page tall, so a
+        // step from one to the next moves the pan by one row.
+        Some(Region {
+            x: 0.0,
+            y: spread as f32 * (self.slot.h + ROW_GAP) * self.base,
+            w: self.canvas.w * self.base,
+            h: self.slot.h * self.base,
+        })
+    }
 }
 
 /// The overlap of two regions, or `None` when they miss.
@@ -589,6 +611,86 @@ mod tests {
             }
         );
         assert!(b.open_box(1).is_none());
+    }
+
+    #[test]
+    fn the_spreads_stack_evenly_and_name_their_boxes() {
+        let b = book(vec![(100.0, 200.0), (120.0, 180.0), (100.0, 200.0)]);
+        assert_eq!(b.spread_count(), 2);
+        let first = b.spread_box(0).unwrap();
+        // The widest page of the document sizes both slots, so the spread
+        // spans two of them plus the gutter.
+        assert_eq!(
+            first,
+            Region {
+                x: 0.0,
+                y: 0.0,
+                w: 248.0,
+                h: 200.0
+            }
+        );
+        // The pair spread sits one page under the cover spread.
+        assert_eq!(
+            b.spread_box(1).unwrap(),
+            Region {
+                x: 0.0,
+                y: 200.0,
+                w: 248.0,
+                h: 200.0
+            }
+        );
+        assert!(b.spread_box(2).is_none());
+        // The opening box agrees with the first spread.
+        assert_eq!(
+            b.open_box(0).unwrap(),
+            Size {
+                w: first.w,
+                h: first.h
+            }
+        );
+    }
+
+    #[test]
+    fn a_step_aims_the_window_at_the_pages_of_one_spread() {
+        // The cover page alone, then pages 1 and 2, then pages 3 and 4.
+        let b = book(vec![(100.0, 200.0); 5]);
+        let fit = b.open_box(0).unwrap();
+        // A window of exactly one spread, so the fit scale is 1.
+        let (win_w, win_h) = (fit.w, fit.h);
+        let scale = (win_w / fit.w).min(win_h / fit.h);
+        let plane = b.bounds(0).unwrap();
+        // The pan of a spread step: it puts the top of the spread on the top
+        // of the window (see `spread_pan` in `main.rs`).
+        let spread_pan = |row: usize| {
+            let spread = b.spread_box(row).unwrap();
+            (plane.h * scale - win_h) / 2.0 - spread.y * scale
+        };
+        // The window, expressed as a region of the plane.
+        let window = |pan: f32| Region {
+            x: -((win_w - plane.w * scale) / 2.0) / scale,
+            y: -((win_h - plane.h * scale) / 2.0 + pan) / scale,
+            w: win_w / scale,
+            h: win_h / scale,
+        };
+        // Spread 0 frames the cover page in the right slot.
+        let cover = b
+            .render(View::region(0, window(spread_pan(0)), scale))
+            .unwrap();
+        assert_eq!((cover.width.get(), cover.height.get()), (208, 200));
+        assert_eq!(pixel(&cover, 10, 100), [0, 0, 0, 0]);
+        assert_eq!(pixel(&cover, 110, 100), [10, 0, 0, 255]);
+        // One step down shows the pair of pages 1 and 2, and the next step the
+        // pair of pages 3 and 4.
+        let pair = b
+            .render(View::region(0, window(spread_pan(1)), scale))
+            .unwrap();
+        assert_eq!(pixel(&pair, 10, 100), [20, 0, 0, 255]);
+        assert_eq!(pixel(&pair, 110, 100), [30, 0, 0, 255]);
+        let last = b
+            .render(View::region(0, window(spread_pan(2)), scale))
+            .unwrap();
+        assert_eq!(pixel(&last, 10, 100), [40, 0, 0, 255]);
+        assert_eq!(pixel(&last, 110, 100), [50, 0, 0, 255]);
     }
 
     #[test]

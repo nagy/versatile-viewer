@@ -123,7 +123,8 @@ because stdout carries protocol frames only.
 |`q`                  |quit                        |quit                           |
 |`Enter` / `Esc`      |open selection / clear visual selection|return to grid / (inert alone) |
 |`h j k l` / arrows   |move selection (auto-repeat)|pan (hold: eased speed ramp)   |
-|`Shift+h/j/k/l`      |move selection, double step |pan and free zoom, double speed|
+|`Shift+h/l`          |move selection, double step |pan and free zoom, double speed|
+|`Shift+j` / `Shift+k`|move selection, double step |pan, double speed; in a book: ease to the next / previous spread, one spread per press|
 |`Space` / `Shift+Space`|—                           |next / previous image          |
 |`Backspace`          |—                           |previous image                 |
 |`n` / `p`            |—                           |next / previous image          |
@@ -152,6 +153,9 @@ A PDF or a Typst source opens as a book: the cover page alone, then the
 pages in pairs, every spread stacked in one figure. A zoom past a settled
 ease repaints the region the window shows, at the scale it shows it, so a
 page stays sharp at any zoom.
+`Shift+J` and `Shift+K` step one spread down or up on a book: the view eases
+the next spread to the top of the window and stops there. One press moves one
+spread, and the step ends on the first and the last spread.
 
 ## Environment variables
 

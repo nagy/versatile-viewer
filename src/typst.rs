@@ -347,6 +347,7 @@ Hello from page two.
     }
 
     #[test]
+    #[allow(clippy::float_cmp)] // the asserted values are exact book arithmetic
     fn typst_document_opens_as_a_book() {
         // The image view wraps a multi-plane source in `BookSurface`, so a
         // Typst source shows its pages as book spreads, exactly like a PDF.
@@ -362,6 +363,14 @@ Hello from page two.
         let book = surface.bounds(0).unwrap();
         assert!(book.w > 400.0, "book too narrow: {book:?}");
         assert!(book.h > 300.0, "book too short: {book:?}");
+        // The book names its spread column, so a Shift+J/K step knows where to
+        // land: the cover spread, then the pair, and nothing past the last one.
+        assert_eq!(surface.spread_count(), 2);
+        let first = surface.spread_box(0).unwrap();
+        assert_eq!(first.w, surface.open_box(0).unwrap().w);
+        assert_eq!(first.h, surface.open_box(0).unwrap().h);
+        assert_eq!(surface.spread_box(1).unwrap().y, first.y + first.h);
+        assert!(surface.spread_box(2).is_none());
     }
 
     #[test]
