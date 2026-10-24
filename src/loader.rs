@@ -31,11 +31,12 @@ use derive_more::{Display, Error, From};
 use jxl_oxide::{InitializeResult, JxlImage};
 
 use crate::{
-    DecodedImage, blurbg, cap_texture_side, decode_announce,
+    DecodedImage, blurbg, cap_texture_side, decode_view,
     dim::{ImgH, ImgW, LongSide, PreviewPx},
     downscale_rgba,
     error::DecodeError,
     fb_to_rgba, is_jxl,
+    svg::Vector,
 };
 
 /// A failed streaming load.
@@ -110,6 +111,10 @@ pub enum DecodeMsg {
     Done {
         image: DecodedImage,
         blur: Option<DecodedImage>,
+        /// The parsed source of a vector file, so the view can paint a larger
+        /// tier when the zoom settles.
+        /// None for a raster format.
+        vector: Option<std::sync::Arc<Vector>>,
     },
 }
 
@@ -191,14 +196,18 @@ fn stream(
         // No progressive data for the common formats: one full decode.
         // A vector file announces its base size before it paints, so the
         // window fits the picture while the raster arrives.
-        let image = {
+        let decoded = {
             let mut announce = |width: ImgW, height: ImgH| {
                 let _ = tx.send(Ok(DecodeMsg::Header { width, height }));
             };
-            decode_announce(path, &mut announce)?
+            decode_view(path, &mut announce)?
         };
-        let blur = blur_enabled.then(|| blurbg::small_blur(&image, blur_px));
-        return Ok(Some(DecodeMsg::Done { image, blur }));
+        let blur = blur_enabled.then(|| blurbg::small_blur(&decoded.image, blur_px));
+        return Ok(Some(DecodeMsg::Done {
+            image: decoded.image,
+            blur,
+            vector: decoded.vector,
+        }));
     }
 
     // Map the file instead of reading it through a buffer.
@@ -303,7 +312,11 @@ fn stream(
     // Cap here, on the worker: the main thread uploads the buffer as is.
     let image = cap_texture_side(image);
     let blur = blur_enabled.then(|| blurbg::small_blur(&image, blur_px));
-    Ok(Some(DecodeMsg::Done { image, blur }))
+    Ok(Some(DecodeMsg::Done {
+        image,
+        blur,
+        vector: None,
+    }))
 }
 
 #[cfg(test)]

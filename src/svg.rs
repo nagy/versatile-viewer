@@ -56,8 +56,13 @@ const HEAD: usize = 8 * 1024;
 const DEFAULT_SIDE: f32 = 100.0;
 
 /// A parsed SVG, ready to paint at any size.
+///
+/// The tree holds geometry with text already turned into paths, so it paints
+/// again at any tier without the font database and without another XML parse.
+/// [`crate::svg::parse`] returns one, and the image view keeps it behind an
+/// `Arc` for the length of an open image.
 #[derive(Debug)]
-pub(crate) struct Vector {
+pub struct Vector {
     tree: usvg::Tree,
 }
 
@@ -80,7 +85,8 @@ impl Vector {
     /// file has no pixel size of its own.
     /// The thumbnail and the base raster share the aspect, so a warm cell and
     /// a cold one measure the same picture.
-    pub(crate) fn base_size(&self) -> (ImgW, ImgH) {
+    #[must_use]
+    pub fn base_size(&self) -> (ImgW, ImgH) {
         scale_to(self.declared(), base_side(self.declared_long()))
     }
 
@@ -89,7 +95,7 @@ impl Vector {
     /// # Errors
     ///
     /// The function errors when the pixmap allocation fails.
-    pub(crate) fn render_base(&self) -> Result<DecodedImage, DecodeError> {
+    pub fn render_base(&self) -> Result<DecodedImage, DecodeError> {
         self.rasterize(base_side(self.declared_long()))
     }
 
@@ -98,7 +104,7 @@ impl Vector {
     /// # Errors
     ///
     /// The function errors when the pixmap allocation fails.
-    pub(crate) fn rasterize(&self, long: LongSide) -> Result<DecodedImage, DecodeError> {
+    pub fn rasterize(&self, long: LongSide) -> Result<DecodedImage, DecodeError> {
         let (w, h) = scale_to(self.declared(), long);
         let (rw, rh) = (w.get(), h.get());
         let mut pixmap = tiny_skia::Pixmap::new(rw, rh).ok_or(DecodeError::Raster)?;
@@ -232,7 +238,7 @@ const fn is_gzip(bytes: &[u8]) -> bool {
 ///
 /// The function errors when the file cannot be read, or when usvg rejects
 /// the XML, the namespaces or the document structure.
-pub(crate) fn parse(path: &Path) -> Result<Vector, DecodeError> {
+pub fn parse(path: &Path) -> Result<Vector, DecodeError> {
     let bytes = read(path)?;
     let tree =
         usvg::Tree::from_data(&bytes, &options()).map_err(|e| DecodeError::Svg(Box::new(e)))?;
@@ -246,7 +252,7 @@ pub(crate) fn parse(path: &Path) -> Result<Vector, DecodeError> {
 /// candidate costs a head read.
 /// A gzip payload sniffs its decompressed head.
 #[must_use]
-pub(crate) fn sniff(path: &Path) -> bool {
+pub fn sniff(path: &Path) -> bool {
     let Some(magic) = super::file_magic(path) else {
         return false;
     };
@@ -511,6 +517,24 @@ mod tests {
             (d.image.width, d.image.height),
             (ImgW::new(512), ImgH::new(256))
         );
+    }
+
+    #[test]
+    fn a_tier_paints_past_the_base() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("drawing.svg");
+        std::fs::write(&path, SQUARE).expect("write");
+        let vector = parse(&path).expect("parse");
+        // The same parsed tree paints again at a larger size, so the image
+        // view never reparses the XML for a deeper zoom.
+        let tier = vector.rasterize(crate::tier::TIER_CAP).expect("tier");
+        assert_eq!(
+            (tier.width, tier.height),
+            (ImgW::new(4096), ImgH::new(2048))
+        );
+        assert_eq!(tier.data.len(), 4096 * 2048 * 4);
+        // The source pair never grows with the tier.
+        assert_eq!(vector.base_size(), (ImgW::new(1024), ImgH::new(512)));
     }
 
     #[test]

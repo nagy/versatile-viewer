@@ -33,6 +33,9 @@
 //! with `--mcp`.
 //! [`keyrepeat`] steps a held key for discrete moves, and [`tween`] ramps a
 //! held key for continuous motion.
+//! [`tier`] holds the pixel-tier ladder of the image view: a vector source
+//! paints a larger raster when the zoom settles, so a deep zoom never
+//! stretches the base raster.
 //! [`rotate`] holds the image-view rotation angle behind the `r` hold.
 //! [`thumbcache`] keeps the grid thumbnails in `$XDG_CACHE_HOME`, so a warm
 //! cache fills the grid without a decode, across the exit of the viewer.
@@ -60,11 +63,11 @@ pub mod thumbcache;
 #[cfg(not(feature = "cache"))]
 #[path = "thumbcache_off.rs"]
 pub mod thumbcache;
+pub mod tier;
 pub mod tween;
 #[cfg(target_os = "linux")]
 pub mod wmclass;
 pub mod zoomkeys;
-
 use std::path::Path;
 
 use raylib::{consts::PixelFormat, prelude::*};
@@ -311,21 +314,52 @@ fn decode_raster(path: &Path) -> Result<Decoded, DecodeError> {
 /// arrives.
 /// A raster format announces nothing, because a one-step decode reports its
 /// size with the pixels.
-pub(crate) fn decode_announce(
+/// A decode for the image view: the raster to show, plus the parsed vector
+/// source when the file has one.
+pub struct ViewDecode {
+    /// The pixels to upload.
+    pub image: DecodedImage,
+    /// The parsed source of a vector file, so the view can paint a larger tier
+    /// when the zoom settles (see [`tier`]).
+    /// None for a raster format, which has no more detail to give.
+    pub vector: Option<std::sync::Arc<svg::Vector>>,
+}
+
+/// Decode a file for the image view, announcing the dimensions when the code
+/// learns them before the pixels.
+///
+/// A vector file parses in a few milliseconds and paints in tens, so the
+/// header goes out first and the window fits the picture while the raster
+/// arrives.
+/// The vector source comes back with the raster, so the view re-rasterizes
+/// without another XML parse.
+/// A raster format announces nothing, because a one-step decode reports its
+/// size with the pixels.
+///
+/// # Errors
+///
+/// The function errors when it cannot open, sniff or decode the file.
+pub fn decode_view(
     path: &Path,
     announce: &mut dyn FnMut(ImgW, ImgH),
-) -> Result<DecodedImage, DecodeError> {
+) -> Result<ViewDecode, DecodeError> {
     #[cfg(feature = "svg")]
     if svg::sniff(path) {
-        let vector = svg::parse(path)?;
+        let vector = std::sync::Arc::new(svg::parse(path)?);
         let (width, height) = vector.base_size();
         announce(width, height);
-        return vector.render_base();
+        return Ok(ViewDecode {
+            image: vector.render_base()?,
+            vector: Some(vector),
+        });
     }
     // Without SVG support no decode reports its size early.
     #[cfg(not(feature = "svg"))]
     let _ = announce;
-    decode_image(path)
+    Ok(ViewDecode {
+        image: decode_image(path)?,
+        vector: None,
+    })
 }
 
 /// The longest texture side the code uploads.

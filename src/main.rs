@@ -36,6 +36,11 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        mpsc::{Receiver, Sender, channel},
+    },
+    time::Instant,
 };
 
 use anyhow::{Context, Result, bail};
@@ -50,12 +55,12 @@ use versatile_viewer::wmclass;
 use versatile_viewer::{
     DecodedImage, UploadError,
     blurbg::{self, BlurBg},
-    decode_image,
-    dim::{ImgH, ImgW, PreviewPx, RampTime, Rect, WinH, WinW},
+    decode_view,
+    dim::{ImgH, ImgW, LongSide, PreviewPx, RampTime, Rect, WinH, WinW},
     grid::{DecodeFailure, Grid, GridAction},
     keyrepeat,
     loader::{DecodeMsg, Loader},
-    mcp, rotate,
+    mcp, rotate, svg, tier,
     tween::Ramp,
     upload_rgba,
     zoomkeys::TypedKeys,
@@ -229,6 +234,47 @@ struct ViewState {
     /// The code declares it after `rl` (via `ViewState`) so it drops and
     /// unloads before the window.
     blur_bg: Option<BlurBg>,
+    /// The parsed source of the open vector file (None for a raster format).
+    /// It paints again at a larger size when the zoom settles, so a deep zoom
+    /// never stretches a small raster.
+    vector: Option<Arc<svg::Vector>>,
+    /// The long side of the texture on screen now, in pixels.
+    /// The tier ladder compares it against the size the zoom asks for.
+    tier_side: LongSide,
+    /// The rung a worker paints now, if any.
+    /// One paint in flight, because resvg cannot cancel one mid-paint.
+    tier_pending: Option<LongSide>,
+    /// Bumped on every open, every n/p step and every return to the grid, so
+    /// the result of a worker for an earlier image drops instead of landing.
+    tier_gen: u64,
+    /// The scale the debounce last saw.
+    tier_scale_seen: f32,
+    /// When the scale last moved.
+    tier_quiet_at: Instant,
+    /// The tier workers talk back over this pair.
+    tier_tx: Sender<TierMsg>,
+    tier_rx: Receiver<TierMsg>,
+}
+
+/// A message from a tier worker to the image view.
+///
+/// The view carries one generation counter, so a paint of the previous image
+/// never lands on the new one.
+enum TierMsg {
+    /// The parsed source of the open image, or None when the file has none.
+    Source {
+        generation: u64,
+        vector: Option<Arc<svg::Vector>>,
+    },
+    /// A finished paint whose long side measures `side` pixels.
+    Raster {
+        generation: u64,
+        side: LongSide,
+        image: DecodedImage,
+    },
+    /// A paint that failed, so the view drops the pending flag and may ask
+    /// again.
+    Failed { generation: u64 },
 }
 
 impl ViewState {
@@ -246,6 +292,150 @@ impl ViewState {
         self.angle = 0.0;
         self.pivot = None;
         self.ramps = Ramps::default();
+    }
+
+    /// Drop the tier state of the image that was open, and retire every worker
+    /// result still in flight.
+    fn close_tier(&mut self) {
+        self.vector = None;
+        self.tier_pending = None;
+        self.tier_side = LongSide::new(0);
+        self.tier_scale_seen = 0.0;
+        self.tier_quiet_at = Instant::now();
+        self.tier_gen = self.tier_gen.wrapping_add(1);
+    }
+
+    /// Adopt a source that arrived with a decode, so the zoom can paint a
+    /// larger tier later.
+    ///
+    /// The decode painted the base raster, so its long side names the texture
+    /// on screen.
+    fn adopt_source(&mut self, source: Option<Arc<svg::Vector>>, side: LongSide) {
+        self.close_tier();
+        self.vector = source;
+        self.tier_side = side;
+    }
+
+    /// Ask a worker for the parsed source of `path`.
+    ///
+    /// The grid keeps no tree, so an image opened from the grid parses once
+    /// here, off the main thread.
+    /// A raster file answers None at once.
+    fn request_source(&mut self, path: PathBuf) {
+        self.close_tier();
+        let (generation, tx) = (self.tier_gen, self.tier_tx.clone());
+        rayon::spawn(move || {
+            // The sniff reads the head only, so a 200 MB photo never makes a
+            // worker read the whole file.
+            let vector = if svg::sniff(&path) {
+                svg::parse(&path).ok().map(Arc::new)
+            } else {
+                None
+            };
+            let _ = tx.send(TierMsg::Source { generation, vector });
+        });
+    }
+
+    /// Ask for a tier once the zoom settles, when the texture on screen no
+    /// longer matches the pixels the screen shows.
+    ///
+    /// The guard is one paint in flight: resvg cannot cancel mid-paint, and a
+    /// 4096 px pixmap costs up to 64 MB.
+    fn tick_tier(&mut self, now: Instant) {
+        if self.vector.is_none()
+            || self.tier_pending.is_some()
+            || self.img_w <= 0.0
+            || self.view_loading
+        {
+            return;
+        }
+        let Some(scale) = self.view_scale else {
+            return;
+        };
+        // The debounce: any visible scale movement restarts the timer, so a
+        // drag or an ease never queues a paint per frame.
+        if (scale - self.tier_scale_seen).abs() > self.tier_scale_seen.max(0.001) * 0.002 {
+            self.tier_scale_seen = scale;
+            self.tier_quiet_at = now;
+            return;
+        }
+        if now.duration_since(self.tier_quiet_at) < tier::QUIET {
+            return;
+        }
+        let Some(vector) = self.vector.clone() else {
+            return;
+        };
+        let (w, h) = vector.base_size();
+        let base = LongSide::new(w.get().max(h.get()));
+        let need = tier::needed(self.img_w.max(self.img_h), scale);
+        let next = tier::rung(need, base, tier::TIER_CAP);
+        if !tier::worth_painting(next, self.tier_side) {
+            return;
+        }
+        self.tier_pending = Some(next);
+        let (generation, tx) = (self.tier_gen, self.tier_tx.clone());
+        rayon::spawn(move || match vector.rasterize(next) {
+            Ok(image) => {
+                let _ = tx.send(TierMsg::Raster {
+                    generation,
+                    side: next,
+                    image,
+                });
+            }
+            Err(err) => {
+                eprintln!("vv: {err}");
+                let _ = tx.send(TierMsg::Failed { generation });
+            }
+        });
+    }
+
+    /// Apply finished tier work.
+    /// A source lands as is, and a raster uploads when it still beats the
+    /// texture on screen.
+    /// A result of an earlier image drops.
+    fn drain_tiers(
+        &mut self,
+        rl: &mut RaylibHandle,
+        thread: &RaylibThread,
+    ) -> Result<(), UploadError> {
+        while let Ok(msg) = self.tier_rx.try_recv() {
+            match msg {
+                TierMsg::Source { generation, vector } => {
+                    if generation == self.tier_gen {
+                        self.vector = vector;
+                    }
+                }
+                TierMsg::Raster {
+                    generation,
+                    side,
+                    image,
+                } => {
+                    if generation != self.tier_gen {
+                        continue;
+                    }
+                    self.tier_pending = None;
+                    if !tier::worth_painting(side, self.tier_side) {
+                        continue;
+                    }
+                    show_frame(
+                        rl,
+                        thread,
+                        &mut self.view_tex,
+                        &image.data,
+                        image.width,
+                        image.height,
+                        self.pixelated,
+                    )?;
+                    self.tier_side = side;
+                }
+                TierMsg::Failed { generation } => {
+                    if generation == self.tier_gen {
+                        self.tier_pending = None;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -551,6 +741,9 @@ fn show_entry(
     st.open_id = Some(id);
     st.mode = Mode::Image;
     st.reset_view();
+    // A new image starts with no tier: the decode or the source request
+    // names the texture size.
+    st.close_tier();
     if let Some(tex) = tex {
         grid.entries[idx].viewing = true;
         st.view_from_grid = Some(id);
@@ -560,6 +753,10 @@ fn show_entry(
         st.img_h = h.as_f32();
         st.loader = None;
         st.view_loading = false;
+        // The grid keeps no parsed tree, so the view parses it on a worker
+        // before a deeper zoom can paint.
+        st.request_source(path);
+        st.tier_side = LongSide::new(w.get().max(h.get()));
         if set_scale_now {
             st.view_scale = Some((win_w / st.img_w).min(win_h / st.img_h));
         }
@@ -707,8 +904,10 @@ fn main() -> Result<()> {
     // Single-image launch: decode before opening the window, so the window
     // can be sized to the image.
     // Directory launch: fixed default window size.
+    // A vector file brings its parsed source along, so the image view can
+    // paint a larger tier when the zoom settles.
     let single_decoded = if dir_grid.is_none() {
-        Some(decode_image(path)?)
+        Some(decode_view(path, &mut |_, _| {})?)
     } else {
         None
     };
@@ -717,12 +916,12 @@ fn main() -> Result<()> {
     // The code uploads it once the window is open.
     let single_blur = if dir_grid.is_none() && blurbg::enabled() {
         let d = single_decoded.as_ref().expect("single file decoded");
-        Some(blurbg::small_blur(d, blurbg::blur_px()))
+        Some(blurbg::small_blur(&d.image, blurbg::blur_px()))
     } else {
         None
     };
     let (win0_w, win0_h) = single_decoded.as_ref().map_or((1024, 768), |d| {
-        (d.width.get() as i32, d.height.get() as i32)
+        (d.image.width.get() as i32, d.image.height.get() as i32)
     });
 
     let (mut rl, thread) = raylib::init()
@@ -763,6 +962,7 @@ fn main() -> Result<()> {
     // Image-view state: what is shown and how it is framed.
     // Its Loader field drops (and cancels the worker) before the window
     // closes, like `grid`.
+    let (tier_tx, tier_rx) = channel();
     let mut st = ViewState {
         mode: if grid.is_none() {
             Mode::Image
@@ -786,21 +986,30 @@ fn main() -> Result<()> {
         pixelated: false,
         loader: None,
         blur_bg: BlurBg::from_env(),
+        vector: None,
+        tier_side: LongSide::new(0),
+        tier_pending: None,
+        tier_gen: 0,
+        tier_scale_seen: 0.0,
+        tier_quiet_at: Instant::now(),
+        tier_tx,
+        tier_rx,
     };
     if let Some(decoded) = single_decoded {
         st.view_tex = Some(upload_rgba(
             &mut rl,
             &thread,
-            &decoded.data,
-            decoded.width,
-            decoded.height,
+            &decoded.image.data,
+            decoded.image.width,
+            decoded.image.height,
         )?);
         apply_view_filter(
             &thread,
             st.view_tex.as_ref().expect("just uploaded"),
             st.pixelated,
         );
-        drop(decoded);
+        st.tier_side = LongSide::new(decoded.image.width.get().max(decoded.image.height.get()));
+        st.vector = decoded.vector;
         st.img_w = win0_w as f32;
         st.img_h = win0_h as f32;
         if let Some(data) = single_blur {
@@ -1065,6 +1274,9 @@ fn main() -> Result<()> {
                     None => open_failed = true, // entry vanished (decode failed)
                 }
             }
+            // A vector source arrives with the final raster, so the tier
+            // state changes after the loader loop ends its borrow.
+            let mut tier_ready: Option<(Option<Arc<svg::Vector>>, LongSide)> = None;
             if let Some(loader) = &st.loader {
                 while let Some(msg) = loader.try_recv() {
                     match msg {
@@ -1097,7 +1309,11 @@ fn main() -> Result<()> {
                                 st.open_id,
                             );
                         }
-                        Ok(DecodeMsg::Done { image, blur }) => {
+                        Ok(DecodeMsg::Done {
+                            image,
+                            blur,
+                            vector,
+                        }) => {
                             // Non-JXL formats only learn dimensions here.
                             if st.img_w == 0.0 {
                                 st.img_w = image.width.as_f32();
@@ -1124,6 +1340,13 @@ fn main() -> Result<()> {
                                 st.open_id,
                             );
                             st.view_loading = false;
+                            // A vector file keeps its parsed source, so a
+                            // deeper zoom paints a larger tier instead of
+                            // stretching this raster.
+                            tier_ready = Some((
+                                vector,
+                                LongSide::new(image.width.get().max(image.height.get())),
+                            ));
                         }
                         Err(err) => {
                             eprintln!("vv: {err}");
@@ -1132,8 +1355,12 @@ fn main() -> Result<()> {
                     }
                 }
             }
+            if let Some((source, side)) = tier_ready {
+                st.adopt_source(source, side);
+            }
             if open_failed {
                 st.loader = None; // cancel the worker
+                st.close_tier();
                 // Keep the entry: mark it as failed, so its cell stays
                 // visible (dimmed, error glyph) instead of vanishing
                 // silently.
@@ -1516,6 +1743,7 @@ fn main() -> Result<()> {
                 }
                 st.loader = None; // cancels a still-running stream
                 st.view_loading = false;
+                st.close_tier();
             }
 
             // Prev/next while viewing (only with a grid to navigate).
@@ -1936,6 +2164,15 @@ fn main() -> Result<()> {
                     st.pan.y = st.target_pan.y;
                 }
             } // st.img_w > 0.0: fit/pan math needs known dimensions
+        }
+
+        // Vector tiers: adopt a parsed source and a finished paint, then ask
+        // for the next rung when the zoom settled.
+        // The upload needs the main thread, and the request reads the scale of
+        // this frame.
+        if st.mode == Mode::Image {
+            st.drain_tiers(&mut rl, &thread)?;
+            st.tick_tier(Instant::now());
         }
 
         // VV_BLUR_BG in grid mode: the background follows the selected

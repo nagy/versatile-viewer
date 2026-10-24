@@ -26,6 +26,16 @@ The binary name is `vv`.
   The host font database loads once per process (`fontdb`, `OnceLock`), so `<text>` renders with real fonts and a whole directory pays one scan.
   `resvg` covers the static subset only: no script, no animation, and `raster-images` stays off, so an embedded JPEG/WebP/GIF draws nothing while an embedded PNG does.
   A retained `usvg::Tree` (`svg::Vector`) is the hook for a later zoom-tier re-raster.
+- The image view paints a deeper zoom tier from that tree.
+  `src/tier.rs` holds the pure decision math: `needed`, `rung`, `worth_painting`, `QUIET`.
+  The ladder snaps to `RUNG_STEP` (256 px) and stops at `TIER_CAP` (4096), which halves the photo cap: 64 MB instead of 268 MB.
+  The view paints when the zoom settles (`QUIET` 150 ms), when the rung beats the texture on screen by `HYSTERESIS` (1.25), and only with one paint in flight, because resvg cannot cancel mid-paint.
+  `ViewState` keeps `Arc<svg::Vector>`, the current texture side, the pending rung and one generation counter.
+  Every open, every n/p step and every return to the grid bumps that counter, so the result of a worker for an earlier image drops.
+  A paint of an image opened from the grid parses its own tree on a worker (`request_source`), because the grid keeps no tree.
+  A single-file launch and the streaming loader hand the tree over with `decode_view`.
+  `img_w`/`img_h` keep measuring the source, never the tier, so a bigger texture never disturbs fit, pan or zoom.
+  Zooming out paints a smaller rung, so one texture lives at a time.
 - Grid extension filter: `src/grid.rs` `is_image_path`.
   Keep the crate features in sync.
 - Dispatch decode on sniffed content.
@@ -111,8 +121,7 @@ The binary name is `vv`.
 
 ## Build
 
-- `nix build .#versatile-viewer-doc` makes the rustdoc HTML.
-- `nix flake check` gates clippy (`--all-targets -- --deny warnings`), tests, doctests, and treefmt.
+- `nix build .#versatile-viewer-doc` makes the rustdoc HTML.- `nix flake check` gates clippy (`--all-targets -- --deny warnings`), tests, doctests, and treefmt.
 ## Run
 
 Run `nix run . -- <image-path-or-directory>`.

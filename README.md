@@ -14,7 +14,10 @@ the long side bakes at the declared size clamped into 1024..=8192 px — an
 icon zooms without turning to mush, and a huge viewBox lands on the texture
 limit. Text renders with the host fonts, embedded PNG images render, and
 SVGZ decompresses under a size cap. The grid paints a vector cell straight
-at 512 px, so a cell never paints a full-size pixmap only to shrink it.
+at 512 px, so a cell never paints a full-size pixmap only to shrink it. The
+image view keeps the parsed tree and paints a larger tier when the zoom
+settles, so a deep zoom never stretches the base raster: 64 MB at most, one
+paint in flight, and a 25% step before any paint.
 Thumbnails render in a directory grid
 that fills the window, decoded in parallel on a background pool, and sorted
 in natural order (`img2` before `img10`). Every downscale, including the
