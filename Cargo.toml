@@ -42,6 +42,17 @@ rayon = "1"
 # 0.8 is required: render_into() takes an arbitrary kurbo::Affine, which is
 # what makes a region render (visible crop) possible.
 hayro = "0.8"
+# Typst compile -> PDF export pipeline (pure Rust). Confined to typst.rs,
+# which hands the exported PDF bytes to the hayro backend in pdf.rs, so one
+# rasterizer draws every document. The exported pages are resolution
+# independent, so a region render and a settled-zoom refine work for a Typst
+# page exactly as for a PDF.
+typst = "0.15"
+typst-layout = "0.15"
+typst-pdf = "0.15"
+# Fonts embedded in the binary (its "fonts" feature), so the viewer needs no
+# font directory and no environment variable.
+typst-assets = { version = "0.15", features = ["fonts"] }
 # SIMD image resize (the grid thumb, the texture cap, the preview and the
 # blur background).
 # Picks the best CPU extension at runtime.

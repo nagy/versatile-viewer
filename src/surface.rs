@@ -308,6 +308,8 @@ pub enum SurfaceError {
 ///
 /// A PDF routes on the `%PDF-` magic to the multi-plane PDF backend, so a
 /// misnamed file still opens.
+/// A `.typ` source routes by extension to the Typst backend, which compiles it
+/// to PDF bytes and hands them to that same backend.
 /// A vector file keeps its parsed tree, so a region render of the image view
 /// pays only for the pixels it shows.
 /// Every other content goes to the raster backend, which dispatches JPEG XL
@@ -322,6 +324,12 @@ pub fn open_surface(path: &Path) -> Result<Box<dyn Surface>, SurfaceError> {
     // The backend holds the hayro dependency in `pdf.rs`.
     if crate::pdf::is_pdf(path) {
         return Ok(Box::new(crate::pdf::PdfSurface::open(path)?));
+    }
+    // Typst: the extension decides (.typ is plain UTF-8 text, so there is no
+    // magic to sniff). The backend compiles the file and renders the exported
+    // pages through the PDF path.
+    if crate::typst::is_typst(path) {
+        return Ok(Box::new(crate::typst::TypstSurface::open(path)?));
     }
     // The sniff doubles as a validity check; render() reports the decode
     // error otherwise.

@@ -48,8 +48,17 @@ The binary name is `vv`.
   `ViewState::open_pan` records the pan the align wrote, so a pan or a target that moved away from it marks a user move and the align stops.
   `ViewState::refit_open` arms the same framing again when the loader header or the first frame brings the real plane size.
   `open_book_surface` wraps when the source holds two planes or more; the grid thumbnail keeps the plain `open_surface`, so a cell shows page 0 and never a second page.
+- Compile Typst with `typst`, `typst-layout`, `typst-pdf` and `typst-assets` (pure Rust).
+  The module is `src/typst.rs` (`TypstSurface`), and it owns those dependencies.
+  One compiled document is one multi-plane surface: `TypstSurface` forwards `plane_count`, `bounds`, `render_whole`, `render`, `previews` and `can_refine` to the inner `PdfSurface`, so a Typst page inherits the region anchor and the settled-zoom patch of the PDF path, with one rasterizer and one pixel budget.
+  A Typst source holds one plane per page, so `open_book_surface` shows it as the same book as a PDF, and the grid cell shows the cover page.
+  The compile runs through a `typst::World` rooted at the directory of the opened file, so `#include`, `#image` and `#read` resolve like the Typst CLI and a path escape fails.
+  Fonts come from `typst-assets` (feature `fonts`), so no font directory and no environment variable is necessary.
+  The reader has no clock, so a document that reads `datetime.today()` fails.
+  A compile error becomes a `file:line:col: error: message` line with the first hint, and a panicking compiler or exporter becomes `SurfaceError::Render`, never a crash.
+  `open_surface` routes a `.typ` file by extension, because plain UTF-8 text has no magic bytes to sniff.
 - Every showable source is a `src/surface.rs` `Surface`: `plane_count`, `bounds`, `render_whole`, `render`, `progressive` and `previews`.
-  `open_surface` sniffs the content with `src/sign.rs` and picks the backend: a raster file (`ImageSurface`), a vector file (`VectorSurface`) or a PDF (`PdfSurface`).
+  `open_surface` sniffs the content with `src/sign.rs` and picks the backend: a raster file (`ImageSurface`), a vector file (`VectorSurface`), a PDF (`PdfSurface`) or a Typst source (`TypstSurface`, which compiles to PDF bytes).
   A backend writes `render_whole`; `render` is a provided method that renders the whole plane and crops the region out of it.
   A backend with a region anchor (the vector tree, the PDF rasterizer) overrides `render` to pay only for the pixels the caller asked for, and returns `SurfaceError::Unsupported` rather than the whole plane for a region it cannot serve.
   A `View` names a plane, an optional `Region` and a scale (output pixels per surface unit), so the grid asks for a thumbnail, the loader for the whole plane and the image view for the patch it shows.
@@ -72,8 +81,8 @@ The binary name is `vv`.
   `img_w`/`img_h` keep measuring the source, never the patch, so a bigger texture never disturbs fit, pan or zoom.
   The whole-image texture (`view_tex`) stays as the fallback and draws only where the patch cannot reach (`patch_covers`), so a resize or a pan that outruns the repaint never shows background.
   Drawing both over the same pixels would double the alpha of an antialiased edge, so the patch hides the whole image where it covers.
-- Grid extension filter: `src/grid.rs` `is_image_path` (also `pdf`).
-  Keep the crate features in sync (`pdf` is not an image crate feature).
+- Grid extension filter: `src/grid.rs` `is_image_path` (also `pdf` and `typ`).
+  Keep the crate features in sync (neither `pdf` nor `typ` is an image crate feature).
 - A grid cell holds an `EntrySource`, which is a path opened (and sniffed) lazily at decode time.
   One file is one cell, so a document cell shows page 0 and never a second page.
   `Grid::from_paths` builds a grid from a path list, and `Grid::from_dir` hands it the sorted directory listing.
@@ -100,6 +109,7 @@ The binary name is `vv`.
   Property tests are dev-only and never gate a release build.
 - Public error types derive `derive_more::{Display, Error, From}` (feature `from` on).
   Each module owns its error enum: `src/error.rs` (`DecodeError`, `UploadError`), `src/sign.rs` (`SignError`), `src/surface.rs` (`SurfaceError`), `src/pdf.rs` (`PdfError`), `src/grid.rs` (`GridError`), `src/loader.rs` (`LoadError`), `src/mcp.rs` (`SpawnError`), `src/thumbcache.rs` (`CacheError`).
+  `src/typst.rs` has no error enum of its own: its compile diagnostics and export failures become `SurfaceError::Render`.
   `main.rs` keeps `anyhow`.
 - Wrap raw pixel and window primitives in the `src/dim.rs` newtypes (`ImgW`, `ImgH`, `WinW`, `WinH`, `LongSide`, `PreviewPx`, `Delay`, `Rate`, `RampTime`, `Rect`).
   Public API boundaries take the newtype, not the bare primitive.

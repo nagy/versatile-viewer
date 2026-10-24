@@ -30,6 +30,11 @@ visible region over a rested zoom, so a deep zoom of a page never stretches a
 raster. A coarse preview lands first, because rasterizing a page takes a
 moment. The grid thumbnail stays the cover page: no cell ever holds a second
 page.
+A Typst source compiles through [typst] to PDF bytes and renders through that
+same path, so it shows as that same book and zooms sharply for the same
+reasons. The compile runs with the file's own directory as the project root,
+so `#include`, `#image` and `#read` resolve like the Typst CLI, and the fonts
+ship inside the binary.
 Thumbnails render in a directory grid
 that fills the window, decoded in parallel on a background pool, and sorted
 in natural order (`img2` before `img10`). Every downscale, including the
@@ -62,17 +67,21 @@ loader or the grid. The grid, the streaming loader and the image view speak
 surfaces, plane indices and regions, never file formats.
 `src/sign.rs` decides the decoder from the file content, not the file name,
 and a PDF routes on its `%PDF-` magic to the hayro backend in `src/pdf.rs`.
+A Typst source routes by extension to `src/typst.rs`, which compiles it to
+PDF bytes and hands them to that same backend.
 
 The grid holds one cell per file, and a document cell shows its cover page.
 The image view shows a document as a book, and a book opens on its first
 spread: the fit frames that spread, so the cover page shows whole, and the
-view scrolls to the top of the document. See `docs/adr/0001-*.md` and
+view scrolls to the top of the document. A Typst source compiles to the same
+pages, so it opens as the same book. See `docs/adr/0001-*.md` and
 `src/book.rs`.
 
 [jxl-oxide]: https://crates.io/crates/jxl-oxide
 [image]: https://crates.io/crates/image
 [resvg]: https://crates.io/crates/resvg
 [hayro]: https://crates.io/crates/hayro
+[typst]: https://crates.io/crates/typst
 [fast_image_resize]: https://crates.io/crates/fast_image_resize
 [ThumbHash]: https://evanw.github.io/thumbhash/
 
@@ -137,6 +146,11 @@ because stdout carries protocol frames only.
 |click / click        |select / open               |—                              |
 
 `Esc` never quits the program.
+
+A PDF or a Typst source opens as a book: the cover page alone, then the
+pages in pairs, every spread stacked in one figure. A zoom past a settled
+ease repaints the region the window shows, at the scale it shows it, so a
+page stays sharp at any zoom.
 
 ## Environment variables
 
