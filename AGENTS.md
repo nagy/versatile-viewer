@@ -35,6 +35,14 @@ The binary name is `vv`.
   `previews` and `can_refine` answer true, so a coarse preview lands first and the image view repaints the window patch over a rested zoom.
   Every render runs in `catch_unwind`, because a young rasterizer can panic on a malformed page and the job runs on a pool thread: a panic becomes `SurfaceError::Render`, never a crash.
   Each render builds a fresh `RenderCache`, because hayro's cache is not `Send`.
+- A document shows as book spreads, `src/spread.rs` (`SpreadSurface`, `COVER_SLOTS`, `COVER_ON_RIGHT`, `GUTTER`, `SLOTS`, `MAX_RENDER_PIXELS`).
+  The wrapper exposes one `Surface` plane per spread, so the loader, the fit, the pan, the turn and the region patch work on a spread unchanged.
+  The cover page sits alone in the right slot, then the pages pair up: `1|2`, `3|4`.
+  Every canvas measures the widest and tallest page of the document, doubled plus `GUTTER` (8 pt), so an n/p step never moves the fit or the pan.
+  A slot with no page stays transparent, so `BACKGROUND` shows through.
+  A render clamps at `MAX_RENDER_PIXELS` (64 MP) before any page renders, so both pages share one scale and one size.
+  `render` splits the patch on the page seam and asks each page for its own part, so a spread costs only the pixels the window shows.
+  `open_spread_surface` wraps when the source holds two planes or more; the grid thumbnail keeps the plain `open_surface`, so a cell shows page 0.
 - Every showable source is a `src/surface.rs` `Surface`: `plane_count`, `bounds`, `render_whole`, `render`, `progressive` and `previews`.
   `open_surface` sniffs the content with `src/sign.rs` and picks the backend: a raster file (`ImageSurface`), a vector file (`VectorSurface`) or a PDF (`PdfSurface`).
   A backend writes `render_whole`; `render` is a provided method that renders the whole plane and crops the region out of it.

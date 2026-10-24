@@ -24,6 +24,8 @@
 //! SVG and SVGZ rasterize with pure-Rust resvg in [`svg`], which bakes a base
 //! raster because a vector file has no pixels of its own.
 //! PDF rasterizes with pure-Rust hayro in [`pdf`], one plane per page.
+//! [`spread`] shows a multi-page source as book spreads: a cover page alone,
+//! then the pages in pairs, all on one [`surface::Surface`] plane.
 //! Every showable source is a [`surface::Surface`], so the grid, the loader
 //! and the image view ask for a plane at a scale and never for a file format.
 //! [`downscale_rgba`], [`cap_texture_side`] and [`upload_rgba`] keep the
@@ -57,6 +59,7 @@ pub mod placeholder;
 pub mod region;
 pub mod rotate;
 pub mod sign;
+pub mod spread;
 pub mod surface;
 #[cfg(feature = "svg")]
 pub mod svg;

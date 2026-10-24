@@ -18,6 +18,7 @@
 use std::{
     io,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use derive_more::{Display, Error, From};
@@ -319,6 +320,27 @@ pub fn open_surface(path: &Path) -> Result<Box<dyn Surface>, SurfaceError> {
         return Ok(Box::new(VectorSurface::open(path)?));
     }
     Ok(Box::new(ImageSurface::new(path)))
+}
+
+/// Open a file and, when its source holds more than one plane, show it as a
+/// document spread (see [`crate::spread`]).
+///
+/// The grid thumbnail keeps the plain surface from [`open_surface`], so a cell
+/// shows page 0.
+/// The image view takes this path, so a document becomes one figure with the
+/// pages side by side.
+///
+/// # Errors
+///
+/// The function errors when the file cannot be read or the content is not a
+/// decodable image, PDF or vector file.
+pub fn open_spread_surface(path: &Path) -> Result<Box<dyn Surface>, SurfaceError> {
+    let surface = open_surface(path)?;
+    if surface.plane_count() <= 1 {
+        return Ok(surface);
+    }
+    let inner: Arc<dyn Surface> = surface.into();
+    Ok(Box::new(crate::spread::SpreadSurface::new(inner)?))
 }
 
 /// A raster image file (JPEG XL, PNG, JPEG, WebP, ...) which always holds one
