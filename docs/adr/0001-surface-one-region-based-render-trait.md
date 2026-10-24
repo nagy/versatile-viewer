@@ -28,7 +28,14 @@ pub struct View {
 pub trait Surface: Send + Sync {
     fn plane_count(&self) -> usize;
     fn bounds(&self, plane: usize) -> Result<Size, SurfaceError>;
-    fn render(&self, view: View) -> Result<DecodedImage, SurfaceError>;
+
+    // The one method every backend writes.
+    fn render_whole(&self, plane: usize, scale: f32) -> Result<DecodedImage, SurfaceError>;
+
+    // Default: render_whole, then crop the region. A backend with an anchor
+    // overrides this for the cheaper path.
+    fn render(&self, view: View) -> Result<DecodedImage, SurfaceError> { .. }
+
     fn stream_path(&self) -> Option<&Path>;
     fn previews(&self) -> bool;
 }
@@ -65,6 +72,13 @@ view fits a scale. `bounds` is cheap and must not decode.
 - `scale` is output pixels per surface unit. 1.0 is natural size. A source
   whose natural unit is not a pixel (a typographic point, say) can still
   render a whole plane at 1.0 and get a pixel buffer.
+- `render_whole` is the required method; `render` is a provided method whose
+  default renders the whole plane and crops the region out of it. A backend
+  with a region anchor (a PDF rasterizer) overrides `render` to pay only for
+  the pixels the caller asked for. A backend with no anchor and no override
+  cannot be wrong: it inherits a correct crop. A backend that overrides
+  `render` and refuses a region returns `SurfaceError::Unsupported`; it must
+  never return the whole plane for a region view.
 - `stream_path` is the one file-shaped hole: a progressive byte-stream
   source. A source with no file returns `None`.
 - A grid cell holds an `EntrySource`: either a file to open lazily, or the

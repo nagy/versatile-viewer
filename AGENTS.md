@@ -26,8 +26,10 @@ The binary name is `vv`.
   The host font database loads once per process (`fontdb`, `OnceLock`), so `<text>` renders with real fonts and a whole directory pays one scan.
   `resvg` covers the static subset only: no script, no animation, and `raster-images` stays off, so an embedded JPEG/WebP/GIF draws nothing while an embedded PNG does.
   A retained `usvg::Tree` (`svg::Vector`) paints the view again, so the seam for a deeper zoom stays.
-- Every showable source is a `src/surface.rs` `Surface`: `plane_count`, `bounds`, `render`, `stream_path` and `previews`.
+- Every showable source is a `src/surface.rs` `Surface`: `plane_count`, `bounds`, `render_whole`, `render`, `stream_path` and `previews`.
   `open_surface` sniffs the content with `src/sign.rs` and picks the backend: a raster file (`ImageSurface`) or a vector file (`VectorSurface`).
+  A backend writes `render_whole`; `render` is a provided method that renders the whole plane and crops the region out of it.
+  A backend with a region anchor (the vector tree, a PDF rasterizer later) overrides `render` to pay only for the pixels the caller asked for, and returns `SurfaceError::Unsupported` rather than the whole plane for a region it cannot serve.
   A `View` names a plane, an optional `Region` and a scale (output pixels per surface unit), so the grid asks for a thumbnail, the loader for the whole plane and the image view for the patch it shows.
   `src/sign.rs` owns the content sniffing (`is_jxl`, `file_magic`, `is_common_magic`, `format`, `dimensions`), and both the surface layer and `svg.rs` use it.
   A raster plane measures the capped size it renders, so `bounds` and the pixels of a scale-1.0 render agree.

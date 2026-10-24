@@ -138,17 +138,48 @@ pub trait Surface: Send + Sync {
     /// cannot be read.
     fn bounds(&self, plane: usize) -> Result<Size, SurfaceError>;
 
-    /// Rasterize `view`: a plane, an optional region of it, and a scale.
+    /// Rasterize the whole of `plane` at `scale` output pixels per surface
+    /// unit.
     ///
-    /// The region arrives in surface units, and the scale is output pixels per
-    /// surface unit, so a caller asks for exactly the pixels it shows.
-    /// A backend without a region anchor renders the whole plane and crops.
+    /// This is the one method every backend must write.
+    /// A backend that can also anchor a render at a sub-rectangle overrides
+    /// [`Self::render`] for a cheaper region path.
     ///
     /// # Errors
     ///
     /// The function errors when the plane index is out of range, the scale is
     /// invalid or the decode fails.
-    fn render(&self, view: View) -> Result<DecodedImage, SurfaceError>;
+    fn render_whole(&self, plane: usize, scale: f32) -> Result<DecodedImage, SurfaceError>;
+
+    /// Rasterize `view`: a plane, an optional region of it, and a scale.
+    ///
+    /// The region arrives in surface units, and the scale is output pixels per
+    /// surface unit, so a caller asks for exactly the pixels it shows.
+    ///
+    /// The default renders the whole plane and crops the region out of it, so
+    /// a backend with no region anchor inherits region support.
+    /// A backend with an anchor (a vector tree, a PDF rasterizer) overrides
+    /// this method to pay only for the pixels the caller asked for.
+    ///
+    /// # Errors
+    ///
+    /// The function errors when the plane index is out of range, the scale is
+    /// invalid or the decode fails.
+    ///
+    /// A backend that overrides this method and cannot serve a region must
+    /// return [`SurfaceError::Unsupported`].
+    /// It must never return the whole plane for a region view.
+    fn render(&self, view: View) -> Result<DecodedImage, SurfaceError> {
+        let full = self.render_whole(view.plane, view.scale)?;
+        match view.region {
+            None => Ok(full),
+            Some(region) => {
+                // `render_whole` applied the scale, so the crop runs at that
+                // same scale.
+                crop_and_resample(&full, region, view.scale, view.scale)
+            }
+        }
+    }
 
     /// The file behind this surface, when a byte stream can drive a
     /// progressive decode.
@@ -262,7 +293,31 @@ impl Surface for ImageSurface {
         })
     }
 
+    fn render_whole(&self, plane: usize, scale: f32) -> Result<DecodedImage, SurfaceError> {
+        if plane != 0 {
+            return Err(SurfaceError::Plane(plane));
+        }
+        if !valid_scale(scale) {
+            return Err(SurfaceError::Scale(scale));
+        }
+        let decoded = self.decode()?;
+        // A native-size request returns the decode as is; any other scale
+        // resamples the whole image here (the view scales textures on the
+        // GPU instead).
+        if is_native(scale) {
+            return Ok(decoded);
+        }
+        let whole = Size {
+            w: decoded.width.as_f32(),
+            h: decoded.height.as_f32(),
+        };
+        resample(&decoded, whole.whole(), scale)
+    }
+
     fn render(&self, view: View) -> Result<DecodedImage, SurfaceError> {
+        // Decode once at native size, then crop (cheap) and resample only the
+        // requested region. This beats the whole-plane default, which would
+        // resample the whole image to reach a small region.
         if view.plane != 0 {
             return Err(SurfaceError::Plane(view.plane));
         }
@@ -331,6 +386,19 @@ impl Surface for VectorSurface {
             w: width.get() as f32,
             h: height.get() as f32,
         })
+    }
+
+    fn render_whole(&self, plane: usize, scale: f32) -> Result<DecodedImage, SurfaceError> {
+        if plane != 0 {
+            return Err(SurfaceError::Plane(plane));
+        }
+        if !valid_scale(scale) {
+            return Err(SurfaceError::Scale(scale));
+        }
+        let region = self.bounds(0)?.whole();
+        Ok(self
+            .vector
+            .render_region(crate::region::Crop::from(region), scale)?)
     }
 
     fn render(&self, view: View) -> Result<DecodedImage, SurfaceError> {
@@ -734,5 +802,117 @@ mod tests {
         let dir = temp_dir();
         let path = write_svg(dir.path(), "drawing.svg", SQUARE);
         assert!(open_surface(&path).is_err());
+    }
+
+    /// A backend that writes only `render_whole`: it inherits region support
+    /// from the trait default.
+    struct WholeOnly;
+
+    impl Surface for WholeOnly {
+        fn plane_count(&self) -> usize {
+            1
+        }
+
+        fn bounds(&self, plane: usize) -> Result<Size, SurfaceError> {
+            if plane != 0 {
+                return Err(SurfaceError::Plane(plane));
+            }
+            Ok(Size { w: 8.0, h: 4.0 })
+        }
+
+        fn render_whole(&self, plane: usize, scale: f32) -> Result<DecodedImage, SurfaceError> {
+            if plane != 0 {
+                return Err(SurfaceError::Plane(plane));
+            }
+            let (w, h) = (
+                ImgW::new((8.0 * scale).round().max(1.0) as u32),
+                ImgH::new((4.0 * scale).round().max(1.0) as u32),
+            );
+            Ok(DecodedImage {
+                width: w,
+                height: h,
+                data: vec![0u8; w.get() as usize * h.get() as usize * 4],
+            })
+        }
+
+        fn stream_path(&self) -> Option<&Path> {
+            None
+        }
+    }
+
+    #[test]
+    fn default_render_crops_a_region_from_the_whole_plane() {
+        // WholeOnly has no region anchor; the trait default must render the
+        // whole plane and crop the requested region out of it.
+        let region = Region {
+            x: 2.0,
+            y: 1.0,
+            w: 4.0,
+            h: 2.0,
+        };
+        let out = WholeOnly.render(View::region(0, region, 1.0)).unwrap();
+        assert_eq!((out.width, out.height), (ImgW::new(4), ImgH::new(2)));
+        assert_eq!(out.data.len(), 4 * 2 * 4);
+    }
+
+    #[test]
+    fn default_render_scales_a_region() {
+        let region = Region {
+            x: 0.0,
+            y: 0.0,
+            w: 4.0,
+            h: 2.0,
+        };
+        let out = WholeOnly.render(View::region(0, region, 2.0)).unwrap();
+        assert_eq!((out.width, out.height), (ImgW::new(8), ImgH::new(4)));
+    }
+
+    #[test]
+    fn default_render_rejects_a_bad_plane() {
+        assert!(WholeOnly.render(View::whole(7, 1.0)).is_err());
+    }
+
+    /// A backend with no region anchor that overrides `render` and refuses a
+    /// region. It must fail loudly, never return the whole plane.
+    struct NoAnchor;
+
+    impl Surface for NoAnchor {
+        fn plane_count(&self) -> usize {
+            1
+        }
+
+        fn bounds(&self, plane: usize) -> Result<Size, SurfaceError> {
+            if plane != 0 {
+                return Err(SurfaceError::Plane(plane));
+            }
+            Ok(Size { w: 8.0, h: 4.0 })
+        }
+
+        fn render_whole(&self, _plane: usize, _scale: f32) -> Result<DecodedImage, SurfaceError> {
+            Err(SurfaceError::Unsupported("test backend".to_owned()))
+        }
+
+        fn render(&self, view: View) -> Result<DecodedImage, SurfaceError> {
+            if view.region.is_some() {
+                return Err(SurfaceError::Unsupported("no region anchor".to_owned()));
+            }
+            self.render_whole(view.plane, view.scale)
+        }
+
+        fn stream_path(&self) -> Option<&Path> {
+            None
+        }
+    }
+
+    #[test]
+    fn a_backend_without_an_anchor_fails_loudly_on_a_region() {
+        let region = Region {
+            x: 0.0,
+            y: 0.0,
+            w: 2.0,
+            h: 2.0,
+        };
+        let err = NoAnchor.render(View::region(0, region, 1.0));
+        assert!(matches!(err, Err(SurfaceError::Unsupported(_))));
     }
 }

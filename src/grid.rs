@@ -2084,13 +2084,13 @@ mod tests {
             Ok(crate::surface::Size { w: 4.0, h: 2.0 })
         }
 
-        fn render(&self, view: View) -> Result<DecodedImage, SurfaceError> {
-            if view.plane >= self.0 {
-                return Err(SurfaceError::Plane(view.plane));
+        fn render_whole(&self, plane: usize, scale: f32) -> Result<DecodedImage, SurfaceError> {
+            if plane >= self.0 {
+                return Err(SurfaceError::Plane(plane));
             }
             let (w, h) = (
-                ImgW::new((4.0 * view.scale).round().max(1.0) as u32),
-                ImgH::new((2.0 * view.scale).round().max(1.0) as u32),
+                ImgW::new((4.0 * scale).round().max(1.0) as u32),
+                ImgH::new((2.0 * scale).round().max(1.0) as u32),
             );
             Ok(DecodedImage {
                 width: w,
