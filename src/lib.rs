@@ -43,6 +43,10 @@ pub mod keyrepeat;
 pub mod loader;
 pub mod mcp;
 pub mod rotate;
+#[cfg(feature = "cache")]
+pub mod thumbcache;
+#[cfg(not(feature = "cache"))]
+#[path = "thumbcache_off.rs"]
 pub mod thumbcache;
 pub mod tween;
 #[cfg(target_os = "linux")]

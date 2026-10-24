@@ -97,8 +97,8 @@ const THUMB_LONG_SIDE: LongSide = LongSide::new(1024);
 /// A cached entry is smaller than [`THUMB_LONG_SIDE`], so a warm cache shows a
 /// softer cell than a fresh decode: the GPU scales the 512 px texture up in a
 /// large cell.
-/// The trade suits a disk cache: a 512 px thumb is a few hundred kilobytes per
-/// file.
+/// The trade suits a disk cache: a lossy JPEG XL entry costs tens of
+/// kilobytes per file instead of a megabyte of RGBA8.
 /// Bump it with the `thumbcache` format version when the size changes.
 const CACHE_LONG_SIDE: LongSide = LongSide::new(512);
 
@@ -1251,6 +1251,8 @@ mod tests {
 
     use super::*;
 
+    /// The cache feature owns this path: without it every job decodes.
+    #[cfg(feature = "cache")]
     #[test]
     fn a_fresh_decode_fills_the_cache_and_hits_it_next() {
         let dir = TempDir::new().unwrap();
@@ -1278,7 +1280,13 @@ mod tests {
         // The second job takes the cached thumbnail and decodes nothing.
         let hit = run_job(&job, &cache).expect("cache hit");
         assert!(hit.full.is_none());
-        assert_eq!(hit.thumb, miss.thumb);
+        // The entry is lossy, so the hit keeps the shape and the alpha plane
+        // and only the color samples drift.
+        assert_eq!(
+            (hit.thumb.width, hit.thumb.height),
+            (miss.thumb.width, miss.thumb.height)
+        );
+        assert_eq!(hit.thumb.data.len(), miss.thumb.data.len());
         // The hit still reports the source dimensions, so the image view fits
         // the picture and not the cached thumb.
         assert_eq!(hit.image, miss.image);

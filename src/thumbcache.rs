@@ -9,12 +9,21 @@
 //! The content carries the source stamp (length and modification time) and
 //! the image dimensions in a fixed header, so a changed source file never
 //! shows a stale thumbnail.
+//! A JPEG XL codestream follows the header: lossy at [`QUALITY`], with an
+//! exact alpha channel.
+//! A 512 px entry therefore costs tens of kilobytes, not the megabyte of raw
+//! RGBA8.
+//! The encoder is `jixel`, pure Rust, and the decoder is the same `jxl-oxide`
+//! the viewer uses for a JPEG XL file.
+//! Both run on a decode worker, so the main thread never encodes.
 //!
 //! The cache lives in `$XDG_CACHE_HOME/vv/thumbnails`, which is `~/.cache`
 //! when the variable is unset.
 //! Without a home directory the cache is off, and the grid decodes every file
 //! like before.
 //! `VV_CACHE=0` turns the cache off too.
+//! A build without the `cache` feature answers [`CacheError::Off`] from every
+//! call, and `src/thumbcache_off.rs` holds that stub.
 //! The cache directory is created on the first write, so a viewer that only
 //! reads never creates it.
 //! The cache keeps every entry past the exit of the viewer, so the next launch
@@ -46,12 +55,25 @@ const EXT: &str = "thumb";
 /// `b"VVTH"`: the cache file magic.
 const MAGIC: [u8; 4] = *b"VVTH";
 /// The header layout version.
-/// Change it when the header or the pixel layout changes, so old files never
+/// Change it when the header or the entry payload changes, so old files never
 /// load.
-/// A file of another format never matches the magic, so a change of the pixel
-/// layout needs a version bump only for a build that reads the same magic.
-const FORMAT: u32 = 1;
-/// Header bytes before the RGBA8 pixels.
+/// A file of another format never matches the magic, so a change of the
+/// payload needs a version bump only for a build that reads the same magic.
+/// Version 2 holds a lossy JPEG XL codestream where version 1 held RGBA8
+/// pixels, so every version 1 entry stays unread and the source re-decodes.
+const FORMAT: u32 = 2;
+/// The JPEG XL quality of an entry, on the `jixel` 0..100 scale
+/// (`distance_from_quality`).
+/// 95 is distance 0.1.
+/// The grid draws a 512 px thumb smaller than 512 px in a normal cell, so the
+/// loss stays invisible, and a warm cell differs from a cold one only by that
+/// loss.
+const QUALITY: f32 = 95.0;
+/// The alpha distance of an entry. Zero keeps the alpha channel exact, while
+/// the color channels stay lossy.
+/// A default would follow [`QUALITY`] and band a transparent gradient.
+const ALPHA_DISTANCE: f32 = 0.0;
+/// Header bytes before the codestream.
 /// magic, format, thumb width, thumb height, image width, image height,
 /// source length, source mtime seconds, source mtime nanoseconds, source
 /// path length.
@@ -89,6 +111,11 @@ pub enum CacheError {
     /// The cache file bytes do not match the format.
     #[display("cache file is corrupt")]
     Corrupt,
+    /// The encoder rejected the thumbnail, so this entry never reaches the
+    /// disk. The grid already holds the pixels, so the only loss is the warm
+    /// launch.
+    #[display("cache encode failed")]
+    Encode(#[from] jixel::EncodeError),
     /// This run already wrote [`WRITE_BUDGET`] bytes, so the cache stops
     /// storing. A later run starts the budget over.
     #[display("cache write budget is spent")]
@@ -345,7 +372,7 @@ impl Stamp {
     }
 }
 
-/// The cache file bytes: header and RGBA8 pixels.
+/// The cache file bytes: header and a lossy JPEG XL codestream.
 fn encode_entry(
     stamp: &Stamp,
     path: &Path,
@@ -368,7 +395,15 @@ fn encode_entry(
     if expect != Some(thumb.data.len()) || expect == Some(0) {
         return Err(CacheError::Corrupt);
     }
-    let mut out = Vec::with_capacity(HEADER + src.len() + thumb.data.len());
+    let codestream = jixel::encode_image_with_alpha(
+        &thumb.data,
+        usize::try_from(thumb.width.get()).map_err(|_| CacheError::Corrupt)?,
+        usize::try_from(thumb.height.get()).map_err(|_| CacheError::Corrupt)?,
+        &jixel::EncodeConfig::default()
+            .with_quality(QUALITY)
+            .with_alpha_distance(ALPHA_DISTANCE),
+    )?;
+    let mut out = Vec::with_capacity(HEADER + src.len() + codestream.len());
     for field in [
         u32::from_le_bytes(MAGIC),
         FORMAT,
@@ -384,7 +419,7 @@ fn encode_entry(
     out.extend_from_slice(&stamp.nanos.to_le_bytes());
     out.extend_from_slice(&(src.len() as u32).to_le_bytes());
     out.extend_from_slice(src);
-    out.extend_from_slice(&thumb.data);
+    out.extend_from_slice(&codestream);
     Ok(out)
 }
 
@@ -407,28 +442,31 @@ fn decode_entry(bytes: &[u8], stamp: &Stamp, path: &Path) -> Result<CachedThumb,
     if path_len > MAX_PATH {
         return Err(CacheError::Corrupt);
     }
-    let (stored_path, data) = bytes
+    let (stored_path, codestream) = bytes
         .get(HEADER..HEADER + path_len)
         .zip(bytes.get(HEADER + path_len..))
         .ok_or(CacheError::Corrupt)?;
     if stored != *stamp || stored_path != path.as_os_str().as_bytes() {
         return Err(CacheError::Stale);
     }
-    let bytes = |v: u32| usize::try_from(v).ok();
-    let expect = bytes(thumb_w.get())
-        .and_then(|w| bytes(thumb_h.get()).and_then(|h| w.checked_mul(h)))
-        .and_then(|px| px.checked_mul(4));
-    if expect != Some(data.len()) || expect == Some(0) {
+    let thumb = decode_codestream(codestream)?;
+    if thumb.width != thumb_w || thumb.height != thumb_h {
         return Err(CacheError::Corrupt);
     }
-    Ok(CachedThumb {
-        thumb: DecodedImage {
-            width: thumb_w,
-            height: thumb_h,
-            data: data.to_vec(),
-        },
-        image,
-    })
+    Ok(CachedThumb { thumb, image })
+}
+
+/// Decode the JPEG XL codestream of an entry into RGBA8.
+///
+/// A truncated or damaged codestream answers [`CacheError::Corrupt`], so the
+/// grid decodes the source instead.
+/// The decode runs on a decode worker, never on the main thread.
+fn decode_codestream(codestream: &[u8]) -> Result<DecodedImage, CacheError> {
+    let image = jxl_oxide::JxlImage::builder()
+        .read(codestream)
+        .map_err(|_| CacheError::Corrupt)?;
+    let render = image.render_frame(0).map_err(|_| CacheError::Corrupt)?;
+    crate::fb_to_rgba(&render.image_all_channels()).map_err(|_| CacheError::Corrupt)
 }
 
 /// A cursor over the fixed header, which keeps the reads bounds checked.
@@ -490,6 +528,60 @@ mod tests {
         }
     }
 
+    /// A thumbnail with a smooth color ramp and a transparent gradient, so a
+    /// lost channel or a broken alpha plane shows up in a comparison.
+    /// The ramp stays gentle: a harsh synthetic edge drives the lossy encoder
+    /// far past what a real 512 px thumbnail shows.
+    fn varied_thumb(w: u32, h: u32) -> DecodedImage {
+        let mut data = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                data.extend_from_slice(&[
+                    (x * 40 / w.max(1)) as u8,
+                    (y * 40 / h.max(1)) as u8,
+                    ((x + y) * 20 / w.max(1)) as u8,
+                    (255 - (x * 255 / w.max(1)) as u8),
+                ]);
+            }
+        }
+        DecodedImage {
+            width: ImgW::new(w),
+            height: ImgH::new(h),
+            data,
+        }
+    }
+
+    /// The largest channel difference a lossy entry may show against its
+    /// source, per channel sample.
+    /// A 512 px grid cell draws the cached thumb below its own size, so this
+    /// bound never reads as a visible artifact.
+    const MAX_DELTA: u8 = 40;
+
+    /// Assert that a loaded thumb keeps the shape, the alpha plane and a
+    /// bounded color error.
+    fn assert_lossy_match(out: &DecodedImage, src: &DecodedImage) {
+        assert_eq!((out.width, out.height), (src.width, src.height));
+        assert_eq!(out.data.len(), src.data.len());
+        for (a, b) in out
+            .data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(src.data.as_chunks::<4>().0)
+        {
+            assert_eq!(a[3], b[3], "the alpha channel stays exact");
+            assert!(a[0].abs_diff(b[0]) <= MAX_DELTA, "red: {a:?} against {b:?}");
+            assert!(
+                a[1].abs_diff(b[1]) <= MAX_DELTA,
+                "green: {a:?} against {b:?}"
+            );
+            assert!(
+                a[2].abs_diff(b[2]) <= MAX_DELTA,
+                "blue: {a:?} against {b:?}"
+            );
+        }
+    }
+
     #[test]
     fn key_is_hex_and_distinct_per_path_and_size() {
         let a = key(Path::new("/tmp/a.jpg"), LongSide::new(512));
@@ -505,7 +597,7 @@ mod tests {
         let (dir, cache) = temp_cache();
         let src = dir.path().join("img.png");
         fs::write(&src, b"not really a png").expect("write");
-        let image = thumb(8, 4, 7);
+        let image = varied_thumb(8, 4);
         cache
             .store(
                 &src,
@@ -515,7 +607,7 @@ mod tests {
             )
             .expect("store");
         let out = cache.load(&src, LongSide::new(512)).expect("load");
-        assert_eq!(out.thumb, image);
+        assert_lossy_match(&out.thumb, &image);
         assert_eq!(out.image, (ImgW::new(64), ImgH::new(32)));
         // A second key in the same run takes its own temporary name, so the
         // two workers never write over each other's file.
@@ -599,7 +691,20 @@ mod tests {
             cache.load(&src, LongSide::new(512)),
             Err(CacheError::Corrupt)
         ));
-        // A truncated pixel block is corrupt too.
+        // A truncated codestream is corrupt too.
+        let valid = encode_entry(
+            &Stamp::of(&src).expect("stamp"),
+            &src,
+            &varied_thumb(8, 4),
+            (ImgW::new(8), ImgH::new(4)),
+        )
+        .expect("encode");
+        fs::write(&file, &valid[..valid.len() - 16]).expect("write");
+        assert!(matches!(
+            cache.load(&src, LongSide::new(512)),
+            Err(CacheError::Corrupt)
+        ));
+        // An empty payload is corrupt too.
         let mut bad = Vec::new();
         bad.extend_from_slice(&MAGIC);
         bad.extend_from_slice(&FORMAT.to_le_bytes());
@@ -610,7 +715,7 @@ mod tests {
         bad.extend_from_slice(&stamp.len.to_le_bytes());
         bad.extend_from_slice(&stamp.secs.to_le_bytes());
         bad.extend_from_slice(&stamp.nanos.to_le_bytes());
-        // A matching path, so the pixel length decides.
+        // A matching path, so the header-only payload reaches the decoder.
         let src_bytes = src.as_os_str().as_bytes();
         bad.extend_from_slice(&(src_bytes.len() as u32).to_le_bytes());
         bad.extend_from_slice(src_bytes);
