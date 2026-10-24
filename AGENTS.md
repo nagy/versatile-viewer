@@ -100,6 +100,8 @@ The binary name is `vv`.
   The image view falls back to the placeholder, and the same header lands the source dimensions, so it fits the picture before the first decode.
   `FORMAT` 3 adds the placeholder payload, so a version 2 entry stays unread and re-decodes.
   A cold launch has no entry, so it keeps the grey cell: the placeholder never invents pixels.
+  A cold vector entry still measures its base size (`measure_vector`), because the placeholder job parses the root size with an empty font database when the header misses.
+  The cell and the image-view fit therefore know the shape of an SVG before its decode, and the pass invents no pixels.
   A write beyond the `WRITE_BUDGET` stops the cache for the rest of the run.
   An entry stays past the exit of the viewer, so the next launch starts warm.
   No sweep runs on exit: a stale entry answers `CacheError::Stale` and re-decodes, and an entry whose source is gone stays unread.

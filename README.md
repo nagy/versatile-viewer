@@ -17,7 +17,9 @@ SVGZ decompresses under a size cap. The grid paints a vector cell straight
 at 512 px, so a cell never paints a full-size pixmap only to shrink it. The
 image view keeps the parsed tree and paints a larger tier when the zoom
 settles, so a deep zoom never stretches the base raster: 64 MB at most, one
-paint in flight, and a 25% step before any paint.
+paint in flight, and a 25% step before any paint. A cold vector cell
+measures its shape from a size-only parse, so the grid and the image fit
+never wait for the decode.
 Thumbnails render in a directory grid
 that fills the window, decoded in parallel on a background pool, and sorted
 in natural order (`img2` before `img10`). Every downscale, including the

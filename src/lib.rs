@@ -296,6 +296,19 @@ pub fn decode_thumb(path: &Path, long: LongSide) -> Result<Decoded, DecodeError>
     })
 }
 
+/// The source size of a vector file, measured without painting it.
+///
+/// The placeholder pass runs this on a cache miss, so a cold grid cell and the
+/// image-view fit know the shape of the picture before its decode lands.
+/// A raster format answers None, because its decode reports the size with the
+/// pixels.
+pub(crate) fn measure_vector(path: &Path) -> Option<(ImgW, ImgH)> {
+    if !svg::sniff(path) {
+        return None;
+    }
+    svg::measure(path).ok()
+}
+
 /// Decode a non-vector file with the JXL or the common-format decoder.
 fn decode_raster(path: &Path) -> Result<Decoded, DecodeError> {
     let image = if is_jxl(path) {

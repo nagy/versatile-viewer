@@ -462,13 +462,18 @@ fn store_thumb(cache: &Cache, job: &Job, thumb: &DecodedImage, width: ImgW, heig
 
 /// Run one placeholder job on a worker: the cache header, then the DCT
 /// render.
-/// A miss is normal (a cold directory, a changed source, the cache off), so
-/// the job stays silent and the grid keeps its grey cell.
+/// A miss is normal (a cold directory, a changed source, the cache off).
+/// A miss on a vector file still measures the source size, so its cell and
+/// the image-view fit know the shape before the decode lands.
+/// A miss anywhere else stays silent, and the grid keeps its grey cell.
 fn run_placeholder(cache: &Cache, path: &Path) -> ((ImgW, ImgH), Option<DecodedImage>) {
-    let Ok((hash, image)) = cache.load_placeholder(path, THUMB_LONG_SIDE) else {
-        return ((ImgW::new(0), ImgH::new(0)), None);
-    };
-    (image, hash.render())
+    if let Ok((hash, image)) = cache.load_placeholder(path, THUMB_LONG_SIDE) {
+        return (image, hash.render());
+    }
+    (
+        crate::measure_vector(path).unwrap_or((ImgW::new(0), ImgH::new(0))),
+        None,
+    )
 }
 
 impl Grid {
@@ -1506,6 +1511,36 @@ mod tests {
         let full = refill.full.expect("the keep set keeps the full image");
         assert_eq!((full.width, full.height), (ImgW::new(1024), ImgH::new(512)));
         assert_eq!(refill.image, miss.image);
+    }
+
+    /// A cold vector entry learns its shape from the placeholder pass, so the
+    /// cell and the image-view fit never wait for the decode.
+    #[cfg(all(feature = "cache", feature = "svg"))]
+    #[test]
+    fn a_cold_vector_entry_measures_before_the_decode() {
+        let dir = TempDir::new().unwrap();
+        let svg = dir.path().join("logo.svg");
+        std::fs::write(
+            &svg,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="300" height="100">
+                <rect width="300" height="100" fill="#000000"/>
+            </svg>"##,
+        )
+        .unwrap();
+        // A cache directory with no entry for the file: a cold launch.
+        let cache = Cache::in_dir(dir.path().join("cache"));
+        let (image, rgba) = run_placeholder(&cache, &svg);
+        assert_eq!(image, (ImgW::new(1024), ImgH::new(341)));
+        assert!(rgba.is_none(), "a cold cell keeps the grey cell");
+        // A raster file still reports nothing, because its decode carries the
+        // size.
+        let png = dir.path().join("photo.png");
+        image::RgbaImage::from_pixel(4, 2, image::Rgba([9, 9, 9, 255]))
+            .save(&png)
+            .expect("png");
+        let (image, rgba) = run_placeholder(&cache, &png);
+        assert_eq!(image, (ImgW::new(0), ImgH::new(0)));
+        assert!(rgba.is_none());
     }
 
     #[test]

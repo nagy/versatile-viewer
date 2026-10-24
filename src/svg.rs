@@ -245,6 +245,28 @@ pub fn parse(path: &Path) -> Result<Vector, DecodeError> {
     Ok(Vector { tree })
 }
 
+/// Measure a file without painting it.
+///
+/// The parse answers the root size, which is all a cell and the image-view fit
+/// need before the first paint.
+/// An empty font database skips the glyph work and the system font scan, so a
+/// glyph never moves a root size and the measure stays cheap.
+///
+/// # Errors
+///
+/// The function errors when the file cannot be read, or when usvg rejects it.
+pub(crate) fn measure(path: &Path) -> Result<(ImgW, ImgH), DecodeError> {
+    let bytes = read(path)?;
+    let options = usvg::Options {
+        fontdb: Arc::new(fontdb::Database::new()),
+        resources_dir: None,
+        ..usvg::Options::default()
+    };
+    let tree =
+        usvg::Tree::from_data(&bytes, &options).map_err(|e| DecodeError::Svg(Box::new(e)))?;
+    Ok(Vector { tree }.base_size())
+}
+
 /// Whether the file holds SVG content, decided on the head bytes.
 ///
 /// The code reads a 2-byte magic first: a known raster magic, a JPEG XL
@@ -517,6 +539,36 @@ mod tests {
             (d.image.width, d.image.height),
             (ImgW::new(512), ImgH::new(256))
         );
+    }
+
+    #[test]
+    fn a_measure_reads_the_base_size_without_painting() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("drawing.svg");
+        std::fs::write(
+            &path,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="300" height="100">
+                <text x="10" y="60" font-size="40">vv</text>
+            </svg>"#,
+        )
+        .expect("write");
+        // A glyph never names the root size, so the cheap parse answers the
+        // same pair the full decode reports.
+        assert_eq!(
+            measure(&path).expect("measure"),
+            (ImgW::new(1024), ImgH::new(341))
+        );
+        assert_eq!(
+            parse(&path).expect("parse").base_size(),
+            measure(&path).expect("measure")
+        );
+        // A raster file never reaches the measure, and the caller filters it
+        // out by sniff first.
+        let png = dir.path().join("photo.png");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255]))
+            .save(&png)
+            .expect("png");
+        assert!(!sniff(&png));
     }
 
     #[test]

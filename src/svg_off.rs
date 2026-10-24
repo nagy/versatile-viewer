@@ -61,6 +61,15 @@ pub fn parse(_path: &Path) -> Result<Vector, DecodeError> {
     Err(DecodeError::VectorOff)
 }
 
+/// A build without the `svg` feature cannot measure a vector file.
+///
+/// # Errors
+///
+/// The function always errors with [`DecodeError::VectorOff`].
+pub(crate) fn measure(_path: &Path) -> Result<(ImgW, ImgH), DecodeError> {
+    Err(DecodeError::VectorOff)
+}
+
 /// A build without the `svg` feature cannot decode a vector file.
 ///
 /// # Errors
