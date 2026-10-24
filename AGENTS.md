@@ -47,6 +47,11 @@ The binary name is `vv`.
   Drawing both over the same pixels would double the alpha of an antialiased edge, so the patch hides the whole image where it covers.
 - Grid extension filter: `src/grid.rs` `is_image_path`.
   Keep the crate features in sync.
+- A grid cell holds an `EntrySource`: a `File` opened (and sniffed) lazily at decode time, or a `Plane` with the surface handle and plane index of an already-open source.
+  `Grid::from_surface` makes one cell per plane, with the natural size from `Surface::bounds`, so the layout runs before any decode.
+  A plane cell has no file, so it skips the thumbnail cache and the placeholder pass.
+  The launch turns a multi-plane surface into a plane grid and puts a one-plane surface straight into the image view.
+  `Loader::start_plane` renders one plane, and `Loader::start` is the plane-0 shorthand.
 - Dispatch decode on sniffed content.
   Do not dispatch decode on the file name.
 - Decode and every pixel resize stay off the main thread.

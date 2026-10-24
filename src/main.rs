@@ -56,7 +56,7 @@ use versatile_viewer::{
     DecodedImage, UploadError,
     blurbg::{self, BlurBg},
     dim::{ImgH, ImgW, PreviewPx, RampTime, Rect, WinH, WinW},
-    grid::{DecodeFailure, Grid, GridAction},
+    grid::{DecodeFailure, EntrySource, Grid, GridAction},
     keyrepeat,
     loader::{DecodeMsg, Loader},
     mcp, region, rotate,
@@ -239,6 +239,9 @@ struct ViewState {
     /// window shows.
     /// None for a raster format, which has no more detail to give.
     source: Option<Arc<dyn Surface>>,
+    /// The plane of the open source that the view shows.
+    /// It is 0 for a one-plane source, and the entry's plane for a page.
+    source_plane: usize,
     /// The region patch on screen: the visible part of the document, painted
     /// at the scale the window shows it.
     /// None until the first paint lands, and then the whole-image texture in
@@ -326,20 +329,32 @@ impl ViewState {
         self.crop_gen = self.crop_gen.wrapping_add(1);
     }
 
-    /// Adopt a source that arrived with a decode, so the view can repaint the
-    /// visible region at any zoom.
+    /// Adopt a source that the launch already opened, so the view can repaint
+    /// the visible region at any zoom.
     fn adopt_source(&mut self, source: Option<Arc<dyn Surface>>) {
         self.close_crop();
         self.source = source;
     }
 
-    /// Ask a worker for the source of `path`.
+    /// Ask a worker for the source of an entry, so the view can repaint the
+    /// region its window shows.
     ///
-    /// The grid keeps no source, so an image opened from the grid opens one
-    /// here, off the main thread.
+    /// The grid keeps no source, so an image opened from the grid opens its
+    /// own here, off the main thread.
     /// A raster file answers None at once.
-    fn request_source(&mut self, path: PathBuf) {
+    /// A plane entry already holds an open surface, so the view shares it
+    /// without a read.
+    fn request_source(&mut self, entry: &EntrySource) {
         self.close_crop();
+        self.source_plane = entry.plane();
+        if let EntrySource::Plane { surface, .. } = entry {
+            self.source = Some(Arc::clone(surface));
+            return;
+        }
+        let Some(path) = entry.path() else {
+            return;
+        };
+        let path = path.to_path_buf();
         let (generation, tx) = (self.crop_gen, self.crop_tx.clone());
         rayon::spawn(move || {
             // The sniff reads the head only, so a 200 MB photo never makes a
@@ -409,8 +424,9 @@ impl ViewState {
         }
         self.crop_pending = true;
         let (generation, tx) = (self.crop_gen, self.crop_tx.clone());
+        let plane = self.source_plane;
         rayon::spawn(
-            move || match source.render(View::region(0, paint.into(), scale)) {
+            move || match source.render(View::region(plane, paint.into(), scale)) {
                 Ok(image) => {
                     let _ = tx.send(CropMsg::Crop {
                         generation,
@@ -784,14 +800,14 @@ fn show_entry(
     set_scale_now: bool,
 ) {
     let (win_w, win_h) = (win.0.get(), win.1.get());
-    let (id, tex, w, h, path, queued, thumb, blur) = {
+    let (id, tex, w, h, source, queued, thumb, blur) = {
         let e = &mut grid.entries[idx];
         (
             e.id,
             e.full.take(),
             e.width,
             e.height,
-            e.path.clone(),
+            e.source.clone(),
             e.queued,
             e.texture.is_some(),
             e.blur.clone(),
@@ -800,9 +816,9 @@ fn show_entry(
     st.open_id = Some(id);
     st.mode = Mode::Image;
     st.reset_view();
-    // A new image starts with no region patch: the decode or the source
-    // request names what the window shows.
-    st.close_crop();
+    // A new image starts with no region patch: the source request names what
+    // the window shows.
+    st.request_source(&source);
     if let Some(tex) = tex {
         grid.entries[idx].viewing = true;
         st.view_from_grid = Some(id);
@@ -812,9 +828,6 @@ fn show_entry(
         st.img_h = h.as_f32();
         st.loader = None;
         st.view_loading = false;
-        // The grid keeps no parsed tree, so the view parses it on a worker
-        // before a deeper zoom can repaint.
-        st.request_source(path);
         if set_scale_now {
             st.view_scale = Some((win_w / st.img_w).min(win_h / st.img_h));
         }
@@ -850,10 +863,10 @@ fn show_entry(
         } else {
             let preview_px =
                 PreviewPx::new(rl.get_screen_width().max(rl.get_screen_height()) as u32);
-            match open_surface(&path) {
-                Ok(surface) => Some(Loader::start(surface, preview_px)),
+            match source.open() {
+                Ok((surface, plane)) => Some(Loader::start_plane(surface, plane, preview_px)),
                 Err(err) => {
-                    eprintln!("vv: {}: {err}", path.display());
+                    eprintln!("vv: {}: {err}", source.label());
                     grid.mark_failed(id, DecodeFailure::Decode);
                     None
                 }
@@ -958,42 +971,50 @@ fn main() -> Result<()> {
     // Directory launch: list the directory before opening the window (the
     // title shows the image count).
     // No GL is involved yet.
-    // Single-file launch: no grid.
-    let dir_grid = if path.is_dir() {
-        Some(Grid::from_dir(path)?)
+    // Single-file launch: open the surface now.
+    // A multi-plane surface (a document, say) becomes a grid of its planes;
+    // a one-plane surface goes straight into the image view.
+    let (dir_grid, single_surface) = if path.is_dir() {
+        (Some(Grid::from_dir(path)?), None)
     } else if path.is_file() {
-        None
+        let surface: Arc<dyn Surface> = open_surface(path)?.into();
+        let grid = (surface.plane_count() > 1).then(|| Grid::from_surface(&surface));
+        (grid, Some(surface))
     } else {
         bail!("no such file or directory: {}", path.display());
     };
+    let single_plane = dir_grid.is_none();
 
-    // Single-image launch: render before opening the window, so the window
+    // Single-plane launch: render before opening the window, so the window
     // can be sized to the image.
-    // Directory launch: fixed default window size.
-    // A vector file keeps its surface, so the image view can repaint the
-    // region its window shows.
-    let single_decoded = if dir_grid.is_none() {
-        let surface = open_surface(path)?;
-        let image = surface.render(View::whole(0, 1.0))?;
-        let source: Option<Arc<dyn Surface>> = if svg::sniff(path) {
-            Some(Arc::from(surface))
-        } else {
-            None
-        };
-        Some((image, source))
+    // Directory or plane-grid launch: fixed default window size.
+    // A vector file keeps the surface it opened, so the image view can repaint
+    // the region its window shows.
+    let single_decoded = if single_plane {
+        Some(
+            single_surface
+                .as_ref()
+                .expect("a single-plane launch has a surface")
+                .render(View::whole(0, 1.0))?,
+        )
     } else {
         None
     };
-    // Blur-background source for a single-file launch: computed while the
+    let single_source = if single_plane && svg::sniff(path) {
+        single_surface
+    } else {
+        None
+    };
+    // Blur-background source for a single-plane launch: computed while the
     // RGBA buffer still exists (before the window and GL context exist).
     // The code uploads it once the window is open.
-    let single_blur = if dir_grid.is_none() && blurbg::enabled() {
-        let (image, _) = single_decoded.as_ref().expect("single file decoded");
+    let single_blur = if single_plane && blurbg::enabled() {
+        let image = single_decoded.as_ref().expect("single image decoded");
         Some(blurbg::small_blur(image, blurbg::blur_px()))
     } else {
         None
     };
-    let (win0_w, win0_h) = single_decoded.as_ref().map_or((1024, 768), |(image, _)| {
+    let (win0_w, win0_h) = single_decoded.as_ref().map_or((1024, 768), |image| {
         (image.width.get() as i32, image.height.get() as i32)
     });
 
@@ -1060,6 +1081,7 @@ fn main() -> Result<()> {
         loader: None,
         blur_bg: BlurBg::from_env(),
         source: None,
+        source_plane: 0,
         crop: None,
         crop_pending: false,
         crop_gen: 0,
@@ -1069,7 +1091,7 @@ fn main() -> Result<()> {
         crop_tx,
         crop_rx,
     };
-    if let Some((image, source)) = single_decoded {
+    if let Some(image) = single_decoded {
         st.view_tex = Some(upload_rgba(
             &mut rl,
             &thread,
@@ -1082,7 +1104,7 @@ fn main() -> Result<()> {
             st.view_tex.as_ref().expect("just uploaded"),
             st.pixelated,
         );
-        st.adopt_source(source);
+        st.adopt_source(single_source);
         st.img_w = image.width.as_f32();
         st.img_h = image.height.as_f32();
         if let Some(data) = single_blur {
@@ -1260,7 +1282,7 @@ fn main() -> Result<()> {
                         .entries
                         .iter()
                         .find(|e| e.id == id)
-                        .map(|e| image_title(&e.path))
+                        .and_then(|e| e.source.path().map(image_title))
                 })
                 .unwrap_or_else(|| launch_title.clone());
             rl.set_window_title(&thread, &title);

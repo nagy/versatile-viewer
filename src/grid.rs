@@ -65,9 +65,87 @@ use crate::{
     DecodedImage,
     blurbg::{self},
     dim::{ImgH, ImgW, LongSide, Rect, WinH, WinW},
-    surface::{SurfaceError, View, open_surface},
+    surface::{Surface, SurfaceError, View, open_surface},
     thumbcache::Cache,
 };
+
+/// What a grid cell shows: a file on disk, or one plane of an already-open
+/// surface (an in-memory source, or one page of a multi-plane one).
+///
+/// The variants stay cheap to clone: a file variant carries a path, a plane
+/// variant shares the surface behind an [`Arc`].
+///
+/// The type implements [`Debug`] by hand, because a boxed [`Surface`] trait
+/// object does not.
+#[derive(Clone)]
+pub enum EntrySource {
+    /// A file on disk, opened (and sniffed) lazily at decode time.
+    File(PathBuf),
+    /// Plane `plane` of an open surface.
+    Plane {
+        /// The open surface.
+        surface: Arc<dyn Surface>,
+        /// The plane index within it.
+        plane: usize,
+    },
+}
+
+impl std::fmt::Debug for EntrySource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EntrySource::File(path) => f.debug_tuple("File").field(path).finish(),
+            EntrySource::Plane { plane, .. } => {
+                f.debug_struct("Plane").field("plane", plane).finish()
+            }
+        }
+    }
+}
+
+impl EntrySource {
+    /// The file path, for the file variant.
+    /// An open plane has no file of its own.
+    #[must_use]
+    pub fn path(&self) -> Option<&Path> {
+        match self {
+            EntrySource::File(path) => Some(path),
+            EntrySource::Plane { .. } => None,
+        }
+    }
+
+    /// The plane this entry shows.
+    #[must_use]
+    pub fn plane(&self) -> usize {
+        match self {
+            EntrySource::File(_) => 0,
+            EntrySource::Plane { plane, .. } => *plane,
+        }
+    }
+
+    /// A human-readable label for log lines.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            EntrySource::File(path) => path.display().to_string(),
+            EntrySource::Plane { plane, .. } => format!("plane {plane}"),
+        }
+    }
+
+    /// The surface for this entry, with its plane index.
+    ///
+    /// # Errors
+    ///
+    /// The function errors when the file variant cannot be read or the
+    /// content is not a decodable surface.
+    pub fn open(&self) -> Result<(Arc<dyn Surface>, usize), SurfaceError> {
+        match self {
+            EntrySource::File(path) => {
+                let surface: Arc<dyn Surface> = open_surface(path)?.into();
+                Ok((surface, 0))
+            }
+            EntrySource::Plane { surface, plane } => Ok((Arc::clone(surface), *plane)),
+        }
+    }
+}
 
 const MARGIN: f32 = 8.0;
 const GAP: f32 = 8.0;
@@ -162,7 +240,7 @@ struct DecodeOk {
 #[derive(Debug, Clone)]
 struct Job {
     id: u64,
-    path: PathBuf,
+    source: EntrySource,
     /// The job must return the full-resolution image, because the entry holds
     /// a full-res texture: it belongs to the keep set of the image view (the
     /// open entry and its prefetched neighbors).
@@ -295,13 +373,17 @@ pub enum DecodeFailure {
     TextureUpload,
 }
 
-/// One grid cell: the image file and its uploaded full-resolution texture.
+/// One grid cell: the source it shows plus its uploaded full-resolution
+/// texture.
 /// The code draws thumbs by cropping a center square, so a resize never
 /// needs a re-decode.
 /// The GPU scales the texture down every frame.
+///
+/// The cell keeps an [`EntrySource`], so a file, one plane of an open surface
+/// and a future in-memory source all sit in a cell.
 #[derive(Debug)]
 pub struct GridEntry {
-    pub path: PathBuf,
+    pub source: EntrySource,
     /// Full-resolution image dimensions (as decoded, not the thumb's).
     pub width: ImgW,
     pub height: ImgH,
@@ -392,8 +474,11 @@ fn run_job(job: &Job, cache: &Cache) -> Result<DecodeOk, SurfaceError> {
     // directory misses once per file.
     // A job that needs the full image skips the cache: the file decode
     // carries the thumb as well, so a cache read would only add a read.
+    // An open plane has no file and no cache entry, so it always renders.
+    let path = job.source.path();
     if !job.want_full
-        && let Some(hit) = cache.load(&job.path, THUMB_LONG_SIDE).ok()
+        && let Some(path) = path
+        && let Some(hit) = cache.load(path, THUMB_LONG_SIDE).ok()
     {
         // The cached thumb already measures [`THUMB_LONG_SIDE`], so the code
         // uploads it as is and the GPU scales it in the cell.
@@ -408,10 +493,10 @@ fn run_job(job: &Job, cache: &Cache) -> Result<DecodeOk, SurfaceError> {
             full: None,
         });
     }
-    let surface = open_surface(&job.path)?;
+    let (surface, plane) = job.source.open()?;
     // The plane size is the source size the entry keeps, so a vector file
     // measures its base raster and never its thumbnail.
-    let bounds = surface.bounds(0)?;
+    let bounds = surface.bounds(plane)?;
     let image = (
         ImgW::new(bounds.w.round() as u32),
         ImgH::new(bounds.h.round() as u32),
@@ -421,11 +506,11 @@ fn run_job(job: &Job, cache: &Cache) -> Result<DecodeOk, SurfaceError> {
         // A vector file paints the thumbnail size directly; a raster format
         // decodes in full and downscales inside the surface render, on the
         // worker.
-        let thumb = surface.render(View::whole(0, thumb_scale(bounds)))?;
+        let thumb = surface.render(View::whole(plane, thumb_scale(bounds)))?;
         let blur = job
             .blur_enabled
             .then(|| blurbg::small_blur(&thumb, job.blur_px));
-        store_thumb(cache, job, &thumb, image.0, image.1);
+        store_thumb(cache, path, &thumb, image.0, image.1);
         return Ok(DecodeOk {
             thumb,
             image,
@@ -433,14 +518,14 @@ fn run_job(job: &Job, cache: &Cache) -> Result<DecodeOk, SurfaceError> {
             full: None,
         });
     }
-    let full = surface.render(View::whole(0, 1.0))?;
+    let full = surface.render(View::whole(plane, 1.0))?;
     let blur = job
         .blur_enabled
         .then(|| blurbg::small_blur(&full, job.blur_px));
     // Borrow the decoded buffer for the thumb: a clone of a large image costs
     // hundreds of megabytes.
     let thumb = crate::downscale_rgba_ref(&full.data, full.width, full.height, THUMB_LONG_SIDE);
-    store_thumb(cache, job, &thumb, image.0, image.1);
+    store_thumb(cache, path, &thumb, image.0, image.1);
     // The keep-set refill is the only job that carries the full image to the
     // main thread; otherwise the large buffer drops here.
     let full = job.want_full.then_some(full);
@@ -464,10 +549,20 @@ fn thumb_scale(bounds: crate::surface::Size) -> f32 {
 /// Put the thumbnail of a fresh decode into the cache.
 /// A cache failure stays silent: the grid already holds the thumbnail, and a
 /// missing cache home is a normal setup.
-fn store_thumb(cache: &Cache, job: &Job, thumb: &DecodedImage, width: ImgW, height: ImgH) {
+/// A plane entry has no file, so it stores nothing.
+fn store_thumb(
+    cache: &Cache,
+    path: Option<&Path>,
+    thumb: &DecodedImage,
+    width: ImgW,
+    height: ImgH,
+) {
+    let Some(path) = path else {
+        return;
+    };
     // The thumb already measures [`THUMB_LONG_SIDE`], which is the entry size,
     // so the store copies no pixels.
-    let _ = cache.store(&job.path, THUMB_LONG_SIDE, thumb, (width, height));
+    let _ = cache.store(path, THUMB_LONG_SIDE, thumb, (width, height));
 }
 
 /// Run one placeholder job on a worker: the cache header, then the DCT
@@ -515,7 +610,7 @@ impl Grid {
             .into_iter()
             .enumerate()
             .map(|(i, path)| GridEntry {
-                path,
+                source: EntrySource::File(path),
                 width: ImgW::new(0),
                 height: ImgH::new(0),
                 texture: None,
@@ -538,7 +633,10 @@ impl Grid {
         let (ph_tx, placeholder_rx) = channel::<PlaceholderResult>();
         if cache.dir().is_some() {
             for e in &entries {
-                let (id, path) = (e.id, e.path.clone());
+                let Some(path) = e.source.path() else {
+                    continue;
+                };
+                let (id, path) = (e.id, path.to_path_buf());
                 let cache = Arc::clone(&cache);
                 let tx = ph_tx.clone();
                 rayon::spawn(move || {
@@ -549,13 +647,81 @@ impl Grid {
         }
         drop(ph_tx);
 
-        Ok(Grid {
+        Ok(Self::from_parts(
+            entries,
+            cache,
+            res_tx,
+            res_rx,
+            placeholder_rx,
+        ))
+    }
+
+    /// One entry per plane of `surface`, so a multi-plane source (a document,
+    /// say) browses like a directory.
+    /// The natural size comes from [`Surface::bounds`], so the grid can lay
+    /// out before any decode.
+    /// An open plane has no file behind it, so the thumbnail cache and the
+    /// placeholder pass stay out of its path.
+    #[must_use]
+    pub fn from_surface(surface: &Arc<dyn Surface>) -> Grid {
+        let entries: Vec<GridEntry> = (0..surface.plane_count())
+            .map(|plane| {
+                let (width, height) =
+                    surface
+                        .bounds(plane)
+                        .map_or((ImgW::new(0), ImgH::new(0)), |size| {
+                            (
+                                ImgW::new(size.w.ceil() as u32),
+                                ImgH::new(size.h.ceil() as u32),
+                            )
+                        });
+                GridEntry {
+                    source: EntrySource::Plane {
+                        surface: Arc::clone(surface),
+                        plane,
+                    },
+                    width,
+                    height,
+                    texture: None,
+                    placeholder: None,
+                    full: None,
+                    id: plane as u64,
+                    queued: false,
+                    failed: None,
+                    viewing: false,
+                    blur: None,
+                }
+            })
+            .collect();
+        let (res_tx, res_rx) = channel::<DecodeResult>();
+        // No entry has a file, so the placeholder pass has no work and its
+        // sender drops at once.
+        let (ph_tx, placeholder_rx) = channel::<PlaceholderResult>();
+        drop(ph_tx);
+        Self::from_parts(
+            entries,
+            Arc::new(Cache::new()),
+            res_tx,
+            res_rx,
+            placeholder_rx,
+        )
+    }
+
+    /// Assemble a grid from its entries and its worker channels.
+    fn from_parts(
+        entries: Vec<GridEntry>,
+        cache: Arc<Cache>,
+        result_tx: Sender<DecodeResult>,
+        result_rx: Receiver<DecodeResult>,
+        placeholder_rx: Receiver<PlaceholderResult>,
+    ) -> Grid {
+        Grid {
             entries,
             selected: 0,
             visual: None,
             drag: None,
-            result_tx: res_tx,
-            result_rx: res_rx,
+            result_tx,
+            result_rx,
             placeholder_rx,
             inflight: 0,
             layout_cache: RefCell::new(None),
@@ -565,7 +731,7 @@ impl Grid {
             blur_enabled: blurbg::enabled(),
             blur_px: blurbg::blur_px(),
             cache,
-        })
+        }
     }
 
     /// Drain finished background decodes, which upload textures on the main
@@ -653,7 +819,7 @@ impl Grid {
                     tex.set_texture_filter(thread, TextureFilter::TEXTURE_FILTER_BILINEAR);
                     e.placeholder = Some(tex);
                 }
-                Err(err) => eprintln!("vv: {}: {err:#}", e.path.display()),
+                Err(err) => eprintln!("vv: {}: {err:#}", e.source.label()),
             }
         }
     }
@@ -704,14 +870,14 @@ impl Grid {
                                         // Opening falls back to streaming.
                                         eprintln!(
                                             "vv: {}: {err:#} (full-res texture skipped)",
-                                            e.path.display()
+                                            e.source.label()
                                         );
                                     }
                                 }
                             }
                         }
                         Err(err) => {
-                            eprintln!("vv: {}: {err:#}", self.entries[i].path.display());
+                            eprintln!("vv: {}: {err:#}", self.entries[i].source.label());
                             let e = &mut self.entries[i];
                             e.queued = false;
                             e.failed = Some(DecodeFailure::TextureUpload);
@@ -742,7 +908,7 @@ impl Grid {
                         match crate::upload_rgba(rl, thread, &full.data, full.width, full.height) {
                             Ok(ft) => e.full = Some(ft),
                             Err(err) => {
-                                eprintln!("vv: {}: {err:#}", e.path.display());
+                                eprintln!("vv: {}: {err:#}", e.source.label());
                                 e.failed = Some(DecodeFailure::TextureUpload);
                             }
                         }
@@ -763,7 +929,7 @@ impl Grid {
                 Err(err) => {
                     eprintln!(
                         "vv: {}: decode failed: {err}",
-                        self.entries[i].path.display()
+                        self.entries[i].source.label()
                     );
                     let e = &mut self.entries[i];
                     e.queued = false;
@@ -824,7 +990,7 @@ impl Grid {
             self.inflight += 1;
             let job = Job {
                 id: e.id,
-                path: e.path.clone(),
+                source: e.source.clone(),
                 // Only a keep-set entry needs the full texture. A cold entry
                 // outside it decodes for its thumbnail only.
                 want_full: keep.contains(&e.id),
@@ -1444,7 +1610,7 @@ mod tests {
         let cache = Cache::in_dir(dir.path().join("cache"));
         let job = Job {
             id: 0,
-            path: png,
+            source: EntrySource::File(png.clone()),
             want_full: false,
             blur_enabled: false,
             blur_px: LongSide::new(64),
@@ -1453,7 +1619,7 @@ mod tests {
         assert!(miss.full.is_none(), "a thumb-only job keeps no full image");
         assert_eq!(miss.image, (ImgW::new(64), ImgH::new(32)));
         assert!(
-            cache.load(&job.path, THUMB_LONG_SIDE).is_ok(),
+            cache.load(&png, THUMB_LONG_SIDE).is_ok(),
             "the decode stores a thumbnail"
         );
         // The second job takes the cached thumbnail and decodes nothing.
@@ -1495,7 +1661,7 @@ mod tests {
         let cache = Cache::in_dir(dir.path().join("cache"));
         let job = Job {
             id: 0,
-            path: svg,
+            source: EntrySource::File(svg),
             want_full: false,
             blur_enabled: false,
             blur_px: LongSide::new(64),
@@ -1787,7 +1953,14 @@ mod tests {
         let names: Vec<String> = grid
             .entries
             .iter()
-            .map(|e| e.path.file_name().unwrap().to_string_lossy().to_string())
+            .map(|e| {
+                e.source
+                    .path()
+                    .and_then(|p| p.file_name())
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            })
             .collect();
         assert_eq!(names, vec!["b.png", "c.png"]);
     }
@@ -1805,7 +1978,14 @@ mod tests {
         let names: Vec<String> = grid
             .entries
             .iter()
-            .map(|e| e.path.file_name().unwrap().to_string_lossy().to_string())
+            .map(|e| {
+                e.source
+                    .path()
+                    .and_then(|p| p.file_name())
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            })
             .collect();
         assert_eq!(names, vec!["Img1.png", "img2.png", "img10.png"]);
     }
@@ -1886,5 +2066,79 @@ mod tests {
             let out = step_selection(sel, n, step, delta);
             proptest::prop_assert!(out < n);
         }
+    }
+
+    /// A surface with `n` planes of 4 x 2 units and no file behind it.
+    /// It stands in for a document, where every page is one plane.
+    struct Planes(usize);
+
+    impl Surface for Planes {
+        fn plane_count(&self) -> usize {
+            self.0
+        }
+
+        fn bounds(&self, plane: usize) -> Result<crate::surface::Size, SurfaceError> {
+            if plane >= self.0 {
+                return Err(SurfaceError::Plane(plane));
+            }
+            Ok(crate::surface::Size { w: 4.0, h: 2.0 })
+        }
+
+        fn render(&self, view: View) -> Result<DecodedImage, SurfaceError> {
+            if view.plane >= self.0 {
+                return Err(SurfaceError::Plane(view.plane));
+            }
+            let (w, h) = (
+                ImgW::new((4.0 * view.scale).round().max(1.0) as u32),
+                ImgH::new((2.0 * view.scale).round().max(1.0) as u32),
+            );
+            Ok(DecodedImage {
+                width: w,
+                height: h,
+                data: vec![0u8; w.get() as usize * h.get() as usize * 4],
+            })
+        }
+
+        fn stream_path(&self) -> Option<&Path> {
+            None
+        }
+    }
+
+    #[test]
+    fn from_surface_makes_one_entry_per_plane() {
+        // A multi-plane source browses like a directory: one entry per plane,
+        // the natural size is known up front, and each entry renders its own
+        // plane.
+        let surface: Arc<dyn Surface> = Arc::new(Planes(3));
+        let grid = Grid::from_surface(&surface);
+        assert_eq!(grid.entries.len(), 3);
+        for (i, e) in grid.entries.iter().enumerate() {
+            assert_eq!((e.width, e.height), (ImgW::new(4), ImgH::new(2)));
+            assert!(matches!(
+                e.source,
+                EntrySource::Plane { plane, .. } if plane == i
+            ));
+            assert_eq!(e.id, i as u64);
+        }
+
+        // A plane entry renders without a file behind it.
+        let (surface, plane) = grid.entries[1].source.open().unwrap();
+        assert_eq!(plane, 1);
+        let out = surface.render(View::whole(plane, 1.0)).unwrap();
+        assert_eq!((out.width, out.height), (ImgW::new(4), ImgH::new(2)));
+    }
+
+    #[test]
+    fn entry_source_open_reads_a_file_and_labels() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("a.png");
+        image::DynamicImage::new_rgb8(3, 2).save(&path).unwrap();
+        let source = EntrySource::File(path.clone());
+        assert_eq!(source.path(), Some(path.as_path()));
+        assert!(source.label().ends_with("a.png"));
+        let (surface, plane) = source.open().unwrap();
+        assert_eq!(plane, 0);
+        assert_eq!(surface.plane_count(), 1);
+        assert_eq!(surface.stream_path(), None, "a PNG does not stream");
     }
 }

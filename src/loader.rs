@@ -138,6 +138,15 @@ impl Loader {
     /// Full-size RGBA every `PREVIEW_INTERVAL` wastes allocations.
     #[must_use]
     pub fn start(surface: Box<dyn Surface>, preview_px: PreviewPx) -> Loader {
+        Self::start_plane(surface.into(), 0, preview_px)
+    }
+
+    /// Start the worker for one plane of `surface`.
+    /// [`Self::start`] is the plane-0 shorthand.
+    /// Only plane 0 of a one-plane surface can stream: the progressive byte
+    /// path renders the whole file into that plane.
+    #[must_use]
+    pub fn start_plane(surface: Arc<dyn Surface>, plane: usize, preview_px: PreviewPx) -> Loader {
         let (tx, rx) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
@@ -149,6 +158,7 @@ impl Loader {
         std::thread::spawn(move || {
             match stream(
                 surface.as_ref(),
+                plane,
                 &worker_cancel,
                 &tx,
                 blur_enabled,
@@ -191,19 +201,23 @@ impl Drop for Loader {
 #[allow(clippy::too_many_arguments)]
 fn stream(
     surface: &dyn Surface,
+    plane: usize,
     cancel: &AtomicBool,
     tx: &Sender<Result<DecodeMsg, LoadError>>,
     blur_enabled: bool,
     blur_px: LongSide,
     preview_px: PreviewPx,
 ) -> Result<Option<DecodeMsg>, LoadError> {
-    if let Some(path) = surface.stream_path() {
+    if plane == 0
+        && surface.plane_count() == 1
+        && let Some(path) = surface.stream_path()
+    {
         // A JPEG XL source: the byte stream carries progressive previews.
         return stream_jxl(path, cancel, tx, blur_enabled, blur_px, preview_px);
     }
 
     // Dimensions first, so the view fits the plane before the render lands.
-    let info = surface.bounds(0)?;
+    let info = surface.bounds(plane)?;
     let (width, height) = (
         ImgW::new(info.w.ceil() as u32),
         ImgH::new(info.h.ceil() as u32),
@@ -216,7 +230,7 @@ fn stream(
         let long = info.w.max(info.h).max(1.0);
         let scale = (preview_px.get() as f32 / long).min(1.0);
         if scale < 1.0
-            && let Ok(preview) = surface.render(View::whole(0, scale))
+            && let Ok(preview) = surface.render(View::whole(plane, scale))
         {
             let blur = blur_enabled.then(|| blurbg::small_blur(&preview, blur_px));
             let _ = tx.send(Ok(DecodeMsg::Preview {
@@ -226,7 +240,7 @@ fn stream(
         }
     }
 
-    let image = surface.render(View::whole(0, 1.0))?;
+    let image = surface.render(View::whole(plane, 1.0))?;
     let blur = blur_enabled.then(|| blurbg::small_blur(&image, blur_px));
     Ok(Some(DecodeMsg::Done { image, blur }))
 }

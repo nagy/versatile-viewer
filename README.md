@@ -46,9 +46,15 @@ Every showable source is a `Surface` (`src/surface.rs`): an image file is a
 one-plane surface, and a raster file and a vector file differ only in the
 backend behind the trait. A surface renders a `View` (a plane index, an
 optional region and a scale) into an RGBA buffer, and it reports the natural
-size of each plane. The grid, the streaming loader and the image view speak
-surfaces, plane indices and regions, never file formats. `src/sign.rs`
-decides the decoder from the file content, not the file name.
+size of each plane. A grid cell holds an `EntrySource`: a file to open lazily,
+or the surface handle and plane index of an open source, so a multi-plane
+surface browses as a plane grid. The grid, the streaming loader and the image
+view speak surfaces, plane indices and regions, never file formats.
+`src/sign.rs` decides the decoder from the file content, not the file name.
+
+The grid holds one cell per source. A cell is a file, or one plane of an
+already-open surface. A multi-plane surface (a document, say) therefore
+browses as a plane grid. See `docs/adr/0001-*.md`.
 
 [jxl-oxide]: https://crates.io/crates/jxl-oxide
 [image]: https://crates.io/crates/image
