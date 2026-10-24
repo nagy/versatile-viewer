@@ -2071,7 +2071,6 @@ mod tests {
     /// A surface with `n` planes of 4 x 2 units and no file behind it.
     /// It stands in for a document, where every page is one plane.
     struct Planes(usize);
-
     impl Surface for Planes {
         fn plane_count(&self) -> usize {
             self.0
@@ -2099,8 +2098,10 @@ mod tests {
             })
         }
 
-        fn stream_path(&self) -> Option<&Path> {
-            None
+        fn progressive(
+            &self,
+        ) -> Result<Option<Box<dyn crate::surface::ChunkSource>>, SurfaceError> {
+            Ok(None)
         }
     }
 
@@ -2139,6 +2140,9 @@ mod tests {
         let (surface, plane) = source.open().unwrap();
         assert_eq!(plane, 0);
         assert_eq!(surface.plane_count(), 1);
-        assert_eq!(surface.stream_path(), None, "a PNG does not stream");
+        assert!(
+            surface.progressive().unwrap().is_none(),
+            "a PNG does not stream"
+        );
     }
 }

@@ -15,7 +15,10 @@
 //! Rendering happens off the main thread (rayon pool and loader worker).
 //! The main thread only uploads the returned RGBA buffers as GPU textures.
 
-use std::path::{Path, PathBuf};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
 use derive_more::{Display, Error, From};
 
@@ -122,6 +125,44 @@ impl View {
     }
 }
 
+/// A byte stream for progressive decoding.
+///
+/// A surface returns one of these when it can decode better and better while
+/// bytes arrive (JPEG XL today).
+/// It hides where the bytes come from, so an in-memory or network source can
+/// stream without a file path.
+/// The loader reads fixed-size chunks until [`ChunkSource::read`] returns 0.
+pub trait ChunkSource: Send {
+    /// Read up to `buf.len()` bytes into `buf`.
+    ///
+    /// A short read is normal; the caller reads again.
+    ///
+    /// # Errors
+    ///
+    /// The function errors when the underlying source fails (a read error, a
+    /// dropped connection).
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize>;
+}
+
+/// A [`ChunkSource`] over a memory-mapped file.
+///
+/// The map keeps the SIGBUS contract of the streaming loader: a file rewritten
+/// under the map faults instead of returning short data.
+/// A chunk copy out of the map costs no read syscall.
+struct FileChunks {
+    map: memmap2::Mmap,
+    pos: usize,
+}
+
+impl ChunkSource for FileChunks {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = buf.len().min(self.map.len() - self.pos);
+        buf[..n].copy_from_slice(&self.map[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
 /// One renderable surface.
 /// Implementations must be usable from multiple threads at once
 /// (`Send + Sync`): grid decodes and the streaming loader call
@@ -181,12 +222,17 @@ pub trait Surface: Send + Sync {
         }
     }
 
-    /// The file behind this surface, when a byte stream can drive a
-    /// progressive decode.
+    /// A byte stream for progressive decoding, or `None` when the source has
+    /// no progressive path.
     ///
-    /// A source with no progressive path answers None, and the load happens in
-    /// one step.
-    fn stream_path(&self) -> Option<&Path>;
+    /// A source whose bytes improve the picture as they arrive (JPEG XL)
+    /// returns one; the loader reads it and sends previews.
+    /// `None` means the load happens in one step.
+    ///
+    /// # Errors
+    ///
+    /// The function errors when the stream cannot be opened.
+    fn progressive(&self) -> Result<Option<Box<dyn ChunkSource>>, SurfaceError>;
 
     /// Whether the loader sends a fast low-resolution preview before the
     /// full-quality render.
@@ -339,9 +385,16 @@ impl Surface for ImageSurface {
         }
     }
 
-    fn stream_path(&self) -> Option<&Path> {
+    fn progressive(&self) -> Result<Option<Box<dyn ChunkSource>>, SurfaceError> {
         // Only a JPEG XL source decodes progressively.
-        self.jxl.then_some(self.path.as_path())
+        if !self.jxl {
+            return Ok(None);
+        }
+        let file = std::fs::File::open(&self.path)?;
+        // SAFETY: the code only reads the map, and the file behind it stays
+        // open for the length of the load.
+        let map = unsafe { memmap2::Mmap::map(&file)? };
+        Ok(Some(Box::new(FileChunks { map, pos: 0 })))
     }
 }
 
@@ -416,8 +469,9 @@ impl Surface for VectorSurface {
             .render_region(crate::region::Crop::from(region), view.scale)?)
     }
 
-    fn stream_path(&self) -> Option<&Path> {
-        None
+    fn progressive(&self) -> Result<Option<Box<dyn ChunkSource>>, SurfaceError> {
+        // A vector file parses and paints in one step.
+        Ok(None)
     }
 }
 
@@ -673,11 +727,66 @@ mod tests {
         let container = dir.path().join("container.jxl");
         std::fs::write(&container, [0x00, 0x00, 0x00, 0x0c, b'J', b'X', b'L', b' ']).unwrap();
         let surface = ImageSurface::new(&container);
-        assert!(surface.stream_path().is_some());
+        assert!(surface.progressive().unwrap().is_some());
 
         let png = write_png(dir.path(), "img.png", 1, 1);
         let surface = ImageSurface::new(&png);
-        assert!(surface.stream_path().is_none());
+        assert!(surface.progressive().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_file_chunk_source_streams_the_whole_file() {
+        // The stream reads the file to its end and reports a clean end of
+        // stream, so the loader needs no file path of its own.
+        let dir = temp_dir();
+        let container = dir.path().join("bytes.jxl");
+        std::fs::write(&container, [0xffu8, 0x0a, 1, 2, 3, 4, 5]).unwrap();
+        let mut source = ImageSurface::new(&container)
+            .progressive()
+            .unwrap()
+            .expect("a JXL source streams");
+        let mut got = Vec::new();
+        let mut buf = [0u8; 3];
+        loop {
+            let n = source.read(&mut buf).unwrap();
+            assert!(n <= buf.len());
+            if n == 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(got, [0xff, 0x0a, 1, 2, 3, 4, 5]);
+    }
+
+    /// An in-memory [`ChunkSource`], to prove progressive decoding needs no
+    /// file path.
+    struct MemoryChunks {
+        data: Vec<u8>,
+        pos: usize,
+    }
+
+    impl ChunkSource for MemoryChunks {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = buf.len().min(self.data.len() - self.pos);
+            buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn a_chunk_source_can_be_in_memory() {
+        let mut src = MemoryChunks {
+            data: b"hello".to_vec(),
+            pos: 0,
+        };
+        let mut buf = [0u8; 2];
+        assert_eq!(src.read(&mut buf).unwrap(), 2);
+        assert_eq!(&buf, b"he");
+        assert_eq!(src.read(&mut buf).unwrap(), 2);
+        assert_eq!(&buf, b"ll");
+        assert_eq!(src.read(&mut buf).unwrap(), 1);
+        assert_eq!(src.read(&mut buf).unwrap(), 0, "end of stream");
     }
 
     #[test]
@@ -745,7 +854,7 @@ mod tests {
         assert_eq!((base.width, base.height), (ImgW::new(1024), ImgH::new(512)));
         // The left half paints red.
         assert_eq!(&base.data[..4], &[255, 0, 0, 255]);
-        assert!(surface.stream_path().is_none());
+        assert!(surface.progressive().unwrap().is_none());
         assert!(!surface.previews());
     }
 
@@ -835,8 +944,8 @@ mod tests {
             })
         }
 
-        fn stream_path(&self) -> Option<&Path> {
-            None
+        fn progressive(&self) -> Result<Option<Box<dyn ChunkSource>>, SurfaceError> {
+            Ok(None)
         }
     }
 
@@ -899,8 +1008,8 @@ mod tests {
             self.render_whole(view.plane, view.scale)
         }
 
-        fn stream_path(&self) -> Option<&Path> {
-            None
+        fn progressive(&self) -> Result<Option<Box<dyn ChunkSource>>, SurfaceError> {
+            Ok(None)
         }
     }
 

@@ -26,13 +26,15 @@ The binary name is `vv`.
   The host font database loads once per process (`fontdb`, `OnceLock`), so `<text>` renders with real fonts and a whole directory pays one scan.
   `resvg` covers the static subset only: no script, no animation, and `raster-images` stays off, so an embedded JPEG/WebP/GIF draws nothing while an embedded PNG does.
   A retained `usvg::Tree` (`svg::Vector`) paints the view again, so the seam for a deeper zoom stays.
-- Every showable source is a `src/surface.rs` `Surface`: `plane_count`, `bounds`, `render_whole`, `render`, `stream_path` and `previews`.
+- Every showable source is a `src/surface.rs` `Surface`: `plane_count`, `bounds`, `render_whole`, `render`, `progressive` and `previews`.
   `open_surface` sniffs the content with `src/sign.rs` and picks the backend: a raster file (`ImageSurface`) or a vector file (`VectorSurface`).
   A backend writes `render_whole`; `render` is a provided method that renders the whole plane and crops the region out of it.
   A backend with a region anchor (the vector tree, a PDF rasterizer later) overrides `render` to pay only for the pixels the caller asked for, and returns `SurfaceError::Unsupported` rather than the whole plane for a region it cannot serve.
   A `View` names a plane, an optional `Region` and a scale (output pixels per surface unit), so the grid asks for a thumbnail, the loader for the whole plane and the image view for the patch it shows.
   `src/sign.rs` owns the content sniffing (`is_jxl`, `file_magic`, `is_common_magic`, `format`, `dimensions`), and both the surface layer and `svg.rs` use it.
+  `Surface::progressive` returns a `Box<dyn ChunkSource>` and not a path, so an in-memory or network source can stream, and the default `Ok(None)` means one step.
   A raster plane measures the capped size it renders, so `bounds` and the pixels of a scale-1.0 render agree.
+  The trait decisions live in `docs/adr/0001-surface-one-region-based-render-trait.md`.
 - The image view repaints the region its window shows, from the open surface.
   `src/region.rs` holds the pure geometry and policy: `crop`, `to_screen`, `to_image`, `Crop`, `worth_painting`, `MARGIN`, `SCALE_SLACK`, `QUIET`.
   A patch covers the window plus `MARGIN` (0.25 of each side), in source pixels, so the paint area follows the window and a deep zoom costs no more pixels than a shallow one.
@@ -65,7 +67,8 @@ The binary name is `vv`.
   Do not call `image::imageops::resize` for a downscale: it is several times slower.
   Keep the `rayon` feature of `fast_image_resize` off, so a resize never spawns nested workers inside a decode job.
   `VV_TIMING=1` prints upload cost and slow frames.
-- The streaming JXL loader memory-maps the file (`memmap2`) and feeds slices of the map to jxl-oxide.
+- The streaming JXL loader reads fixed-size chunks from the surface's `ChunkSource` (`src/surface.rs`) and feeds them to jxl-oxide.
+  The file-backed stream memory-maps the file (`memmap2`), so a chunk copy costs no read syscall.
   A file rewritten under the map faults with SIGBUS instead of reading short data.
 - Sort grid entries in natural order with `natord`, so `img2` comes before `img10`.
 - Tests: `proptest` covers the pure helpers (layout, visual selection, selection step, the resize fit, the ramp).

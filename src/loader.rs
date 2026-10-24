@@ -3,9 +3,10 @@
 //! The loader renders one [`Surface`] plane off the main thread.
 //! It streams results back over a channel.
 //! JPEG XL decodes progressively.
-//! The worker reads the surface's byte stream and feeds it into jxl-oxide.
-//! The file behind a JPEG XL source stays memory-mapped, so the worker feeds
-//! slices of the map instead of copies of a read buffer.
+//! The worker reads fixed-size chunks from the surface's byte stream
+//! ([`crate::surface::ChunkSource`]) and feeds them into jxl-oxide.
+//! The stream hides where the bytes come from, so a source with no file can
+//! still stream, and the file-backed one memory-maps the file.
 //! jxl-oxide renders a blurry full-size preview long before all bytes arrive.
 //! The worker sends the final full-quality render when decoding completes.
 //! Every other content renders in one step, and it announces the plane size
@@ -20,7 +21,6 @@
 //! short data, so the viewer assumes the files it opens stay put.
 
 use std::{
-    path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -38,7 +38,7 @@ use crate::{
     downscale_rgba,
     error::DecodeError,
     fb_to_rgba,
-    surface::{Surface, SurfaceError, View},
+    surface::{ChunkSource, Surface, SurfaceError, View},
 };
 
 /// A failed streaming load.
@@ -210,10 +210,17 @@ fn stream(
 ) -> Result<Option<DecodeMsg>, LoadError> {
     if plane == 0
         && surface.plane_count() == 1
-        && let Some(path) = surface.stream_path()
+        && let Some(mut source) = surface.progressive()?
     {
-        // A JPEG XL source: the byte stream carries progressive previews.
-        return stream_jxl(path, cancel, tx, blur_enabled, blur_px, preview_px);
+        // JPEG XL: the byte stream carries progressive previews.
+        return stream_jxl(
+            source.as_mut(),
+            cancel,
+            tx,
+            blur_enabled,
+            blur_px,
+            preview_px,
+        );
     }
 
     // Dimensions first, so the view fits the plane before the render lands.
@@ -246,25 +253,18 @@ fn stream(
 }
 
 /// JPEG XL progressive decode.
-/// The function feeds chunks of the mapped file into jxl-oxide.
+/// The function reads fixed-size chunks from the source's byte stream and
+/// feeds them into jxl-oxide.
 /// jxl-oxide renders previews while the first frame still loads.
 /// The worker sends the full render at the end.
 fn stream_jxl(
-    path: &Path,
+    source: &mut dyn ChunkSource,
     cancel: &AtomicBool,
     tx: &Sender<Result<DecodeMsg, LoadError>>,
     blur_enabled: bool,
     blur_px: LongSide,
     preview_px: PreviewPx,
 ) -> Result<Option<DecodeMsg>, LoadError> {
-    // Map the file instead of reading it through a buffer.
-    // The kernel pages the bytes in on demand, so a large JXL costs no user
-    // space copy and no read loop.
-    // A file that changes under the map faults (SIGBUS): the viewer reads
-    // still files from a directory that does not churn.
-    let file = std::fs::File::open(path)?;
-    let map = unsafe { memmap2::Mmap::map(&file)? };
-    let data: &[u8] = &map;
     let slow = std::env::var_os("VV_SLOW_STREAM").is_some();
     // `try_init` consumes the uninit image.
     // The code keeps it in an Option so the NeedMoreData branch can put it
@@ -273,7 +273,7 @@ fn stream_jxl(
     let mut image: Option<JxlImage> = None;
     let mut last_preview: Option<Instant> = None;
     let mut dribbled = 0usize;
-    let mut offset = 0usize;
+    let mut buf = vec![0u8; CHUNK];
 
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -285,12 +285,11 @@ fn stream_jxl(
         // nothing.
         let dribbling = slow && last_preview.is_none() && dribbled < SLOW_DRIBBLE_MAX;
         let chunk_size = if dribbling { SLOW_CHUNK } else { CHUNK };
-        let chunk = &data[offset..(offset + chunk_size).min(data.len())];
-        let n = chunk.len();
+        let n = read_chunk(source, &mut buf[..chunk_size])?;
         if n == 0 {
             break; // EOF
         }
-        offset += n;
+        let chunk = &buf[..n];
         match &mut image {
             None => {
                 let mut u = uninit.take().expect("header state");
@@ -360,6 +359,14 @@ fn stream_jxl(
     let image = cap_texture_side(image);
     let blur = blur_enabled.then(|| blurbg::small_blur(&image, blur_px));
     Ok(Some(DecodeMsg::Done { image, blur }))
+}
+
+/// Read up to `buf.len()` bytes from the stream.
+/// The function returns 0 at the end of the stream.
+/// It makes a single read call.
+/// Short reads are correct: the next loop iteration reads more data then.
+fn read_chunk(source: &mut dyn ChunkSource, buf: &mut [u8]) -> Result<usize, LoadError> {
+    source.read(buf).map_err(LoadError::Io)
 }
 
 #[cfg(test)]

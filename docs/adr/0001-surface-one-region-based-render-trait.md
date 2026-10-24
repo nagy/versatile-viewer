@@ -25,6 +25,10 @@ pub struct View {
     pub scale: f32,             // output pixels per surface unit
 }
 
+pub trait ChunkSource: Send {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize>;
+}
+
 pub trait Surface: Send + Sync {
     fn plane_count(&self) -> usize;
     fn bounds(&self, plane: usize) -> Result<Size, SurfaceError>;
@@ -36,7 +40,7 @@ pub trait Surface: Send + Sync {
     // overrides this for the cheaper path.
     fn render(&self, view: View) -> Result<DecodedImage, SurfaceError> { .. }
 
-    fn stream_path(&self) -> Option<&Path>;
+    fn progressive(&self) -> Result<Option<Box<dyn ChunkSource>>, SurfaceError> { Ok(None) }
     fn previews(&self) -> bool;
 }
 ```
@@ -79,8 +83,9 @@ view fits a scale. `bounds` is cheap and must not decode.
   cannot be wrong: it inherits a correct crop. A backend that overrides
   `render` and refuses a region returns `SurfaceError::Unsupported`; it must
   never return the whole plane for a region view.
-- `stream_path` is the one file-shaped hole: a progressive byte-stream
-  source. A source with no file returns `None`.
+- `progressive` returns a `ChunkSource`, not a path. Progressive decoding no
+  longer needs a filesystem name, so an in-memory or network source can
+  stream. A source with no progressive path answers `Ok(None)`.
 - A grid cell holds an `EntrySource`: either a file to open lazily, or the
   surface handle and plane of an already-open source. So an in-memory source
   browses like a directory, with no file behind it.
