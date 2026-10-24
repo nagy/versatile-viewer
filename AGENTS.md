@@ -187,6 +187,8 @@ The window clears to `BACKGROUND` (`#062329`, `main.rs`).
 Both views share it, so the letterbox bars and the grid gaps match.
 
 - Keys: see the README table.
+  `Space` steps forward and `Shift+Space` steps back, both as held states, so one key serves both ways.
+  Shift at the press edge picks the direction, and the held state follows the same rule, so a hold repeats the way it stepped.
 - `Shift+F` hold turns vertical mouse travel into the free zoom (`ZOOM_DRAG_SPAN` in `main.rs`).
   Up zooms in, down zooms out.
   The hold captures the pointer like the `f` pan drag, so the travel is unbounded and the motion never stops at a screen edge.

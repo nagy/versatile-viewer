@@ -1638,6 +1638,7 @@ fn main() -> Result<()> {
             // (nsxiv-style nav, with n or Space for next and p or
             // Backspace for previous, while the arrows and h/j/k/l stay
             // panning).
+            // Shift+Space steps backwards, so one key serves both ways.
             // The mouse side buttons navigate too: forward is next and back
             // is previous, like n and p.
             // Nav keys auto-repeat while held, at the X server rate
@@ -1673,7 +1674,14 @@ fn main() -> Result<()> {
                         r_key = true;
                         r_pivot_edge = shift;
                     }
-                    KeyboardKey::KEY_SPACE | KeyboardKey::KEY_N => nav_next_edge = true,
+                    KeyboardKey::KEY_SPACE => {
+                        if shift {
+                            nav_prev_edge = true;
+                        } else {
+                            nav_next_edge = true;
+                        }
+                    }
+                    KeyboardKey::KEY_N => nav_next_edge = true,
                     KeyboardKey::KEY_BACKSPACE | KeyboardKey::KEY_P => nav_prev_edge = true,
                     KeyboardKey::KEY_G => {
                         if shift {
@@ -1818,11 +1826,14 @@ fn main() -> Result<()> {
             let mouse_nav = read_nav_mouse(&rl);
             let next_edge = nav_next_edge || mouse_nav.next.edge;
             let prev_edge = nav_prev_edge || mouse_nav.prev.edge;
-            let next_held = rl.is_key_down(KeyboardKey::KEY_N)
-                || rl.is_key_down(KeyboardKey::KEY_SPACE)
-                || mouse_nav.next.held;
+            // A held Shift moves the Space hold to the previous direction,
+            // so a hold repeats the way its press edge stepped.
+            let space_held = rl.is_key_down(KeyboardKey::KEY_SPACE);
+            let next_held =
+                rl.is_key_down(KeyboardKey::KEY_N) || (space_held && !shift) || mouse_nav.next.held;
             let prev_held = rl.is_key_down(KeyboardKey::KEY_P)
                 || rl.is_key_down(KeyboardKey::KEY_BACKSPACE)
+                || (space_held && shift)
                 || mouse_nav.prev.held;
             let mut nav = if rep_nav_fwd.tick(next_edge, next_held, now, delay, rate) {
                 Some(1)
