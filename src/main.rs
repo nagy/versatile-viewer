@@ -189,9 +189,6 @@ struct ViewState {
     /// The texture shown in image mode now.
     view_tex: Option<Texture2D>,
     view_loading: bool,
-    /// The start time of the current load (`rl.get_time()`).
-    /// The "decoding..." indicator only appears after the load exceeds 1 s.
-    view_loading_since: f64,
     /// The full-resolution image dimensions (0 until known).
     img_w: f32,
     img_h: f32,
@@ -517,8 +514,8 @@ fn put_back_view(
 /// Three paths share this code: grid-open, prev/next navigation and the
 /// decode-landed takeover.
 /// 1. The code kept the full-res texture for it (keep-set): show at once.
-/// 2. A decode is in flight (`queued`): show "decoding" and wait for the
-///    decode-landed takeover in a later frame.
+/// 2. A decode is in flight (`queued`): wait for the decode-landed takeover in
+///    a later frame.
 /// 3. Otherwise: start the streaming loader (JXL: blurry preview fast).
 ///
 /// On paths 2 and 3 the draw loop shows the entry thumb (whole image,
@@ -571,7 +568,6 @@ fn show_entry(
         st.view_from_grid = None;
         st.view_tex = None;
         st.view_loading = true;
-        st.view_loading_since = rl.get_time();
         // Whenever the entry thumb exists, the decode that produced it
         // also recorded the full dimensions.
         // The cache header of the placeholder pass stores the same pair, so a
@@ -777,7 +773,6 @@ fn main() -> Result<()> {
         view_from_grid: None,
         view_tex: None,
         view_loading: false,
-        view_loading_since: 0.0,
         img_w: 0.0,
         img_h: 0.0,
         zoom: ZoomMode::FitDown,
@@ -1521,7 +1516,6 @@ fn main() -> Result<()> {
                 }
                 st.loader = None; // cancels a still-running stream
                 st.view_loading = false;
-                st.view_loading_since = 0.0;
             }
 
             // Prev/next while viewing (only with a grid to navigate).
@@ -1955,13 +1949,6 @@ fn main() -> Result<()> {
             bg.transition(&mut rl, &thread, data, e.id);
         }
 
-        // Whether the "decoding..." indicator shows this frame: only after
-        // the load passes one second.
-        // Brief loads otherwise flash the text for a few frames.
-        // The code computes it before begin_drawing (rl is mutably borrowed
-        // by the draw handle).
-        let show_decoding = st.view_loading && rl.get_time() - st.view_loading_since > 1.0;
-
         let mut d = rl.begin_drawing(&thread);
         d.clear_background(BACKGROUND);
 
@@ -2017,18 +2004,6 @@ fn main() -> Result<()> {
                     .unwrap_or((win_w / st.img_w).min(win_h / st.img_h));
                 let center = Vector2::new(win_w / 2.0 + st.pan.x, win_h / 2.0 + st.pan.y);
                 draw_turned(&mut d, tex, st.img_w, st.img_h, scale, center, st.angle);
-            }
-            // The threshold check happens above, before begin_drawing.
-            if show_decoding {
-                let msg = "decoding...";
-                let tw = d.measure_text(msg, 20);
-                d.draw_text(
-                    msg,
-                    (win_w as i32 - tw) / 2,
-                    win_h as i32 / 2 - 10,
-                    20,
-                    Color::GRAY,
-                );
             }
             // VV_DEBUG: while the pointer is captured, draw a crosshair at
             // the virtual cursor position (clamped to the window).
