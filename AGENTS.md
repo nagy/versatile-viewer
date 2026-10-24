@@ -35,14 +35,19 @@ The binary name is `vv`.
   `previews` and `can_refine` answer true, so a coarse preview lands first and the image view repaints the window patch over a rested zoom.
   Every render runs in `catch_unwind`, because a young rasterizer can panic on a malformed page and the job runs on a pool thread: a panic becomes `SurfaceError::Render`, never a crash.
   Each render builds a fresh `RenderCache`, because hayro's cache is not `Send`.
-- A document shows as book spreads, `src/spread.rs` (`SpreadSurface`, `COVER_SLOTS`, `COVER_ON_RIGHT`, `GUTTER`, `SLOTS`, `MAX_RENDER_PIXELS`).
-  The wrapper exposes one `Surface` plane per spread, so the loader, the fit, the pan, the turn and the region patch work on a spread unchanged.
-  The cover page sits alone in the right slot, then the pages pair up: `1|2`, `3|4`.
-  Every canvas measures the widest and tallest page of the document, doubled plus `GUTTER` (8 pt), so an n/p step never moves the fit or the pan.
-  A slot with no page stays transparent, so `BACKGROUND` shows through.
-  A render clamps at `MAX_RENDER_PIXELS` (64 MP) before any page renders, so both pages share one scale and one size.
-  `render` splits the patch on the page seam and asks each page for its own part, so a spread costs only the pixels the window shows.
-  `open_spread_surface` wraps when the source holds two planes or more; the grid thumbnail keeps the plain `open_surface`, so a cell shows page 0.
+- A document shows as a book, `src/book.rs` (`BookSurface`, `COVER_SLOTS`, `COVER_ON_RIGHT`, `GUTTER`, `ROW_GAP`, `SLOTS`, `MAX_RENDER_PIXELS`).
+  The whole book is one `Surface` plane, so the loader, the fit, the pan, the turn and the region patch treat it as one tall picture.
+  The cover page sits alone in the right slot of row 0, then the pages pair up: `1|2`, `3|4`, one spread under the next.
+  `ROW_GAP` is 0, so the spreads stack edge to edge; `GUTTER` (8 pt) separates the two pages of a spread, and both gaps stay transparent, so `BACKGROUND` shows through.
+  Every spread measures the widest and tallest page of the document, so the pages line up in two columns down the whole book, and a page narrower than the widest one centers in its slot.
+  The book keeps **base units**, not points: `BookSurface::base` bakes the scale that lands the whole book inside `MAX_TEXTURE_SIDE` and `MAX_RENDER_PIXELS` at scale 1.0, because `bounds` must match a scale-1.0 render and the main thread never resizes a buffer.
+  `render` converts the request back to points, walks only the spreads the rect touches, and asks each page for its own part at one shared scale.
+  `Surface::open_box` names the box a fresh open frames: a book answers its first spread, every other source answers `None`.
+  The fit measures that box, so whichever side binds decides and the cover page shows whole.
+  A fit centers the whole plane, so `ViewState::align_open_box` holds the pan on `main.rs` `top_pan` until the user moves the view: the align repeats every frame, because a window manager often resizes the window right after it maps and a resize re-fits the scale.
+  `ViewState::open_pan` records the pan the align wrote, so a pan or a target that moved away from it marks a user move and the align stops.
+  `ViewState::refit_open` arms the same framing again when the loader header or the first frame brings the real plane size.
+  `open_book_surface` wraps when the source holds two planes or more; the grid thumbnail keeps the plain `open_surface`, so a cell shows page 0 and never a second page.
 - Every showable source is a `src/surface.rs` `Surface`: `plane_count`, `bounds`, `render_whole`, `render`, `progressive` and `previews`.
   `open_surface` sniffs the content with `src/sign.rs` and picks the backend: a raster file (`ImageSurface`), a vector file (`VectorSurface`) or a PDF (`PdfSurface`).
   A backend writes `render_whole`; `render` is a provided method that renders the whole plane and crops the region out of it.
@@ -73,7 +78,7 @@ The binary name is `vv`.
   One file is one cell, so a document cell shows page 0 and never a second page.
   `Grid::from_paths` builds a grid from a path list, and `Grid::from_dir` hands it the sorted directory listing.
   A single-file launch of a document hands it one path, so ESC still has a grid to return to.
-  `EntrySource::open` opens the plain surface (the cell thumbnail); `EntrySource::open_spread` opens the spread surface (the image view), where plane 0 is the first spread.
+  `EntrySource::open` opens the plain surface (the cell thumbnail); `EntrySource::open_book` opens the book surface (the image view), where plane 0 holds every spread.
   `run_job` answers `no_full` for a multi-plane source, because a spread is not the page its cell holds, so the entry never keeps a full-res texture and `dispatch` never re-decodes it for one.
   `Loader::start_plane` renders one plane, and `Loader::start` is the plane-0 shorthand.
 - Dispatch decode on sniffed content.
@@ -202,10 +207,7 @@ Both views share it, so the letterbox bars and the grid gaps match.
   The hold captures and hides the pointer like a plain `r`, so the travel stays unbounded and the pivot sits under the hidden pointer at the grab point.
   A Shift+R hold therefore also doubles the pan and zoom speed, like every other Shift chord.
 - Mouse side buttons step next / previous in image view, like `n` / `p` (`read_nav_mouse` in `main.rs`).
-  In an open document the step walks spreads first, and only the step past the last spread moves to the next grid entry.
-  `ViewState::step_spread` reads the surface as `crate::spread`, so a spread step needs no grid entry.
-  It refits like a file step: upright, fit-all, no pan, and the loader renders the new spread.
-  `source_pending` holds a press while the async source of a document still opens, because only that source answers how many spreads exist; a raster entry never sets it, so its n/p keeps no delay.
+  A book holds every spread in one plane, so a step always moves to another file.
 - Env vars `VV_DEBUG`, `VV_TIMING`, `VV_SLOW_STREAM`, `VV_BLUR_BG`, `VV_BG_DIM`, `VV_BLUR_PX`, `VV_CACHE`: see the README table.
 - Window title uses en-dash separators: `<file> – <dir> – versatile-viewer`.
   The grid title is `(<n> image(s)) – <dir> – versatile-viewer`.
@@ -214,7 +216,8 @@ Both views share it, so the letterbox bars and the grid gaps match.
   The image view title follows the open image.
   The grid keeps the launch title.
   A one-image directory skips the grid at launch.
-  A document launched directly (two planes or more) opens its first spread at once, over a one-cell grid that waits behind ESC, and its title stays the image title.
+  A document launched directly (two planes or more) opens its whole book at once, over a one-cell grid that waits behind ESC, and its title stays the image title.
+  A book keeps the default window size, because its canvas can stand wider than a screen and taller than a texture.
   ESC returns to the grid.
 - X11 WM_CLASS is `vv` (res_name + res_class) — `src/wmclass.rs`.
   Wayland is a no-op.

@@ -69,7 +69,7 @@ use crate::{
     DecodedImage,
     blurbg::{self},
     dim::{ImgH, ImgW, LongSide, Rect, WinH, WinW},
-    surface::{Surface, SurfaceError, View, open_spread_surface, open_surface},
+    surface::{Surface, SurfaceError, View, open_book_surface, open_surface},
     thumbcache::Cache,
 };
 
@@ -115,15 +115,14 @@ impl EntrySource {
     }
 
     /// The file, opened the way the image view shows it: a document arrives
-    /// as book spreads (see [`crate::spread`]), so plane 0 is the first
-    /// spread.
+    /// as a book (see [`crate::book`]), so plane 0 holds every spread.
     ///
     /// # Errors
     ///
     /// The function errors when the file cannot be read or the content is not
     /// a decodable surface.
-    pub fn open_spread(&self) -> Result<(Arc<dyn Surface>, usize), SurfaceError> {
-        let surface: Arc<dyn Surface> = open_spread_surface(&self.0)?.into();
+    pub fn open_book(&self) -> Result<(Arc<dyn Surface>, usize), SurfaceError> {
+        let surface: Arc<dyn Surface> = open_book_surface(&self.0)?.into();
         Ok((surface, 0))
     }
 }
@@ -2069,7 +2068,7 @@ mod tests {
     }
 
     #[test]
-    fn entry_source_opens_a_document_as_page_zero_and_as_spreads() {
+    fn entry_source_opens_a_document_as_page_zero_and_as_a_book() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("doc.pdf");
         std::fs::write(&path, crate::pdf::tests::TWO_PAGE_PDF).unwrap();
@@ -2081,13 +2080,11 @@ mod tests {
             plain.bounds(0).unwrap(),
             crate::surface::Size { w: 612.0, h: 792.0 }
         );
-        // The image view shows spreads: the cover, then page 1 alone.
-        let (spread, plane) = source.open_spread().unwrap();
+        // The image view shows the book: the cover spread over page 1 alone.
+        let (book, plane) = source.open_book().unwrap();
         assert_eq!(plane, 0);
-        assert_eq!(spread.plane_count(), 2);
-        assert_eq!(
-            spread.bounds(0).unwrap().w,
-            612.0 * 2.0 + crate::spread::GUTTER
-        );
+        assert_eq!(book.plane_count(), 1);
+        assert_eq!(book.bounds(0).unwrap().w, 612.0 * 2.0 + crate::book::GUTTER);
+        assert_eq!(book.bounds(0).unwrap().h, 792.0 * 2.0);
     }
 }

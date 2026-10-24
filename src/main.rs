@@ -55,12 +55,13 @@ use versatile_viewer::wmclass;
 use versatile_viewer::{
     DecodedImage, UploadError,
     blurbg::{self, BlurBg},
+    book::BookSurface,
     dim::{ImgH, ImgW, PreviewPx, RampTime, Rect, WinH, WinW},
     grid::{DecodeFailure, EntrySource, Grid, GridAction},
     keyrepeat,
     loader::{DecodeMsg, Loader},
     mcp, region, rotate,
-    surface::{Surface, View, open_spread_surface},
+    surface::{Size, Surface, View, open_book_surface, open_surface},
     tween::Ramp,
     upload_rgba,
     zoomkeys::TypedKeys,
@@ -243,14 +244,25 @@ struct ViewState {
     /// None for a raster format, which has no more detail to give.
     source: Option<Arc<dyn Surface>>,
     /// The plane of the open source that the view shows.
-    /// It is 0 for a one-plane source, and the spread index of an open
-    /// document (see [`crate::spread`]).
+    /// It is 0 for every source the viewer opens: a book stacks its spreads
+    /// into one plane (see [`versatile_viewer::book`]).
     source_plane: usize,
-    /// A worker still opens the source of the open image.
-    /// Until it answers, the view cannot know whether the entry holds spreads,
-    /// so an n/p press waits for the answer instead of stepping a
-    /// neighboring file.
-    source_pending: bool,
+    /// The part of the open plane that a fresh open frames, in surface units
+    /// (see [`Surface::open_box`]).
+    /// A book answers its first spread, so the cover page shows whole; every
+    /// other source answers `None` and the fit frames the whole plane.
+    open_box: Option<Size>,
+    /// The opening box waits at the top of the window: the fit centers the
+    /// plane, and this flag holds the pan on the box until the user moves the
+    /// view.
+    /// A window manager often resizes the window right after it maps, and a
+    /// resize re-fits the scale, so the align repeats every frame instead of
+    /// running once.
+    top_pending: bool,
+    /// The pan the last align wrote.
+    /// A pan or a target that moved away from it marks a user move, and the
+    /// align then stops.
+    open_pan: Vector2,
     /// The region patch on screen: the visible part of the document, painted
     /// at the scale the window shows it.
     /// None until the first paint lands, and then the whole-image texture in
@@ -314,7 +326,11 @@ impl ViewState {
     fn reset_view(&mut self) {
         // Freshly shown images open fit-all (Shift+W behavior): upscale or
         // downscale until the image first touches a window border.
+        // The fit measures the opening box, so a book frames its first spread
+        // and the cover page shows whole.
         self.zoom = ZoomMode::FitAll;
+        self.top_pending = self.open_box.is_some();
+        self.open_pan = Vector2::ZERO;
         self.pan = Vector2::ZERO;
         self.target_pan = Vector2::ZERO;
         self.zoom_anchor = None;
@@ -326,15 +342,51 @@ impl ViewState {
         self.ramps = Ramps::default();
     }
 
+    /// Frame the opening box again once the image dimensions land.
+    ///
+    /// A fresh open measures a box instead of the whole plane, and a scroll to
+    /// the top shows it first.
+    fn refit_open(&mut self) {
+        self.zoom = ZoomMode::FitAll;
+        self.pan = Vector2::ZERO;
+        self.target_pan = Vector2::ZERO;
+        self.open_pan = Vector2::ZERO;
+        // The frame computes the scale from the fit mode.
+        self.view_scale = None;
+        self.top_pending = self.open_box.is_some();
+    }
+
+    /// Hold the opening box at the top of the window while the view stays
+    /// untouched.
+    ///
+    /// The fit centers the whole plane, and a book starts at the top of its
+    /// plane, so a fresh open scrolls there.
+    /// The align repeats every frame, because a window manager resize re-fits
+    /// the scale after the first frame and the pan would drift to the middle
+    /// of the document.
+    /// A pan or a target that moved away from [`Self::open_pan`] marks a user
+    /// move, and the align then stays out of the way.
+    fn align_open_box(&mut self, win_h: f32) {
+        if !self.top_pending {
+            return;
+        }
+        let (Some(scale), Some(_)) = (self.view_scale, self.open_box) else {
+            return;
+        };
+        if self.pan != self.open_pan || self.target_pan != self.open_pan {
+            self.top_pending = false;
+            return;
+        }
+        let top = Vector2::new(0.0, top_pan(self.img_h, scale, win_h));
+        self.pan = top;
+        self.target_pan = top;
+        self.open_pan = top;
+    }
+
     /// Drop the region state of the image that was open, and retire every
     /// worker result still in flight.
     fn close_crop(&mut self) {
         self.source = None;
-        self.reset_crop();
-    }
-
-    /// Drop the region state, and keep the source handle.
-    fn reset_crop(&mut self) {
         self.crop = None;
         self.crop_pending = false;
         self.crop_seen = None;
@@ -356,69 +408,22 @@ impl ViewState {
     /// The grid keeps no source, so an image opened from the grid opens its
     /// own here, off the main thread.
     /// A raster file answers None at once.
-    /// A document arrives as book spreads, so the patch covers a spread and
-    /// not a page.
-    /// `spreads` says whether the entry may hold more than one plane: only
-    /// then does an n/p press wait for the answer, because only then can the
-    /// press step a spread instead of a file.
-    fn request_source(&mut self, entry: &EntrySource, spreads: bool) {
+    /// A document arrives as a book, so the patch covers whole spreads.
+    fn request_source(&mut self, entry: &EntrySource) {
         self.close_crop();
         self.source_plane = 0;
-        self.source_pending = spreads;
         let path = entry.path().to_path_buf();
         let (generation, tx) = (self.crop_gen, self.crop_tx.clone());
         rayon::spawn(move || {
             // The open reads the head and, for a vector file, parses the tree
             // once. A source that cannot refine keeps no handle: a repaint
             // would only decode the same pixels again.
-            let source: Option<Arc<dyn Surface>> = open_spread_surface(&path)
+            let source: Option<Arc<dyn Surface>> = open_book_surface(&path)
                 .ok()
                 .filter(|surface| surface.can_refine())
                 .map(Arc::from);
             let _ = tx.send(CropMsg::Source { generation, source });
         });
-    }
-
-    /// Show the next or the previous spread of the open document.
-    ///
-    /// The spread index is the plane index of a [`crate::spread`] surface, so
-    /// the whole view (fit, pan, turn, region patch) follows without knowing
-    /// what a spread is.
-    /// The function answers false when the view holds no multi-plane source or
-    /// the step leaves the document, and the caller then steps the grid
-    /// entries.
-    fn step_spread(&mut self, delta: i64, rl: &mut RaylibHandle) -> bool {
-        let Some(source) = self.source.clone() else {
-            return false;
-        };
-        let planes = source.plane_count();
-        if planes < 2 {
-            return false;
-        }
-        let target = self.source_plane as i64 + delta;
-        if target < 0 || target as usize >= planes {
-            return false;
-        }
-        let plane = target as usize;
-        let Ok(size) = source.bounds(plane) else {
-            return false;
-        };
-        // A spread step shows a new figure of the same document, so it refits
-        // like an n/p step over files: upright, fit-all, no pan.
-        self.reset_crop();
-        self.source_plane = plane;
-        self.view_from_grid = None;
-        self.view_tex = None;
-        self.reset_view();
-        self.view_loading = true;
-        self.img_w = size.w;
-        self.img_h = size.h;
-        self.loader = Some(Loader::start_plane(
-            source,
-            plane,
-            PreviewPx::new(rl.get_screen_width().max(rl.get_screen_height()) as u32),
-        ));
-        true
     }
 
     /// Repaint the visible region once the view holds still, when the patch on
@@ -510,7 +515,6 @@ impl ViewState {
                 CropMsg::Source { generation, source } => {
                     if generation == self.crop_gen {
                         self.source = source;
-                        self.source_pending = false;
                     }
                 }
                 CropMsg::Crop {
@@ -753,6 +757,16 @@ fn draw_turned(
     );
 }
 
+/// The pan that puts the top of a plane on the top edge of the window.
+///
+/// The draw centers the plane and adds the pan, so the top edge sits at
+/// `(win_h - img_h * scale) / 2 + pan.y`.
+/// A positive pan of half the overflow zeroes that, and a plane shorter than
+/// the window stays centered.
+fn top_pan(img_h: f32, scale: f32, win_h: f32) -> f32 {
+    (img_h * scale - win_h).max(0.0) / 2.0
+}
+
 /// Whether the region patch covers the whole window at the current transform.
 ///
 /// The draw skips the whole-image texture then, because the patch already
@@ -873,8 +887,10 @@ fn show_entry(
     st.reset_view();
     // A new image starts with no region patch: the source request names what
     // the window shows.
-    st.request_source(&source, no_full);
+    st.request_source(&source);
     if let Some(tex) = tex {
+        // A kept full-res texture is a whole plane, never a book.
+        st.open_box = None;
         grid.entries[idx].viewing = true;
         st.view_from_grid = Some(id);
         apply_view_filter(thread, &tex, st.pixelated);
@@ -888,6 +904,7 @@ fn show_entry(
         }
         attach_blur_bg(&mut st.blur_bg, rl, thread, blur.as_ref(), st.open_id);
     } else {
+        st.open_box = None;
         st.view_from_grid = None;
         st.view_tex = None;
         st.view_loading = true;
@@ -915,15 +932,20 @@ fn show_entry(
             // Wait for the decode-landed takeover instead of decoding the
             // file twice in a streaming worker.
             // A document keeps no full-res texture, so its cell waits for
-            // nothing: the loader renders the spread now.
+            // nothing: the loader renders the book now.
             None
         } else {
             let preview_px =
                 PreviewPx::new(rl.get_screen_width().max(rl.get_screen_height()) as u32);
-            // The image view opens a document as book spreads, so plane 0 is
-            // the first spread and not the cover page alone.
-            match source.open_spread() {
-                Ok((surface, plane)) => Some(Loader::start_plane(surface, plane, preview_px)),
+            // The image view opens a document as a book, so plane 0 holds
+            // every spread.
+            // The opening box comes from the surface before the loader takes
+            // it, so the fit frames the first spread.
+            match source.open_book() {
+                Ok((surface, plane)) => {
+                    st.open_box = surface.open_box(plane);
+                    Some(Loader::start_plane(surface, plane, preview_px))
+                }
                 Err(err) => {
                     eprintln!("vv: {}: {err}", source.label());
                     grid.mark_failed(id, DecodeFailure::Decode);
@@ -1031,27 +1053,34 @@ fn main() -> Result<()> {
     // title shows the image count).
     // No GL is involved yet.
     // Single-file launch: open the surface now.
-    // A document opens as book spreads (see `spread.rs`) and keeps a one-cell
-    // grid, so ESC still has a target and that cell shows the cover page.
+    // A document opens as a book (see `book.rs`) and keeps a one-cell grid, so
+    // ESC still has a target and that cell shows the cover page.
     // A one-plane surface goes straight into the image view with no grid.
+    let mut book = false;
     let (dir_grid, single_surface) = if path.is_dir() {
         (Some(Grid::from_dir(path)?), None)
     } else if path.is_file() {
-        let surface = open_spread_surface(path)?;
-        let grid = (surface.plane_count() > 1).then(|| Grid::from_paths(vec![path.to_path_buf()]));
-        (grid, Some(Arc::<dyn Surface>::from(surface)))
+        let plain = open_surface(path)?;
+        book = plain.plane_count() > 1;
+        let surface: Arc<dyn Surface> = if book {
+            Arc::new(BookSurface::new(plain.into())?)
+        } else {
+            plain.into()
+        };
+        let grid = book.then(|| Grid::from_paths(vec![path.to_path_buf()]));
+        (grid, Some(surface))
     } else {
         bail!("no such file or directory: {}", path.display());
     };
-    // A document launch opens the first spread at once, like a single image,
-    // and the one-cell grid waits behind it for ESC.
+    // A single-file launch shows its picture (a book shows every spread) and
+    // keeps the one-cell grid behind it for ESC.
     let single_plane = single_surface.is_some();
 
     // Single-plane launch: render before opening the window, so the window
     // can be sized to the image.
     // Directory launch: fixed default window size.
-    // A vector file or a document keeps the surface it opened, so the image
-    // view can repaint the region its window shows.
+    // A vector file or a book keeps the surface it opened, so the image view
+    // can repaint the region its window shows.
     let single_decoded = if single_plane {
         Some(
             single_surface
@@ -1062,6 +1091,11 @@ fn main() -> Result<()> {
     } else {
         None
     };
+    // The box the launch frames: a book names its first spread, so the cover
+    // page shows whole, and every other source frames its whole plane.
+    let single_box = single_surface
+        .as_ref()
+        .and_then(|surface| surface.open_box(0));
     // Only a source that can render a sharper picture of the same plane keeps
     // its handle: a vector file repaints the region its window shows, while a
     // raster file has nothing to add past its own pixels.
@@ -1083,9 +1117,14 @@ fn main() -> Result<()> {
     } else {
         None
     };
-    let (win0_w, win0_h) = single_decoded.as_ref().map_or((1024, 768), |image| {
-        (image.width.get() as i32, image.height.get() as i32)
-    });
+    // A book sizes the window to the default, because its canvas can stand
+    // taller than any texture and wider than any screen.
+    let (win0_w, win0_h) = single_decoded
+        .as_ref()
+        .filter(|_| !book)
+        .map_or((1024, 768), |image| {
+            (image.width.get() as i32, image.height.get() as i32)
+        });
 
     let (mut rl, thread) = raylib::init()
         .size(win0_w, win0_h)
@@ -1156,7 +1195,9 @@ fn main() -> Result<()> {
         blur_bg: BlurBg::from_env(),
         source: None,
         source_plane: 0,
-        source_pending: false,
+        open_box: None,
+        top_pending: false,
+        open_pan: Vector2::ZERO,
         crop: None,
         crop_pending: false,
         crop_gen: 0,
@@ -1182,6 +1223,9 @@ fn main() -> Result<()> {
         st.adopt_source(single_source);
         st.img_w = image.width.as_f32();
         st.img_h = image.height.as_f32();
+        // A book frames its first spread, a picture frames the whole plane.
+        st.open_box = single_box;
+        st.reset_view();
         if let Some(data) = single_blur {
             attach_blur_bg(&mut st.blur_bg, &mut rl, &thread, Some(&data), None);
         }
@@ -1453,70 +1497,64 @@ fn main() -> Result<()> {
                     None => open_failed = true, // entry vanished (decode failed)
                 }
             }
-            if let Some(loader) = &st.loader {
-                while let Some(msg) = loader.try_recv() {
-                    match msg {
-                        Ok(DecodeMsg::Header { width, height }) => {
-                            // Dimensions known: fit down at once (the ease
-                            // block only runs from the next frame on).
-                            st.img_w = width.as_f32();
-                            st.img_h = height.as_f32();
-                            st.zoom = ZoomMode::FitAll;
-                            st.pan = Vector2::ZERO;
-                            st.target_pan = Vector2::ZERO;
-                            st.view_scale = Some((win_w / st.img_w).min(win_h / st.img_h));
+            // One message at a time: the borrow of the loader field ends
+            // before the body touches the view, so a refit may borrow it.
+            while let Some(msg) = st.loader.as_ref().and_then(Loader::try_recv) {
+                match msg {
+                    Ok(DecodeMsg::Header { width, height }) => {
+                        // Dimensions known: fit down at once (the ease
+                        // block only runs from the next frame on).
+                        st.img_w = width.as_f32();
+                        st.img_h = height.as_f32();
+                        st.refit_open();
+                    }
+                    Ok(DecodeMsg::Preview { image, blur }) => {
+                        // Progressively better render of the same image.
+                        show_frame(
+                            &mut rl,
+                            &thread,
+                            &mut st.view_tex,
+                            &image.data,
+                            image.width,
+                            image.height,
+                            st.pixelated,
+                        )?;
+                        attach_blur_bg(
+                            &mut st.blur_bg,
+                            &mut rl,
+                            &thread,
+                            blur.as_ref(),
+                            st.open_id,
+                        );
+                    }
+                    Ok(DecodeMsg::Done { image, blur }) => {
+                        // Non-JXL formats only learn dimensions here.
+                        if st.img_w == 0.0 {
+                            st.img_w = image.width.as_f32();
+                            st.img_h = image.height.as_f32();
+                            st.refit_open();
                         }
-                        Ok(DecodeMsg::Preview { image, blur }) => {
-                            // Progressively better render of the same image.
-                            show_frame(
-                                &mut rl,
-                                &thread,
-                                &mut st.view_tex,
-                                &image.data,
-                                image.width,
-                                image.height,
-                                st.pixelated,
-                            )?;
-                            attach_blur_bg(
-                                &mut st.blur_bg,
-                                &mut rl,
-                                &thread,
-                                blur.as_ref(),
-                                st.open_id,
-                            );
-                        }
-                        Ok(DecodeMsg::Done { image, blur }) => {
-                            // Non-JXL formats only learn dimensions here.
-                            if st.img_w == 0.0 {
-                                st.img_w = image.width.as_f32();
-                                st.img_h = image.height.as_f32();
-                                st.zoom = ZoomMode::FitAll;
-                                st.pan = Vector2::ZERO;
-                                st.target_pan = Vector2::ZERO;
-                                st.view_scale = Some((win_w / st.img_w).min(win_h / st.img_h));
-                            }
-                            show_frame(
-                                &mut rl,
-                                &thread,
-                                &mut st.view_tex,
-                                &image.data,
-                                image.width,
-                                image.height,
-                                st.pixelated,
-                            )?;
-                            attach_blur_bg(
-                                &mut st.blur_bg,
-                                &mut rl,
-                                &thread,
-                                blur.as_ref(),
-                                st.open_id,
-                            );
-                            st.view_loading = false;
-                        }
-                        Err(err) => {
-                            eprintln!("vv: {err}");
-                            open_failed = true;
-                        }
+                        show_frame(
+                            &mut rl,
+                            &thread,
+                            &mut st.view_tex,
+                            &image.data,
+                            image.width,
+                            image.height,
+                            st.pixelated,
+                        )?;
+                        attach_blur_bg(
+                            &mut st.blur_bg,
+                            &mut rl,
+                            &thread,
+                            blur.as_ref(),
+                            st.open_id,
+                        );
+                        st.view_loading = false;
+                    }
+                    Err(err) => {
+                        eprintln!("vv: {err}");
+                        open_failed = true;
                     }
                 }
             }
@@ -1911,26 +1949,19 @@ fn main() -> Result<()> {
                 st.close_crop();
             }
 
-            // Prev/next while viewing.
-            // A document open in the view steps its spreads first, so a 40-page
-            // PDF reads with n presses inside one open file, and the step past
-            // the last spread moves to the next grid entry.
+            // Prev/next while viewing (only with a grid to navigate).
             // A ready texture swaps in the same frame.
             // A decode in flight is waited on (auto-swap when it lands).
             // Otherwise the streaming loader takes over.
             // The priority list at the top of the loop prefetches the
             // neighbors of the new entry.
-            if !return_to_grid
-                && let Some(delta) = nav
-                && !st.source_pending
-            {
-                // A spread step of the open document needs no grid entry, and
-                // a document holds no grid texture to hand back.
-                if !st.step_spread(delta, &mut rl)
-                    && let Some(cur) = st
-                        .open_id
-                        .and_then(|id| grid.as_ref().and_then(|g| g.index_of(id)))
-                {
+            // The spreads of a book all sit in one figure, so a step always
+            // moves to another file.
+            if !return_to_grid && let Some(delta) = nav {
+                let cur = st
+                    .open_id
+                    .and_then(|id| grid.as_ref().and_then(|g| g.index_of(id)));
+                if let Some(cur) = cur {
                     let n = grid.as_ref().unwrap().entries.len();
                     let t = cur as i64 + delta;
                     if t >= 0 && (t as usize) < n {
@@ -1996,15 +2027,21 @@ fn main() -> Result<()> {
             if st.img_w > 0.0 {
                 // Scale for the current mode (fit modes recompute every
                 // frame, so resizing stays correct).
+                // A fit measures the opening box when the surface names one:
+                // a book frames its first spread, so the cover page shows
+                // whole and whichever side binds decides.
+                let (fit_w, fit_h) = st
+                    .open_box
+                    .map_or((st.img_w, st.img_h), |boxed| (boxed.w, boxed.h));
                 let fit_scale = match st.zoom {
-                    ZoomMode::FitDown => (win_w / st.img_w).min(win_h / st.img_h).min(1.0),
-                    ZoomMode::FitAll => (win_w / st.img_w).min(win_h / st.img_h),
-                    ZoomMode::FitWidth => win_w / st.img_w,
-                    ZoomMode::FitHeight => win_h / st.img_h,
+                    ZoomMode::FitDown => (win_w / fit_w).min(win_h / fit_h).min(1.0),
+                    ZoomMode::FitAll => (win_w / fit_w).min(win_h / fit_h),
+                    ZoomMode::FitWidth => win_w / fit_w,
+                    ZoomMode::FitHeight => win_h / fit_h,
                     // Cover: the larger ratio wins, so the image fills the
                     // window and the code crops the other axis.
                     // A free zoom keeps its scale as the fit base.
-                    ZoomMode::Fill | ZoomMode::Free(_) => (win_w / st.img_w).max(win_h / st.img_h),
+                    ZoomMode::Fill | ZoomMode::Free(_) => (win_w / fit_w).max(win_h / fit_h),
                 };
 
                 // Held keys feed the ramps.
@@ -2317,6 +2354,9 @@ fn main() -> Result<()> {
                 // key press rather than a ramp.
                 // Speed continuity is the ramp's job.
                 //
+                // A fresh open shows the top of the plane: the fit frames
+                // the opening box, and that box starts at the top.
+                st.align_open_box(win_h);
                 // On a resize frame, snap pan too, so it does not glide after
                 // the new fit offset (matches the scale snap above).
                 if resized {
@@ -2478,4 +2518,25 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::float_cmp)] // the asserted values are exact window arithmetic
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_top_pan_puts_the_plane_top_on_the_window_top() {
+        // The draw centers the plane, so the pan offsets from the middle.
+        let (img_h, scale, win_h) = (4752.0f32, 0.5f32, 768.0f32);
+        let pan = top_pan(img_h, scale, win_h);
+        let top = (win_h - img_h * scale) / 2.0 + pan;
+        assert_eq!(top, 0.0);
+        assert!(pan > 0.0, "a tall plane scrolls down, pan {pan}");
+    }
+
+    #[test]
+    fn a_plane_that_fits_stays_centered() {
+        assert_eq!(top_pan(200.0, 1.0, 768.0), 0.0);
+    }
 }

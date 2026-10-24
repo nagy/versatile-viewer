@@ -253,6 +253,17 @@ pub trait Surface: Send + Sync {
     fn can_refine(&self) -> bool {
         false
     }
+
+    /// The part of `plane` that a fresh open frames, in surface units, or
+    /// `None` to frame the whole plane.
+    ///
+    /// A book answers its first spread: the whole document stands far taller
+    /// than the window, and the reader starts on the cover page.
+    /// The fit measures this box instead of the plane, and the view scrolls to
+    /// the top of the plane so the box shows first.
+    fn open_box(&self, _plane: usize) -> Option<Size> {
+        None
+    }
 }
 
 /// Why a surface could not open, describe or render a plane.
@@ -323,24 +334,24 @@ pub fn open_surface(path: &Path) -> Result<Box<dyn Surface>, SurfaceError> {
 }
 
 /// Open a file and, when its source holds more than one plane, show it as a
-/// document spread (see [`crate::spread`]).
+/// book (see [`crate::book`]).
 ///
 /// The grid thumbnail keeps the plain surface from [`open_surface`], so a cell
 /// shows page 0.
-/// The image view takes this path, so a document becomes one figure with the
-/// pages side by side.
+/// The image view takes this path, so a document becomes one tall figure with
+/// every spread stacked.
 ///
 /// # Errors
 ///
 /// The function errors when the file cannot be read or the content is not a
 /// decodable image, PDF or vector file.
-pub fn open_spread_surface(path: &Path) -> Result<Box<dyn Surface>, SurfaceError> {
+pub fn open_book_surface(path: &Path) -> Result<Box<dyn Surface>, SurfaceError> {
     let surface = open_surface(path)?;
     if surface.plane_count() <= 1 {
         return Ok(surface);
     }
     let inner: Arc<dyn Surface> = surface.into();
-    Ok(Box::new(crate::spread::SpreadSurface::new(inner)?))
+    Ok(Box::new(crate::book::BookSurface::new(inner)?))
 }
 
 /// A raster image file (JPEG XL, PNG, JPEG, WebP, ...) which always holds one

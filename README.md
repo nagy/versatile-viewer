@@ -22,13 +22,14 @@ and a repaint once the view holds still. A cold vector cell measures its
 shape from a size-only parse, so the grid and the image fit never wait for
 the decode.
 PDF rasterizes through [hayro], also pure Rust, with no C dependency. A
-document shows as book spreads: the cover page alone, then the pages in
-pairs, so a spread reads like an open book. The page counts PostScript
-points, a region render rasterizes only the rect the window shows, and the
-image view repaints the visible region over a rested zoom, so a deep zoom of
-a page never stretches a raster. A coarse preview lands first, because
-rasterizing a page takes a moment. The grid thumbnail stays the cover page:
-no cell ever holds a second page.
+document shows as a book: the cover page alone in the first spread, then the
+pages in pairs, every spread stacked in one tall figure so the whole document
+is visible at once. The page counts PostScript points, a region render
+rasterizes only the rect the window shows, and the image view repaints the
+visible region over a rested zoom, so a deep zoom of a page never stretches a
+raster. A coarse preview lands first, because rasterizing a page takes a
+moment. The grid thumbnail stays the cover page: no cell ever holds a second
+page.
 Thumbnails render in a directory grid
 that fills the window, decoded in parallel on a background pool, and sorted
 in natural order (`img2` before `img10`). Every downscale, including the
@@ -55,16 +56,18 @@ one-plane surface, and a raster file and a vector file differ only in the
 backend behind the trait. A surface renders a `View` (a plane index, an
 optional region and a scale) into an RGBA buffer, and it reports the natural
 size of each plane. A grid cell holds an `EntrySource`: a file to open
-lazily. A multi-page source wraps in `src/spread.rs`, which exposes one
-plane per spread, so the image view shows a document with no change to the
+lazily. A multi-page source wraps in `src/book.rs`, which stacks every spread
+in one plane, so the image view shows a whole document with no change to the
 loader or the grid. The grid, the streaming loader and the image view speak
 surfaces, plane indices and regions, never file formats.
 `src/sign.rs` decides the decoder from the file content, not the file name,
 and a PDF routes on its `%PDF-` magic to the hayro backend in `src/pdf.rs`.
 
 The grid holds one cell per file, and a document cell shows its cover page.
-The image view shows a document as spreads, and n/p steps one spread before
-the next file. See `docs/adr/0001-*.md` and `src/spread.rs`.
+The image view shows a document as a book, and a book opens on its first
+spread: the fit frames that spread, so the cover page shows whole, and the
+view scrolls to the top of the document. See `docs/adr/0001-*.md` and
+`src/book.rs`.
 
 [jxl-oxide]: https://crates.io/crates/jxl-oxide
 [image]: https://crates.io/crates/image
