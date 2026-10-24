@@ -328,6 +328,8 @@ pub enum SurfaceError {
 /// misnamed file still opens.
 /// A `.typ` source routes by extension to the Typst backend, which compiles it
 /// to PDF bytes and hands them to that same backend.
+/// A `.mmd` source routes by extension to the Mermaid backend, which renders it
+/// to SVG and hands the tree to [`VectorSurface`].
 /// A vector file keeps its parsed tree, so a region render of the image view
 /// pays only for the pixels it shows.
 /// Every other content goes to the raster backend, which dispatches JPEG XL
@@ -348,6 +350,12 @@ pub fn open_surface(path: &Path) -> Result<Box<dyn Surface>, SurfaceError> {
     // pages through the PDF path.
     if crate::typst::is_typst(path) {
         return Ok(Box::new(crate::typst::TypstSurface::open(path)?));
+    }
+    // Mermaid: the extension decides too (.mmd is plain UTF-8 text). The
+    // backend renders the diagram to an SVG string and parses that string, so
+    // the file becomes a vector surface with a region anchor.
+    if crate::mermaid::is_mermaid(path) {
+        return crate::mermaid::open(path);
     }
     // The sniff doubles as a validity check; render() reports the decode
     // error otherwise.
@@ -504,6 +512,17 @@ impl VectorSurface {
         Ok(VectorSurface {
             vector: std::sync::Arc::new(crate::svg::parse(path)?),
         })
+    }
+
+    /// Wrap an already parsed tree.
+    ///
+    /// A backend that generates its SVG (see [`crate::mermaid`]) hands the
+    /// tree here, so a generated diagram shows exactly like a `.svg` file.
+    #[cfg(feature = "mermaid")]
+    pub(crate) fn from_vector(vector: crate::svg::Vector) -> Self {
+        VectorSurface {
+            vector: std::sync::Arc::new(vector),
+        }
     }
 }
 

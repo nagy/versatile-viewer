@@ -1431,8 +1431,8 @@ fn step_selection(sel: usize, n: usize, step: usize, delta: i128) -> usize {
 
 /// Do the code most likely decode this path as an image or a document?
 /// (Grid directory filter.)
-/// A PDF or a Typst source has no image extension but opens as a page grid,
-/// so the filter accepts them too.
+/// A PDF, a Typst source or a Mermaid source has no image extension but opens
+/// as a page grid, so the filter accepts them too.
 fn is_image_path(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
         matches!(
@@ -1451,6 +1451,7 @@ fn is_image_path(path: &Path) -> bool {
                 | "svgz"
                 | "pdf"
                 | "typ"
+                | "mmd"
         )
     })
 }
@@ -1902,6 +1903,9 @@ mod tests {
         // Same for a Typst source, which compiles into its page grid.
         assert!(is_image_path(Path::new("doc.typ")));
         assert!(is_image_path(Path::new("DOC.TYP")));
+        // A Mermaid source renders to one vector picture.
+        assert!(is_image_path(Path::new("diagram.mmd")));
+        assert!(is_image_path(Path::new("DIAGRAM.MMD")));
         assert!(!is_image_path(Path::new("notes.txt")));
         assert!(!is_image_path(Path::new("archive.tar.gz")));
         assert!(!is_image_path(Path::new("noext")));

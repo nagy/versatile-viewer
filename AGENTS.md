@@ -57,8 +57,20 @@ The binary name is `vv`.
   The reader has no clock, so a document that reads `datetime.today()` fails.
   A compile error becomes a `file:line:col: error: message` line with the first hint, and a panicking compiler or exporter becomes `SurfaceError::Render`, never a crash.
   `open_surface` routes a `.typ` file by extension, because plain UTF-8 text has no magic bytes to sniff.
+- Render Mermaid with `merman` (pure Rust, MIT OR Apache-2.0), the module is `src/mermaid.rs`.
+  It owns the dependency, and the `mermaid` cargo feature (a default feature) owns it too.
+  The feature pulls `svg`, because the diagram paints through the vector backend: `open` renders the source to an SVG string, parses it with `svg::from_str`, and wraps the tree in `VectorSurface::from_vector`, so one plane shows with the region anchor, the settled-zoom refine and the 512 px grid thumb of a vector file.
+  The feature list is `all-diagrams` + `svg`: ELK stays off (EPL-2.0) and so does `math`, so `architecture-beta` answers a capability error and every other family renders.
+  Every render passes `SvgPipeline::resvg_safe()`, the preset merman uses for its own PNG and PDF export: it turns a `<foreignObject>` HTML label into an SVG `<text>` element and sanitizes the stylesheet, and without it `usvg` drops every label.
+  `svg_label_source` inserts `%%{init: {"htmlLabels": false}}%%` after a leading YAML front matter and before the diagram, because the HTML measure under-reports a wide entity name and an ER header then loses its first and last glyph behind the label viewport; a later directive in the source still wins, so the source keeps its own choice.
+  Label boxes measure with a real face: `FONTS` builds one `NativeFontContext` per process from the face files of `svg::fontdb`, so the measure and the paint share one database; the limits rise to 512 MiB and 4096 files because a host holds about 75 MiB of faces.
+  A host without a readable face falls back to `SvgEnvironment::deterministic`, and the diagram still renders.
+  `Renderer`, the font context and the panic guard (`catch_unwind`) live behind `LazyLock` and `OnceLock`, because the open runs on a decode worker.
+  A rejected source, a missing diagram and a panicking renderer all become `SurfaceError::Render`, never a crash.
+  `is_mermaid` reads the extension only (`.mmd`), because Mermaid text has no magic bytes.
+  A cold `.mmd` cell stays grey until its decode lands, like a Typst cell, because no cheap header parse exists.
 - Every showable source is a `src/surface.rs` `Surface`: `plane_count`, `bounds`, `render_whole`, `render`, `progressive` and `previews`.
-  `open_surface` sniffs the content with `src/sign.rs` and picks the backend: a raster file (`ImageSurface`), a vector file (`VectorSurface`), a PDF (`PdfSurface`) or a Typst source (`TypstSurface`, which compiles to PDF bytes).
+  `open_surface` sniffs the content with `src/sign.rs` and picks the backend: a raster file (`ImageSurface`), a vector file (`VectorSurface`), a PDF (`PdfSurface`), a Typst source (`TypstSurface`, which compiles to PDF bytes) or a Mermaid source (`src/mermaid.rs`, which renders to SVG text).
   A backend writes `render_whole`; `render` is a provided method that renders the whole plane and crops the region out of it.
   A backend with a region anchor (the vector tree, the PDF rasterizer) overrides `render` to pay only for the pixels the caller asked for, and returns `SurfaceError::Unsupported` rather than the whole plane for a region it cannot serve.
   A `View` names a plane, an optional `Region` and a scale (output pixels per surface unit), so the grid asks for a thumbnail, the loader for the whole plane and the image view for the patch it shows.
@@ -82,8 +94,8 @@ The binary name is `vv`.
   `img_w`/`img_h` keep measuring the source, never the patch, so a bigger texture never disturbs fit, pan or zoom.
   The whole-image texture (`view_tex`) stays as the fallback and draws only where the patch cannot reach (`patch_covers`), so a resize or a pan that outruns the repaint never shows background.
   Drawing both over the same pixels would double the alpha of an antialiased edge, so the patch hides the whole image where it covers.
-- Grid extension filter: `src/grid.rs` `is_image_path` (also `pdf` and `typ`).
-  Keep the crate features in sync (neither `pdf` nor `typ` is an image crate feature).
+- Grid extension filter: `src/grid.rs` `is_image_path` (also `pdf`, `typ` and `mmd`).
+  Keep the crate features in sync (neither `pdf`, `typ` nor `mmd` is an image crate feature).
 - A grid cell holds an `EntrySource`, which is a path opened (and sniffed) lazily at decode time.
   One file is one cell, so a document cell shows page 0 and never a second page.
   `Grid::from_paths` builds a grid from a path list, and `Grid::from_dir` hands it the sorted directory listing.
@@ -111,6 +123,7 @@ The binary name is `vv`.
 - Public error types derive `derive_more::{Display, Error, From}` (feature `from` on).
   Each module owns its error enum: `src/error.rs` (`DecodeError`, `UploadError`), `src/sign.rs` (`SignError`), `src/surface.rs` (`SurfaceError`), `src/pdf.rs` (`PdfError`), `src/grid.rs` (`GridError`), `src/loader.rs` (`LoadError`), `src/mcp.rs` (`SpawnError`), `src/thumbcache.rs` (`CacheError`).
   `src/typst.rs` has no error enum of its own: its compile diagnostics and export failures become `SurfaceError::Render`.
+  `src/mermaid.rs` follows the same rule: a rejected source, a missing diagram and a panicking renderer become `SurfaceError::Render`, and a non-UTF-8 or oversized file becomes `SurfaceError::Unsupported`.
   `main.rs` keeps `anyhow`.
 - Wrap raw pixel and window primitives in the `src/dim.rs` newtypes (`ImgW`, `ImgH`, `WinW`, `WinH`, `LongSide`, `PreviewPx`, `Delay`, `Rate`, `RampTime`, `Rect`).
   Public API boundaries take the newtype, not the bare primitive.
@@ -236,6 +249,7 @@ Both views share it, so the letterbox bars and the grid gaps match.
   The image view title follows the open image.
   The grid keeps the launch title.
   A one-image directory skips the grid at launch.
+  A Mermaid source opens as one vector picture, never as a book, because it holds one plane.
   A document launched directly (two planes or more) opens its whole book at once, over a one-cell grid that waits behind ESC, and its title stays the image title.
   A book keeps the default window size, because its canvas can stand wider than a screen and taller than a texture.
   ESC returns to the grid.

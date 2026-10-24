@@ -35,6 +35,12 @@ same path, so it shows as that same book and zooms sharply for the same
 reasons. The compile runs with the file's own directory as the project root,
 so `#include`, `#image` and `#read` resolve like the Typst CLI, and the fonts
 ship inside the binary.
+A Mermaid source renders through [merman] to SVG text and parses through that
+same vector path, so it shows as one vector picture and zooms sharply for the
+same reasons. The render turns HTML labels into SVG text with merman's
+resvg-safe pipeline and turns them off through an init directive, because the
+HTML measure under-reports a wide label. Labels measure with the host font
+files, so a label box fits its text.
 Thumbnails render in a directory grid
 that fills the window, decoded in parallel on a background pool, and sorted
 in natural order (`img2` before `img10`). Every downscale, including the
@@ -53,6 +59,9 @@ leaves its thumbnail to the user. The `cache` cargo feature (on by default)
 owns the cache; `--no-default-features` decodes every file on every launch.
 The `svg` cargo feature (on by default) owns the SVG path;
 `--no-default-features --features cache` leaves it out.
+The `mermaid` cargo feature (on by default) owns the Mermaid path and pulls the
+`svg` feature in, because that backend paints the diagram.
+`--no-default-features --features cache,svg` leaves it out.
 
 ## Architecture
 
@@ -69,6 +78,9 @@ surfaces, plane indices and regions, never file formats.
 and a PDF routes on its `%PDF-` magic to the hayro backend in `src/pdf.rs`.
 A Typst source routes by extension to `src/typst.rs`, which compiles it to
 PDF bytes and hands them to that same backend.
+A Mermaid source routes by extension to `src/mermaid.rs`, which renders it to
+an SVG string and hands the parsed tree to the vector backend in
+`src/surface.rs`.
 
 The grid holds one cell per file, and a document cell shows its cover page.
 The image view shows a document as a book, and a book opens on its first
@@ -82,6 +94,7 @@ pages, so it opens as the same book. See `docs/adr/0001-*.md` and
 [resvg]: https://crates.io/crates/resvg
 [hayro]: https://crates.io/crates/hayro
 [typst]: https://crates.io/crates/typst
+[merman]: https://crates.io/crates/merman
 [fast_image_resize]: https://crates.io/crates/fast_image_resize
 [ThumbHash]: https://evanw.github.io/thumbhash/
 

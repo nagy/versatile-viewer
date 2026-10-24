@@ -257,7 +257,9 @@ fn demultiply(data: &mut [u8]) {
 ///
 /// A scan of the system fonts costs tens of milliseconds, so one load serves
 /// every SVG parse and every cell of a directory.
-fn fontdb() -> &'static Arc<fontdb::Database> {
+/// The Mermaid backend walks the same database, so a label measures with the
+/// faces the painter can use.
+pub(crate) fn fontdb() -> &'static Arc<fontdb::Database> {
     static DB: OnceLock<Arc<fontdb::Database>> = OnceLock::new();
     DB.get_or_init(|| {
         let mut db = fontdb::Database::new();
@@ -304,6 +306,22 @@ fn read(path: &Path) -> Result<Vec<u8>, DecodeError> {
 /// Whether the bytes start with the gzip magic.
 const fn is_gzip(bytes: &[u8]) -> bool {
     matches!(bytes, [0x1f, 0x8b, ..])
+}
+
+/// Parse SVG text into a [`Vector`].
+///
+/// A source that generates its SVG in memory (see [`crate::mermaid`]) uses
+/// this path, so the parsed tree serves the thumbnail, the base raster and the
+/// window patch exactly like a `.svg` file does.
+///
+/// # Errors
+///
+/// The function errors when usvg rejects the XML, the namespaces or the
+/// document structure.
+#[cfg(feature = "mermaid")]
+pub(crate) fn from_str(text: &str) -> Result<Vector, DecodeError> {
+    let tree = usvg::Tree::from_str(text, &options()).map_err(|e| DecodeError::Svg(Box::new(e)))?;
+    Ok(Vector { tree })
 }
 
 /// Parse a file into a [`Vector`].
