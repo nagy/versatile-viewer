@@ -60,7 +60,12 @@ The binary name is `vv`.
 - Render Mermaid with `merman` (pure Rust, MIT OR Apache-2.0), the module is `src/mermaid.rs`.
   It owns the dependency, and the `mermaid` cargo feature (a default feature) owns it too.
   The feature pulls `svg`, because the diagram paints through the vector backend: `open` renders the source to an SVG string, parses it with `svg::from_str`, and wraps the tree in `VectorSurface::from_vector`, so one plane shows with the region anchor, the settled-zoom refine and the 512 px grid thumb of a vector file.
-  The feature list is `all-diagrams` + `svg`: ELK stays off (EPL-2.0) and so does `math`, so `architecture-beta` answers a capability error and every other family renders.
+  The feature list is `all-diagrams` + `svg` + `elk`, and `math` stays off, so `architecture-beta` answers a capability error and every other family renders.
+  ELK is the default engine, so a source that asks for it (`%%{init: {"layout": "elk"}}%%`) keeps its own layout; without the `elk` feature merman falls back to dagre without a word, and its own test `flowchart_elk_alias_uses_dagre_geometry_when_loader_is_absent` names that path.
+  The engine arrives through the merman fork that `[patch.crates-io]` names: there `merman-layout-elk` builds ELK JSON from the provider-neutral `Graph`, calls `elk_layout::layout_value` and reads the geometry back as absolute coordinates, so the provider is `elk-layout` 0.12.x (`EPL-2.0 OR GPL-3.0-or-later`, pure Rust, elkjs-compatible JSON API) and this crate takes the GPL arm, which GPL-3.0 section 13 combines with our AGPL-3.0-or-later.
+  The fork's `WorkControl` checks the budget before and after that one call only, because ELK offers no interruption hook.
+  The patch names a git branch, so `Cargo.lock` pins the revision and a bump costs one `cargo update -p merman`.
+  The fork keeps its EPL-only `merman-elk-layered` crate unused, so never take merman's default features: `complete-svg-elk` turns that crate on.
   Every render passes `SvgPipeline::resvg_safe()`, the preset merman uses for its own PNG and PDF export: it turns a `<foreignObject>` HTML label into an SVG `<text>` element and sanitizes the stylesheet, and without it `usvg` drops every label.
   `svg_label_source` inserts `%%{init: {"htmlLabels": false}}%%` after a leading YAML front matter and before the diagram, because the HTML measure under-reports a wide entity name and an ER header then loses its first and last glyph behind the label viewport; a later directive in the source still wins, so the source keeps its own choice.
   Label boxes measure with a real face: `FONTS` builds one `NativeFontContext` per process from the face files of `svg::fontdb`, so the measure and the paint share one database; the limits rise to 512 MiB and 4096 files because a host holds about 75 MiB of faces.
@@ -198,7 +203,8 @@ The binary name is `vv`.
 
 ## Build
 
-- `nix build .#versatile-viewer-doc` makes the rustdoc HTML.- `nix flake check` gates clippy (`--all-targets -- --deny warnings`), tests, doctests, and treefmt.
+- `nix build .#versatile-viewer-doc` makes the rustdoc HTML.
+- `nix flake check` gates clippy (`--all-targets -- --deny warnings`), tests, doctests, and treefmt.
 ## Run
 
 Run `nix run . -- <image-path-or-directory>`.

@@ -11,6 +11,16 @@
 //! settled-zoom refine, and the grid thumbnail.
 //! No second rasterizer exists in this module.
 //!
+//! Layout runs through the `elk` cargo feature, a default feature, so a source
+//! that asks for ELK (`%%{init: {"layout": "elk"}}%%`) keeps its own layout.
+//! The engine comes from the merman fork that `[patch.crates-io]` names: there
+//! `merman-layout-elk` drives `elk-layout`, which ships
+//! `EPL-2.0 OR GPL-3.0-or-later`, so this crate takes the GPL arm and GPL-3.0
+//! section 13 combines it with our AGPL-3.0-or-later.
+//! Without the feature merman falls back to dagre without a word.
+//! `architecture-beta` answers a capability error either way, because the
+//! feature list leaves that family out.
+//!
 //! The view passes [`SvgPipeline::resvg_safe`], the preset merman uses for its
 //! own PNG and PDF export.
 //! That preset turns a `<foreignObject>` HTML label into an SVG `<text>`

@@ -33,12 +33,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "allocator-api2"
-version = "0.2.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
-
-[[package]]
 name = "android_system_properties"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -610,38 +604,15 @@ dependencies = [
 
 [[package]]
 name = "cssparser"
-version = "0.36.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dae61cf9c0abb83bd659dab65b7e4e38d8236824c85f0f804f173567bda257d2"
-dependencies = [
- "cssparser-macros 0.6.1",
- "dtoa-short",
- "itoa",
- "phf 0.13.1",
- "smallvec",
-]
-
-[[package]]
-name = "cssparser"
 version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11119743ad110e8c1bdccd930d7f5c30c99e5fc76a7b63ec9807e84eef0c5f59"
 dependencies = [
- "cssparser-macros 0.7.1",
+ "cssparser-macros",
  "dtoa-short",
  "itoa",
  "phf 0.14.0",
  "smallvec",
-]
-
-[[package]]
-name = "cssparser-macros"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13b588ba4ac1a99f7f2964d24b3d896ddc6bf847ee3855dbd4366f058cfcd331"
-dependencies = [
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -674,6 +645,12 @@ checksum = "704a3c26996a80471189265814dbc2c257598b96b8a7feae2d31ace646bb9782"
 dependencies = [
  "memchr",
 ]
+
+[[package]]
+name = "data-encoding"
+version = "2.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
 name = "data-url"
@@ -769,8 +746,7 @@ dependencies = [
 [[package]]
 name = "dugong"
 version = "0.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9074567a0bebc4bc2697aba4d3cfc32e82901a1a087b9f31e87f84d41cd3eb0"
+source = "git+https://github.com/nagy/merman?branch=elk-json-provider#1a55739fb4ae4bcdbb9a10f8df042faea7aa61de"
 dependencies = [
  "dugong-graphlib",
  "rustc-hash",
@@ -781,8 +757,7 @@ dependencies = [
 [[package]]
 name = "dugong-graphlib"
 version = "0.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a42f4ffa74c110a21c63fbecc2038715d7ffacd8722c418e65c4495e1ae32235"
+source = "git+https://github.com/nagy/merman?branch=elk-json-provider#1a55739fb4ae4bcdbb9a10f8df042faea7aa61de"
 dependencies = [
  "hashbrown",
  "rustc-hash",
@@ -812,17 +787,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
-name = "encoding_rs"
-version = "0.8.42"
+name = "elk-layout"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e985e0451871ad22fb8d2b6b076e2028a502a0d3950998c2c5c0a4f9b5d9679"
+checksum = "cae0e5f85eabb253b802db0e819989dbea92cdfc3f26fcec73e9dd2fc6ccbf29"
 dependencies = [
- "cfg-if",
- "core_detect",
- "multiversion_no_op",
- "rustversion",
- "scopeguard",
- "simdutf8",
+ "org-eclipse-elk-alg-common",
+ "org-eclipse-elk-alg-disco",
+ "org-eclipse-elk-alg-force",
+ "org-eclipse-elk-alg-graphviz-dot",
+ "org-eclipse-elk-alg-graphviz-layouter",
+ "org-eclipse-elk-alg-layered",
+ "org-eclipse-elk-alg-libavoid",
+ "org-eclipse-elk-alg-mrtree",
+ "org-eclipse-elk-alg-radial",
+ "org-eclipse-elk-alg-rectpacking",
+ "org-eclipse-elk-alg-spore",
+ "org-eclipse-elk-alg-topdownpacking",
+ "org-eclipse-elk-alg-vertiflex",
+ "org-eclipse-elk-conn-gmf",
+ "org-eclipse-elk-core",
+ "org-eclipse-elk-graph",
+ "org-eclipse-elk-graph-json",
 ]
 
 [[package]]
@@ -1248,7 +1234,6 @@ version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
- "allocator-api2",
  "equivalent",
  "foldhash",
 ]
@@ -1464,6 +1449,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "html5ever"
+version = "0.40.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "456a1a377e608e555d22ddab27ac0114bc7a7b4199078108e34c2aeae6c9b130"
+dependencies = [
+ "log",
+ "markup5ever",
+ "memchr",
+]
+
+[[package]]
 name = "htmlize"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1472,7 +1468,7 @@ dependencies = [
  "memchr",
  "pastey 0.1.1",
  "phf 0.13.1",
- "phf_codegen",
+ "phf_codegen 0.13.1",
  "serde_json",
 ]
 
@@ -1836,6 +1832,17 @@ dependencies = [
 
 [[package]]
 name = "json5"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96b0db21af676c1ce64250b5f40f3ce2cf27e4e47cb91ed91eb6fe9350b430c1"
+dependencies = [
+ "pest",
+ "pest_derive",
+ "serde",
+]
+
+[[package]]
+name = "json5"
 version = "1.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1628f14e201e5d6683248a22736547a083c2c176652d65b1068be73dab213a28"
@@ -2177,22 +2184,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
-name = "lol_html"
-version = "3.0.2"
+name = "markup5ever"
+version = "0.40.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a9cd0b35a2301bae18eb784130b0c10ddc4ef3cb699a6ef8e0d5fa88a7fae0e"
+checksum = "0ab3dc68ac4a0f5719e560136778c1ee716e296030d75dbd4484e37e39e3a842"
 dependencies = [
- "bitflags",
- "cfg-if",
- "cssparser 0.36.0",
- "encoding_rs",
- "foldhash",
- "hashbrown",
- "memchr",
- "mime",
- "precomputed-hash",
- "selectors",
- "thiserror",
+ "log",
+ "tendril",
+ "web_atoms",
 ]
 
 [[package]]
@@ -2213,8 +2212,7 @@ dependencies = [
 [[package]]
 name = "merman"
 version = "0.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14e3baf99d826e2a229215962c3fa9f12cedd7a3b116fba3b74bf5ede48f0d18"
+source = "git+https://github.com/nagy/merman?branch=elk-json-provider#1a55739fb4ae4bcdbb9a10f8df042faea7aa61de"
 dependencies = [
  "merman-analysis",
  "merman-ascii",
@@ -2222,6 +2220,7 @@ dependencies = [
  "merman-editor-core",
  "merman-export",
  "merman-render",
+ "merman-theme-contract",
  "serde_json",
  "thiserror",
 ]
@@ -2229,8 +2228,7 @@ dependencies = [
 [[package]]
 name = "merman-analysis"
 version = "0.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76cbb37ca1c494233f74a8f9cc40b190277b5781afa64d7e95abfaa78efdbe5a"
+source = "git+https://github.com/nagy/merman?branch=elk-json-provider#1a55739fb4ae4bcdbb9a10f8df042faea7aa61de"
 dependencies = [
  "merman-core",
  "serde",
@@ -2242,8 +2240,7 @@ dependencies = [
 [[package]]
 name = "merman-ascii"
 version = "0.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97e28d042c8439fccf568372ec021b23dd90ededc0fc25269c183663f69d203f"
+source = "git+https://github.com/nagy/merman?branch=elk-json-provider#1a55739fb4ae4bcdbb9a10f8df042faea7aa61de"
 dependencies = [
  "dugong",
  "merman-core",
@@ -2258,17 +2255,16 @@ dependencies = [
 [[package]]
 name = "merman-core"
 version = "0.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1d2afe2084c0223b772756489a5da51ad0ecbd195aef90268f3037648738796"
+source = "git+https://github.com/nagy/merman?branch=elk-json-provider#1a55739fb4ae4bcdbb9a10f8df042faea7aa61de"
 dependencies = [
- "cssparser 0.38.0",
+ "cssparser",
  "euclid",
  "granit-parser",
+ "html5ever",
  "htmlize",
  "indexmap",
- "json5",
+ "json5 1.3.4",
  "lalrpop-util",
- "lol_html",
  "rustc-hash",
  "ryu-js",
  "serde",
@@ -2283,8 +2279,7 @@ dependencies = [
 [[package]]
 name = "merman-editor-core"
 version = "0.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50d2727b3268ed98dec0c0eede75df03d09f0f40e61757fa6dcd456657470e32"
+source = "git+https://github.com/nagy/merman?branch=elk-json-provider#1a55739fb4ae4bcdbb9a10f8df042faea7aa61de"
 dependencies = [
  "merman-analysis",
  "merman-core",
@@ -2294,8 +2289,7 @@ dependencies = [
 [[package]]
 name = "merman-export"
 version = "0.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c7ea50ba3935bdbdc95133e8e9f96610ab6ce04d88f08e27fadcb915cc70d5c"
+source = "git+https://github.com/nagy/merman?branch=elk-json-provider#1a55739fb4ae4bcdbb9a10f8df042faea7aa61de"
 dependencies = [
  "merman-core",
  "merman-render",
@@ -2308,28 +2302,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "merman-layout-elk"
+version = "0.9.2"
+source = "git+https://github.com/nagy/merman?branch=elk-json-provider#1a55739fb4ae4bcdbb9a10f8df042faea7aa61de"
+dependencies = [
+ "elk-layout",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "merman-render"
 version = "0.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "321c4ca6f834e07b01790c1bc2591dc3a51f450c56c4c71a8111000a50efec0f"
+source = "git+https://github.com/nagy/merman?branch=elk-json-provider#1a55739fb4ae4bcdbb9a10f8df042faea7aa61de"
 dependencies = [
  "base64 0.23.1",
- "cssparser 0.38.0",
+ "cssparser",
+ "data-encoding",
  "data-url",
  "dugong",
  "indexmap",
  "kurbo",
  "libm",
+ "memchr",
  "merman-core",
+ "merman-layout-elk",
+ "merman-theme-contract",
  "merman-unicode-linebreak",
  "pulldown-cmark",
  "quick-xml 0.42.0",
  "roughr-merman",
- "roxmltree 0.21.2",
  "rustc-hash",
  "ryu-js",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "svgtypes",
  "thiserror",
  "unicode-segmentation",
@@ -2337,16 +2344,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "merman-unicode-linebreak"
+name = "merman-theme-contract"
 version = "0.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa1d4edece2fbc1eaec9b9567af5db80c652a878caf197cbbda0f4624fe3587d"
+source = "git+https://github.com/nagy/merman?branch=elk-json-provider#1a55739fb4ae4bcdbb9a10f8df042faea7aa61de"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_json_canonicalizer",
+ "thiserror",
+]
 
 [[package]]
-name = "mime"
-version = "0.3.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
+name = "merman-unicode-linebreak"
+version = "0.9.2"
+source = "git+https://github.com/nagy/merman?branch=elk-json-provider#1a55739fb4ae4bcdbb9a10f8df042faea7aa61de"
 
 [[package]]
 name = "minimal-lexical"
@@ -2383,12 +2394,6 @@ dependencies = [
  "num-traits",
  "pxfm",
 ]
-
-[[package]]
-name = "multiversion_no_op"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "mutate_once"
@@ -2472,6 +2477,196 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[package]]
+name = "org-eclipse-elk-alg-common"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b19d24c9e81f12eb847298b103e379d41dbe426f839e3d742d5b4ab7dbb694b0"
+dependencies = [
+ "org-eclipse-elk-core",
+ "org-eclipse-elk-graph",
+ "rustc-hash",
+]
+
+[[package]]
+name = "org-eclipse-elk-alg-disco"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2082703357bcb5b521352b685cfbed166daa57f94349bf59d9d1573bf5539f8"
+dependencies = [
+ "org-eclipse-elk-alg-common",
+ "org-eclipse-elk-core",
+ "org-eclipse-elk-graph",
+]
+
+[[package]]
+name = "org-eclipse-elk-alg-force"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ab90f9d665703da54a6975808a6edd6f27f60c1ac6cf7980dffd44bc28af1ae"
+dependencies = [
+ "org-eclipse-elk-alg-common",
+ "org-eclipse-elk-core",
+ "org-eclipse-elk-graph",
+]
+
+[[package]]
+name = "org-eclipse-elk-alg-graphviz-dot"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1e38fdde33b700185921cea025cf53de6848b11a117140eaf8813839946a9fb"
+
+[[package]]
+name = "org-eclipse-elk-alg-graphviz-layouter"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "675fbcc7021ea9863f6ef4de92bce093e8c5fc3967bc56c9566bb66da5358dd1"
+dependencies = [
+ "org-eclipse-elk-alg-common",
+ "org-eclipse-elk-alg-graphviz-dot",
+ "org-eclipse-elk-core",
+ "org-eclipse-elk-graph",
+]
+
+[[package]]
+name = "org-eclipse-elk-alg-layered"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f258a779f770653655a9c173a82d8db54a0c30b8c98766781d4ad106bdd452cd"
+dependencies = [
+ "org-eclipse-elk-alg-common",
+ "org-eclipse-elk-core",
+ "org-eclipse-elk-graph",
+ "rustc-hash",
+ "serde_json",
+]
+
+[[package]]
+name = "org-eclipse-elk-alg-libavoid"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18da60a324d4097d3daa73881fa6fbc4d9def84101dbd98f080aa8b342db46cd"
+dependencies = [
+ "org-eclipse-elk-alg-common",
+ "org-eclipse-elk-core",
+ "org-eclipse-elk-graph",
+]
+
+[[package]]
+name = "org-eclipse-elk-alg-mrtree"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73a01f0981345d8b31b05bb13bb92b7dd934cf44273547ab3fd67dcc9072df2f"
+dependencies = [
+ "org-eclipse-elk-alg-common",
+ "org-eclipse-elk-core",
+ "org-eclipse-elk-graph",
+]
+
+[[package]]
+name = "org-eclipse-elk-alg-radial"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bf391c5a6073a8fc0c0ab5c55e79ef90781fdd6cfcb3a08aff6840ef3fd7638"
+dependencies = [
+ "org-eclipse-elk-alg-common",
+ "org-eclipse-elk-core",
+ "org-eclipse-elk-graph",
+]
+
+[[package]]
+name = "org-eclipse-elk-alg-rectpacking"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d00572bdac7de368d28edd8afacfd95b8270c550778eb5b2fa7e0896406cbe90"
+dependencies = [
+ "org-eclipse-elk-alg-common",
+ "org-eclipse-elk-core",
+ "org-eclipse-elk-graph",
+]
+
+[[package]]
+name = "org-eclipse-elk-alg-spore"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8ebb9dbdde9085a075e2bef7052af33abd00d0a11eae473e900f47e0f3de1fc"
+dependencies = [
+ "org-eclipse-elk-alg-common",
+ "org-eclipse-elk-core",
+ "org-eclipse-elk-graph",
+]
+
+[[package]]
+name = "org-eclipse-elk-alg-topdownpacking"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6638e9e1db5f330c68bde56fb8cd007752630a5b64cd3d272ecc5194d8abc87"
+dependencies = [
+ "org-eclipse-elk-core",
+ "org-eclipse-elk-graph",
+]
+
+[[package]]
+name = "org-eclipse-elk-alg-vertiflex"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c03b59517244a5bd0a36900853cd616ce7d93d557a3426c6cfbfc4f268283754"
+dependencies = [
+ "org-eclipse-elk-alg-common",
+ "org-eclipse-elk-core",
+ "org-eclipse-elk-graph",
+]
+
+[[package]]
+name = "org-eclipse-elk-conn-gmf"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b629f921889dbf2c5cd9df1c3258ce10698fffecabfeb523b807456ef3689500"
+dependencies = [
+ "org-eclipse-elk-core",
+ "org-eclipse-elk-graph",
+]
+
+[[package]]
+name = "org-eclipse-elk-core"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8002ab4315d01bc1fd228e5c79ed022af94299ebb3df6b2d9e965cb0e348ed43"
+dependencies = [
+ "org-eclipse-elk-graph",
+]
+
+[[package]]
+name = "org-eclipse-elk-graph"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67bd179462ab23433f7a47cb30db163ec0e2c8e515377b8b6f761d7883907aba"
+dependencies = [
+ "parking_lot",
+ "rustc-hash",
+]
+
+[[package]]
+name = "org-eclipse-elk-graph-json"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1822b051354824489c531d91b61541616bb7fd72c2e16767c5b51d34c57f0e53"
+dependencies = [
+ "json5 0.4.1",
+ "org-eclipse-elk-alg-disco",
+ "org-eclipse-elk-alg-force",
+ "org-eclipse-elk-alg-layered",
+ "org-eclipse-elk-alg-mrtree",
+ "org-eclipse-elk-alg-radial",
+ "org-eclipse-elk-alg-rectpacking",
+ "org-eclipse-elk-alg-spore",
+ "org-eclipse-elk-alg-vertiflex",
+ "org-eclipse-elk-core",
+ "org-eclipse-elk-graph",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "palette"
@@ -2579,6 +2774,48 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "pest"
+version = "2.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45d3aca230fad2e6f6317ca0a72724338c4960cb97168a85cdee66df4a9a21a8"
+dependencies = [
+ "memchr",
+ "ucd-trie",
+]
+
+[[package]]
+name = "pest_derive"
+version = "2.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "284b60557f2c4a2e72ad3f2d34d42685a2fa4a6a61d0d2a10c0ae2a5e916c2cf"
+dependencies = [
+ "pest",
+ "pest_generator",
+]
+
+[[package]]
+name = "pest_generator"
+version = "2.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d9d1f08a115309ee99268cf85e5228e0e56aa9caf8841ec12866b6be07c3109"
+dependencies = [
+ "pest",
+ "pest_meta",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "pest_meta"
+version = "2.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed93ba1a9ffcca32130a5188701c81c0c49cf00d4b7c5007d5148951d743adcb"
+dependencies = [
+ "pest",
+]
+
+[[package]]
 name = "phf"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2608,6 +2845,16 @@ checksum = "49aa7f9d80421bca176ca8dbfebe668cc7a2684708594ec9f3c0db0805d5d6e1"
 dependencies = [
  "phf_generator 0.13.1",
  "phf_shared 0.13.1",
+]
+
+[[package]]
+name = "phf_codegen"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41b585a510fb76fdebead6897982ef2a03a21d8e6cbcca904999742a4afc6ffe"
+dependencies = [
+ "phf_generator 0.14.0",
+ "phf_shared 0.14.0",
 ]
 
 [[package]]
@@ -3165,12 +3412,12 @@ checksum = "c85cd47a33a4510b1424fe796498e174c6a9cf94e606460ef022a19f3e4ff85e"
 [[package]]
 name = "roughr-merman"
 version = "0.12.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4accb6afabe559650a026a0938bf6ad84c7ebe66517e12b4385865e2179a070"
+source = "git+https://github.com/nagy/merman?branch=elk-json-provider#1a55739fb4ae4bcdbb9a10f8df042faea7aa61de"
 dependencies = [
  "euclid",
  "num-traits",
  "palette",
+ "ryu-js",
  "svgtypes",
 ]
 
@@ -3317,25 +3564,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
-name = "selectors"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cfaaa6035167f0e604e42723c7650d59ee269ef220d7bbe0565602c8a0173b9"
-dependencies = [
- "bitflags",
- "cssparser 0.36.0",
- "derive_more",
- "log",
- "new_debug_unreachable",
- "phf 0.13.1",
- "phf_codegen",
- "precomputed-hash",
- "rustc-hash",
- "servo_arc",
- "smallvec",
-]
-
-[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3417,6 +3645,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_json_canonicalizer"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe52319a927259afbfa5180c5157cd8167edfd3e8c254f9558c7fef44c5649f2"
+dependencies = [
+ "ryu-js",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "serde_path_to_error"
 version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3447,15 +3686,6 @@ dependencies = [
  "ryu",
  "serde",
  "unsafe-libyaml",
-]
-
-[[package]]
-name = "servo_arc"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "170fb83ab34de17dc69aa7c67482b22218ddb85da56546f9bd6b929e32a05930"
-dependencies = [
- "stable_deref_trait",
 ]
 
 [[package]]
@@ -3497,12 +3727,6 @@ name = "simd-adler32"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
-
-[[package]]
-name = "simdutf8"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "simplecss"
@@ -3602,6 +3826,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6637bab7722d379c8b41ba849228d680cc12d0a45ba1fa2b48f2a30577a06731"
 dependencies = [
  "float-cmp",
+]
+
+[[package]]
+name = "string_cache"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ffa8a5dbe8b3f0bbe29d4c3225daafaeead63afdc1b65fc4c01a1384166038e6"
+dependencies = [
+ "new_debug_unreachable",
+ "parking_lot",
+ "phf_shared 0.14.0",
+ "precomputed-hash",
+]
+
+[[package]]
+name = "string_cache_codegen"
+version = "0.11.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "928dcdf75e47626b3617a976ec205d9f057584c371c1f23b782129268d0e6edc"
+dependencies = [
+ "phf_generator 0.14.0",
+ "phf_shared 0.14.0",
+ "proc-macro2",
+ "quote",
 ]
 
 [[package]]
@@ -3712,6 +3960,15 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys",
+]
+
+[[package]]
+name = "tendril"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fed54709c5b3a53d09bb1c113ea4f5ceafd1e772ddcb0030a82e1d56c087b08"
+dependencies = [
+ "new_debug_unreachable",
 ]
 
 [[package]]
@@ -4788,6 +5045,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c9d90bb93e764f6beabf1d02028c70a2156a6583e63ac4218dd07ef733368b0"
 dependencies = [
  "bitflags",
+]
+
+[[package]]
+name = "web_atoms"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7572660c8890448ba236b7376f27e389c6a7e1c70195622faced601f855c0ada"
+dependencies = [
+ "phf 0.14.0",
+ "phf_codegen 0.14.0",
+ "string_cache",
+ "string_cache_codegen",
 ]
 
 [[package]]
