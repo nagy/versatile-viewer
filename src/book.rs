@@ -55,7 +55,10 @@ pub const COVER_ON_RIGHT: bool = true;
 ///
 /// The gap stays part of the book, so the pair reads as two pages and the
 /// window background shows through.
-pub const GUTTER: f32 = 8.0;
+/// One point measures about one screen pixel at a fit view of an A4 document,
+/// so the seam reads as a hairline, and a zoom grows it like every other book
+/// measure.
+pub const GUTTER: f32 = 1.0;
 
 /// The gap between two spreads, in points.
 ///
@@ -486,7 +489,13 @@ mod tests {
         assert_eq!(b.base(), 1.0);
         assert_eq!(b.rows(), 2);
         // Three rows of the tallest page, two slots of the widest page.
-        assert_eq!(b.bounds(0).unwrap(), Size { w: 248.0, h: 400.0 });
+        assert_eq!(
+            b.bounds(0).unwrap(),
+            Size {
+                w: 120.0 * SLOTS as f32 + GUTTER,
+                h: 400.0
+            }
+        );
         assert_eq!(b.bounds(1).unwrap_err().to_string(), "plane out of range");
         assert_eq!(b.plane_count(), 1);
     }
@@ -495,12 +504,15 @@ mod tests {
     fn the_cover_sits_in_the_right_slot_of_the_first_row() {
         let b = book(vec![(100.0, 200.0), (100.0, 200.0), (100.0, 200.0)]);
         let img = b.render_whole(0, 1.0).unwrap();
-        assert_eq!((img.width.get(), img.height.get()), (208, 400));
+        assert_eq!(
+            (img.width.get(), img.height.get()),
+            ((100.0 * SLOTS as f32 + GUTTER) as u32, 400)
+        );
         // Row 0: the left slot stays transparent, the cover paints.
         assert_eq!(pixel(&img, 10, 100), [0, 0, 0, 0]);
         assert_eq!(pixel(&img, 110, 100), [10, 0, 0, 255]);
         // The gutter stays transparent.
-        assert_eq!(pixel(&img, 101, 100), [0, 0, 0, 0]);
+        assert_eq!(pixel(&img, 100, 100), [0, 0, 0, 0]);
         // Row 1: pages 1 and 2, one under the cover spread.
         assert_eq!(pixel(&img, 10, 300), [20, 0, 0, 255]);
         assert_eq!(pixel(&img, 110, 300), [30, 0, 0, 255]);
@@ -599,14 +611,14 @@ mod tests {
         assert_eq!(
             b.bounds(0).unwrap(),
             Size {
-                w: 1232.0,
+                w: 612.0 * SLOTS as f32 + GUTTER,
                 h: 1584.0
             }
         );
         assert_eq!(
             b.open_box(0).unwrap(),
             Size {
-                w: 1232.0,
+                w: 612.0 * SLOTS as f32 + GUTTER,
                 h: 792.0
             }
         );
@@ -625,7 +637,7 @@ mod tests {
             Region {
                 x: 0.0,
                 y: 0.0,
-                w: 248.0,
+                w: 120.0 * SLOTS as f32 + GUTTER,
                 h: 200.0
             }
         );
@@ -635,7 +647,7 @@ mod tests {
             Region {
                 x: 0.0,
                 y: 200.0,
-                w: 248.0,
+                w: 120.0 * SLOTS as f32 + GUTTER,
                 h: 200.0
             }
         );
@@ -676,7 +688,10 @@ mod tests {
         let cover = b
             .render(View::region(0, window(spread_pan(0)), scale))
             .unwrap();
-        assert_eq!((cover.width.get(), cover.height.get()), (208, 200));
+        assert_eq!(
+            (cover.width.get(), cover.height.get()),
+            ((100.0 * SLOTS as f32 + GUTTER) as u32, 200)
+        );
         assert_eq!(pixel(&cover, 10, 100), [0, 0, 0, 0]);
         assert_eq!(pixel(&cover, 110, 100), [10, 0, 0, 255]);
         // One step down shows the pair of pages 1 and 2, and the next step the

@@ -38,7 +38,7 @@ The binary name is `vv`.
 - A document shows as a book, `src/book.rs` (`BookSurface`, `COVER_SLOTS`, `COVER_ON_RIGHT`, `GUTTER`, `ROW_GAP`, `SLOTS`, `MAX_RENDER_PIXELS`).
   The whole book is one `Surface` plane, so the loader, the fit, the pan, the turn and the region patch treat it as one tall picture.
   The cover page sits alone in the right slot of row 0, then the pages pair up: `1|2`, `3|4`, one spread under the next.
-  `ROW_GAP` is 0, so the spreads stack edge to edge; `GUTTER` (8 pt) separates the two pages of a spread, and both gaps stay transparent, so `BACKGROUND` shows through.
+  `ROW_GAP` is 0, so the spreads stack edge to edge; `GUTTER` (1 pt, about one screen pixel at a fit view of an A4 page) separates the two pages of a spread, and both gaps stay transparent, so `BACKGROUND` shows through.
   Every spread measures the widest and tallest page of the document, so the pages line up in two columns down the whole book, and a page narrower than the widest one centers in its slot.
   The book keeps **base units**, not points: `BookSurface::base` bakes the scale that lands the whole book inside `MAX_TEXTURE_SIDE` and `MAX_RENDER_PIXELS` at scale 1.0, because `bounds` must match a scale-1.0 render and the main thread never resizes a buffer.
   `render` converts the request back to points, walks only the spreads the rect touches, and asks each page for its own part at one shared scale.
