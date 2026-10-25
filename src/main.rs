@@ -1010,6 +1010,79 @@ fn spread_row(img_h: f32, pan_y: f32, scale: f32, win_h: f32, spread_h: f32) -> 
     (top / spread_h).round().max(0.0) as usize
 }
 
+/// The snapped destination of a region patch, or `None` when the patch needs
+/// the free draw.
+///
+/// A patch rasterizes at the view scale, so its pixels are already the size the
+/// screen shows: the two sizes agree, and the patch holds every pixel the
+/// window shows at its own scale.
+/// The destination then snaps to the whole window pixels and takes the
+/// texture's own pixel size, because a bilinear sample at a fractional
+/// destination position blends two texels and softens every edge, which reads
+/// as blurry text.
+/// A stretched patch keeps its true size, so the sample phases already drift
+/// across it, and only the position snaps.
+/// A turned patch has no pixel grid to land on, so the caller keeps the free
+/// draw.
+fn patch_dest(center: Vector2, dw: f32, dh: f32, tw: f32, th: f32, angle: f32) -> Option<Rect> {
+    if angle != 0.0 || !(dw > 0.0 && dh > 0.0) {
+        return None;
+    }
+    // The paint rounds its pixel size, so a size within one pixel of the
+    // painted one takes the painted one: the sample then sits on texel centers
+    // for every pixel of the patch.
+    let width = if (dw - tw).abs() <= 1.0 {
+        tw
+    } else {
+        dw.round()
+    };
+    let height = if (dh - th).abs() <= 1.0 {
+        th
+    } else {
+        dh.round()
+    };
+    Some(Rect::new(
+        (center.x - dw / 2.0).round(),
+        (center.y - dh / 2.0).round(),
+        width,
+        height,
+    ))
+}
+
+/// Draw one region patch of the image view.
+///
+/// The patch covers a rect of the plane at `scale` output pixels per unit, so
+/// the draw lands it 1:1 on the screen whenever the view scale still matches
+/// the paint (see [`patch_dest`]).
+/// A turned patch keeps the free draw of [`draw_turned`], so it holds the
+/// transform of the whole image.
+fn draw_patch(
+    d: &mut impl RaylibDraw,
+    patch: &CropState,
+    img: Vector2,
+    win: Vector2,
+    pan: Vector2,
+    scale: f32,
+    angle: f32,
+) {
+    let rect = patch.rect;
+    let middle = Vector2::new(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+    let center = region::to_screen(middle, img, win, pan, scale, angle);
+    let tw = patch.texture.width() as f32;
+    let th = patch.texture.height() as f32;
+    match patch_dest(center, rect.w * scale, rect.h * scale, tw, th, angle) {
+        Some(dest) => d.draw_texture_pro(
+            &patch.texture,
+            Rect::sized(tw, th),
+            dest,
+            Vector2::ZERO,
+            0.0,
+            Color::WHITE,
+        ),
+        None => draw_turned(d, &patch.texture, rect.w, rect.h, scale, center, angle),
+    }
+}
+
 /// Whether the region patch covers the whole window at the current transform.
 ///
 /// The draw skips the whole-image texture then, because the patch already
@@ -2791,26 +2864,15 @@ fn main() -> Result<()> {
             // A spread step paints the spread it lands on before the glide
             // ends, so that patch draws here while it arrives and the whole
             // image loses its blur where the patch already reached.
+            // A patch that still matches the view scale lands on whole
+            // window pixels (see `draw_patch`), so its text stays sharp.
             if st.img_w > 0.0
                 && let Some(scale) = st.view_scale
             {
                 let img = Vector2::new(st.img_w, st.img_h);
                 let win = Vector2::new(win_w, win_h);
                 for patch in st.crop.iter().chain(st.prefetch.iter()) {
-                    let rect = patch.rect;
-                    let middle = Vector2::new(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
-                    let center = region::to_screen(middle, img, win, st.pan, scale, st.angle);
-                    // The dest size follows the current view scale, so the patch
-                    // stretches by at most `region::SCALE_SLACK`.
-                    draw_turned(
-                        &mut d,
-                        &patch.texture,
-                        rect.w,
-                        rect.h,
-                        scale,
-                        center,
-                        st.angle,
-                    );
+                    draw_patch(&mut d, patch, img, win, st.pan, scale, st.angle);
                 }
             }
             // VV_DEBUG: while the pointer is captured, draw a crosshair at
@@ -2849,6 +2911,51 @@ fn main() -> Result<()> {
 #[allow(clippy::float_cmp)] // the asserted values are exact window arithmetic
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_patch_that_matches_the_view_lands_on_whole_pixels() {
+        // A patch of 1532x1180 px whose screen center falls between pixels.
+        let (cx, cy) = (512.32f32, 384.68f32);
+        let dest = patch_dest(Vector2::new(cx, cy), 1532.0, 1180.0, 1532.0, 1180.0, 0.0).unwrap();
+        // The corner snaps to the nearest whole pixel, and the patch keeps the
+        // pixel size it was painted at.
+        assert_eq!(
+            (dest.x, dest.y),
+            ((cx - 766.0).round(), (cy - 590.0).round())
+        );
+        assert_eq!((dest.width, dest.height), (1532.0, 1180.0));
+        // Every edge sits on a whole window pixel, so the bilinear sample lands
+        // on the texel centers of a 1:1 patch.
+        assert_eq!(dest.x.fract(), 0.0);
+        assert_eq!(dest.y.fract(), 0.0);
+        assert_eq!((dest.right().fract(), dest.bottom().fract()), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_patch_rounds_into_the_painted_pixel_size() {
+        // The paint rounds its buffer, so a screen size within a pixel takes
+        // the painted size instead of resampling the whole patch.
+        let center = Vector2::new(400.0, 300.0);
+        let dest = patch_dest(center, 800.6, 600.4, 801.0, 600.0, 0.0).unwrap();
+        assert_eq!((dest.width, dest.height), (801.0, 600.0));
+        assert_eq!((dest.x, dest.y), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_stretched_or_turned_patch_keeps_its_true_size() {
+        // A zoom past the slack leaves the patch stretched, so its pixel size
+        // is not the screen size: the size follows the view, and the position
+        // still snaps so sampling stays stable.
+        let center = Vector2::new(400.4, 300.6);
+        assert_eq!(
+            patch_dest(center, 1200.0, 900.0, 800.0, 600.0, 0.0),
+            Some(Rect::new(-200.0, -149.0, 1200.0, 900.0))
+        );
+        // A turned patch never lands on the pixel grid.
+        assert_eq!(patch_dest(center, 800.0, 600.0, 800.0, 600.0, 3.0), None);
+        // A degenerate rect has no destination.
+        assert_eq!(patch_dest(center, 0.0, 600.0, 800.0, 600.0, 0.0), None);
+    }
 
     #[test]
     fn the_top_pan_puts_the_plane_top_on_the_window_top() {

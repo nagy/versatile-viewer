@@ -49,9 +49,14 @@ pub const MARGIN: f32 = 0.25;
 
 /// The scale ratio that pays for a repaint.
 ///
-/// A paint is exact at its own scale, and a small zoom keeps the patch
-/// stretched by less than this, so a nudge never pays for a pixmap.
-pub const SCALE_SLACK: f32 = 1.05;
+/// A paint is exact at its own scale, and the view lands it one output pixel
+/// per screen pixel only while the two agree.
+/// A patch stretched by even a few percent resamples every pixel through the
+/// GPU filter, which softens text, so the rule stays tight.
+/// The tolerance covers the float noise of the two computations and the last
+/// step of the zoom ease, and the [`QUIET`] debounce is what keeps a continuous
+/// zoom from paying for a pixmap per frame.
+pub const SCALE_SLACK: f32 = 1.002;
 
 /// How long the view must hold still before the region repaints.
 ///
@@ -290,10 +295,12 @@ mod tests {
         // A fresh region and a covered one.
         assert!(worth_painting(&needed, None, 4.0, 4.0));
         assert!(!worth_painting(&needed, Some(&painted), 4.0, 4.0));
-        // A small scale nudge stays inside the slack.
-        assert!(!worth_painting(&needed, Some(&painted), 4.1, 4.0));
-        // A real zoom step, and a pan past the margin, both pay.
-        assert!(worth_painting(&needed, Some(&painted), 6.0, 4.0));
+        // A scale inside the float tolerance stays: the patch still lands one
+        // pixel per pixel.
+        assert!(!worth_painting(&needed, Some(&painted), 4.004, 4.0));
+        // Any other scale stretch softens every pixel, so it pays.
+        assert!(worth_painting(&needed, Some(&painted), 4.1, 4.0));
+        assert!(worth_painting(&needed, Some(&painted), 3.9, 4.0));
         let far = crop(img, win, Vector2::new(300.0, 0.0), 4.0, 0.0, 0.0);
         assert!(worth_painting(&far, Some(&painted), 4.0, 4.0));
         // An empty need never pays.
@@ -316,7 +323,7 @@ mod tests {
         // The margin holds the window at the same scale.
         assert!(covers(&needed, &painted, 4.0, 4.0));
         // A scale past the slack, and a rect that misses the window, fail.
-        assert!(!covers(&needed, &painted, 6.0, 4.0));
+        assert!(!covers(&needed, &painted, 4.1, 4.0));
         let far = crop(img, win, Vector2::new(300.0, 0.0), 4.0, 0.0, MARGIN);
         assert!(!covers(&needed, &far, 4.0, 4.0));
         // The test and the paint rule never both fire.

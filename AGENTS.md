@@ -38,7 +38,7 @@ The binary name is `vv`.
 - A document shows as a book, `src/book.rs` (`BookSurface`, `COVER_SLOTS`, `COVER_ON_RIGHT`, `GUTTER`, `ROW_GAP`, `SLOTS`, `MAX_RENDER_PIXELS`).
   The whole book is one `Surface` plane, so the loader, the fit, the pan, the turn and the region patch treat it as one tall picture.
   The cover page sits alone in the right slot of row 0, then the pages pair up: `1|2`, `3|4`, one spread under the next.
-  `ROW_GAP` is 0, so the spreads stack edge to edge; `GUTTER` (1 pt, about one screen pixel at a fit view of an A4 page) separates the two pages of a spread, and both gaps stay transparent, so `BACKGROUND` shows through.
+  `ROW_GAP` is 0, so the spreads stack edge to edge; `GUTTER` (0.5 pt, about half a screen pixel at a fit view of an A4 page) separates the two pages of a spread, and both gaps stay transparent, so `BACKGROUND` shows through.
   Every spread measures the widest and tallest page of the document, so the pages line up in two columns down the whole book, and a page narrower than the widest one centers in its slot.
   The book keeps **base units**, not points: `BookSurface::base` bakes the scale that lands the whole book inside `MAX_TEXTURE_SIDE` and `MAX_RENDER_PIXELS` at scale 1.0, because `bounds` must match a scale-1.0 render and the main thread never resizes a buffer.
   `render` converts the request back to points, walks only the spreads the rect touches, and asks each page for its own part at one shared scale.
@@ -90,7 +90,10 @@ The binary name is `vv`.
   A patch covers the window plus `MARGIN` (0.25 of each side), in source pixels, so the paint area follows the window and a deep zoom costs no more pixels than a shallow one.
   `Surface::render` paints that rect at the view scale, so the patch lands 1:1 on screen; a `VectorSurface` paints only those pixels, and a `PdfSurface` rasterizes only them.
   The region rect lives in surface units: base raster pixels for a vector file (`Vector::declared_per_base` converts to the tree's declared units), points for a PDF page.
-  The view repaints when it held still for `QUIET` (150 ms) and `worth_painting` pays: a scale step past `SCALE_SLACK` (1.05) or a consumed margin.
+  The view repaints when it held still for `QUIET` (150 ms) and `worth_painting` pays: a scale step past `SCALE_SLACK` (1.002) or a consumed margin.
+  The rule stays tight because a patch stretched by even a few percent resamples every pixel through the GPU filter, and that softening reads as blurry text.
+  A patch that still matches the view scale draws on whole window pixels and takes its painted pixel size (`patch_dest` in `main.rs`), so the bilinear sample sits on texel centers and the pixels land 1:1 on the screen.
+  A turned patch, and one a zoom stretched since its paint, keep the true rect through `draw_turned`.
   One paint in flight, because resvg cannot cancel mid-paint.
   `ViewState` keeps `Arc<dyn Surface>`, the `CropState` (texture, source rect, raster scale), the pending flag and one generation counter.
   Every open, every n/p step and every return to the grid bumps that counter, so the result of a worker for an earlier image drops.

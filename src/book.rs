@@ -55,10 +55,10 @@ pub const COVER_ON_RIGHT: bool = true;
 ///
 /// The gap stays part of the book, so the pair reads as two pages and the
 /// window background shows through.
-/// One point measures about one screen pixel at a fit view of an A4 document,
-/// so the seam reads as a hairline, and a zoom grows it like every other book
-/// measure.
-pub const GUTTER: f32 = 1.0;
+/// A page render rounds its own pixel size, so the gap measures about one
+/// screen pixel at a fit view of an A4 document and never more: half a point
+/// stays a hairline at that scale.
+pub const GUTTER: f32 = 0.5;
 
 /// The gap between two spreads, in points.
 ///
