@@ -1981,7 +1981,7 @@ fn main() -> Result<()> {
             let mut nav_prev_edge = false;
             let mut jump_first = false;
             let mut jump_last = false;
-            // Shift+J/K step one spread in a book (see
+            // Shift+J/K and Page-down/Page-up step one spread in a book (see
             // [`ViewState::step_spread`]).
             // The press edge fires once per press, so the X server auto-repeat
             // never chains two steps from one hold.
@@ -2024,6 +2024,10 @@ fn main() -> Result<()> {
                     }
                     KeyboardKey::KEY_J => spread_next = shift,
                     KeyboardKey::KEY_K => spread_prev = shift,
+                    // Page-down and Page-up step a spread too, so a reader who
+                    // never learned the Shift+J/K pair still turns the page.
+                    KeyboardKey::KEY_PAGE_DOWN => spread_next = true,
+                    KeyboardKey::KEY_PAGE_UP => spread_prev = true,
                     _ => {}
                 }
             }
@@ -2205,9 +2209,9 @@ fn main() -> Result<()> {
                 }
             }
 
-            // One spread step per press of Shift+J/K: the press queue reports a
-            // press once, and the latch covers an input setup whose auto-repeat
-            // arrives as a second press.
+            // One spread step per press of Shift+J/K or Page-down/Page-up: the
+            // press queue reports a press once, and the latch covers an input
+            // setup whose auto-repeat arrives as a second press.
             let spread_press = if spread_next {
                 Some(1)
             } else if spread_prev {
@@ -2216,8 +2220,10 @@ fn main() -> Result<()> {
                 None
             };
             let spread_step = spread_press.filter(|_| spread_armed);
-            spread_armed =
-                !(rl.is_key_down(KeyboardKey::KEY_J) || rl.is_key_down(KeyboardKey::KEY_K));
+            spread_armed = !(rl.is_key_down(KeyboardKey::KEY_J)
+                || rl.is_key_down(KeyboardKey::KEY_K)
+                || rl.is_key_down(KeyboardKey::KEY_PAGE_DOWN)
+                || rl.is_key_down(KeyboardKey::KEY_PAGE_UP));
 
             let mut return_to_grid = false;
             if quit_pressed {
@@ -2725,8 +2731,8 @@ fn main() -> Result<()> {
                 // A fresh open shows the top of the plane: the fit frames
                 // the opening box, and that box starts at the top.
                 st.align_open_box(win_h);
-                // Shift+J/K: one spread per press, eased to the top of the
-                // window.
+                // Shift+J/K or Page-down/Page-up: one spread per press, eased
+                // to the top of the window.
                 // The step runs after the align, and the align then sees a
                 // target that it did not write, so it stays out of the way and
                 // the view keeps the spread the step landed on.

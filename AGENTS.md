@@ -155,9 +155,10 @@ The binary name is `vv`.
   The grid takes it as the `step` argument of `handle_input` (`step_selection` clamps the move).
   The image view passes it as the `speed` argument of `Ramps::tick`, which scales the pan and the zoom rate but not the ramp, so the ease keeps its length at any speed.
 - A book view takes `Shift+J` / `Shift+K` as a spread step instead of a pan.
+  `Page-down` / `Page-up` do the same step, so a reader who never learned the Shift pair still turns the page.
   `ViewState::step_spread` (`main.rs`) reads the row from `Surface::spread_count` and `Surface::spread_box`, eases one spread to the top of the window with `spread_pan`, and stops there: a press past the first or the last spread does nothing.
   The image view drops `Shift+J`/`Shift+K` from the pan while the open surface names a spread column, so those two keys step and never pan on a book.
-  The press queue fires once per press, and the `spread_armed` latch in `main` needs a `j`/`k` release before the next step, so a hold never chains steps.
+  The press queue fires once per press, and the `spread_armed` latch in `main` needs a release of `j`, `k`, `Page-down` or `Page-up` before the next step, so a hold never chains steps.
   The row comes from the aimed pan (`spread_row`), not the pixels on screen, so a step pressed while an earlier step still glides continues from the spread that step aimed at.
   The step glides at `SPREAD_EASE_TIME` (now the same as `EASE_TIME`) while `ViewState::spread_glide` holds the goal, and any other pan motion clears that field.
   The step also prefetches the patch of the spread it lands on (`ViewState::prefetch_spread`), so the sharp spread arrives with the glide.

@@ -138,6 +138,7 @@ because stdout carries protocol frames only.
 |`h j k l` / arrows   |move selection (auto-repeat)|pan (hold: eased speed ramp)   |
 |`Shift+h/l`          |move selection, double step |pan and free zoom, double speed|
 |`Shift+j` / `Shift+k`|move selection, double step |pan, double speed; in a book: ease to the next / previous spread, one spread per press|
+|`Page-down` / `Page-up`|—                          |in a book: ease to the next / previous spread (same step as `Shift+j` / `Shift+k`)|
 |`Space` / `Shift+Space`|—                           |next / previous image          |
 |`Backspace`          |—                           |previous image                 |
 |`n` / `p`            |—                           |next / previous image          |
@@ -168,7 +169,8 @@ ease repaints the region the window shows, at the scale it shows it, so a
 page stays sharp at any zoom.
 `Shift+J` and `Shift+K` step one spread down or up on a book: the view eases
 the next spread to the top of the window and stops there. One press moves one
-spread, and the step ends on the first and the last spread.
+spread, and the step ends on the first and the last spread. `Page-down` and
+`Page-up` do the same step.
 
 ## Environment variables
 
