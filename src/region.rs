@@ -9,7 +9,8 @@
 //!
 //! [`crop`] maps the window rect back into source pixels and expands it by
 //! [`MARGIN`], [`worth_painting`] guards the repaint with [`SCALE_SLACK`] plus
-//! a containment test, and [`QUIET`] debounces the request past the ease.
+//! a containment test, [`covers`] answers the same question for a patch that
+//! already exists, and [`QUIET`] debounces the request past the ease.
 //!
 //! The mapping mirrors the draw: the image center sits at the window middle
 //! plus the pan, and the image turns clockwise around that point.
@@ -223,6 +224,21 @@ pub fn worth_painting(
     scaled || !painted.contains(needed)
 }
 
+/// Whether a painted rect holds the region the window shows at its scale.
+///
+/// This is the inverse of [`worth_painting`]: the caller owns a patch of
+/// `patch` at `patch_scale`, and the view needs `needed` at `need_scale`.
+/// A spread step paints its landing patch before the glide ends, and this test
+/// tells the view when that patch has become the one on screen.
+#[must_use]
+pub fn covers(needed: &Crop, patch: &Crop, need_scale: f32, patch_scale: f32) -> bool {
+    if needed.is_empty() {
+        return false;
+    }
+    let scaled = need_scale > patch_scale * SCALE_SLACK || need_scale * SCALE_SLACK < patch_scale;
+    !scaled && patch.contains(needed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,6 +304,26 @@ mod tests {
             h: 0.0,
         };
         assert!(!worth_painting(&none, None, 4.0, 4.0));
+    }
+
+    #[test]
+    fn a_patch_covers_the_region_it_holds() {
+        let img = Vector2::new(1024.0, 512.0);
+        let win = Vector2::new(800.0, 600.0);
+        let pan = Vector2::ZERO;
+        let needed = crop(img, win, pan, 4.0, 0.0, 0.0);
+        let painted = crop(img, win, pan, 4.0, 0.0, MARGIN);
+        // The margin holds the window at the same scale.
+        assert!(covers(&needed, &painted, 4.0, 4.0));
+        // A scale past the slack, and a rect that misses the window, fail.
+        assert!(!covers(&needed, &painted, 6.0, 4.0));
+        let far = crop(img, win, Vector2::new(300.0, 0.0), 4.0, 0.0, MARGIN);
+        assert!(!covers(&needed, &far, 4.0, 4.0));
+        // The test and the paint rule never both fire.
+        assert!(
+            !(covers(&needed, &painted, 4.0, 4.0)
+                && worth_painting(&needed, Some(&painted), 4.0, 4.0))
+        );
     }
 }
 

@@ -86,7 +86,7 @@ The binary name is `vv`.
   A raster plane measures the capped size it renders, so `bounds` and the pixels of a scale-1.0 render agree.
   The trait decisions live in `docs/adr/0001-surface-one-region-based-render-trait.md`.
 - The image view repaints the region its window shows, from the open surface, when `Surface::can_refine` says a sharper picture is possible.
-  `src/region.rs` holds the pure geometry and policy: `crop`, `to_screen`, `to_image`, `Crop`, `worth_painting`, `MARGIN`, `SCALE_SLACK`, `QUIET`.
+  `src/region.rs` holds the pure geometry and policy: `crop`, `to_screen`, `to_image`, `Crop`, `worth_painting`, `covers`, `MARGIN`, `SCALE_SLACK`, `QUIET`.
   A patch covers the window plus `MARGIN` (0.25 of each side), in source pixels, so the paint area follows the window and a deep zoom costs no more pixels than a shallow one.
   `Surface::render` paints that rect at the view scale, so the patch lands 1:1 on screen; a `VectorSurface` paints only those pixels, and a `PdfSurface` rasterizes only them.
   The region rect lives in surface units: base raster pixels for a vector file (`Vector::declared_per_base` converts to the tree's declared units), points for a PDF page.
@@ -99,6 +99,11 @@ The binary name is `vv`.
   `img_w`/`img_h` keep measuring the source, never the patch, so a bigger texture never disturbs fit, pan or zoom.
   The whole-image texture (`view_tex`) stays as the fallback and draws only where the patch cannot reach (`patch_covers`), so a resize or a pan that outruns the repaint never shows background.
   Drawing both over the same pixels would double the alpha of an antialiased edge, so the patch hides the whole image where it covers.
+  A spread step paints the region it lands on before the glide ends: `ViewState::prefetch_spread` (`main.rs`) renders the target rect on a `rayon` worker at the press edge, so the glide never waits on it.
+  The result rides `CropMsg::Prefetch` with a `prefetch_id` token into `ViewState::prefetch`, a second `CropState` that drops when the aim moved.
+  `ViewState::prefetch_want` holds the aim still in flight, so `tick_crop` waits for it instead of starting a duplicate paint, and `PREFETCH_GIVE_UP` (3 s) bounds that wait for a worker that never answers.
+  The patch draws in place while it arrives, and `region::covers` adopts it into `crop` on the first frame that holds the window, so the landing frame skips `QUIET` and shows the sharp spread at once.
+  A resize or a pan away drops it, because a patch of an aim the view left would only linger as a stretched texture.
 - Grid extension filter: `src/grid.rs` `is_image_path` (also `pdf`, `typ` and `mmd`).
   Keep the crate features in sync (neither `pdf`, `typ` nor `mmd` is an image crate feature).
 - A grid cell holds an `EntrySource`, which is a path opened (and sniffed) lazily at decode time.
@@ -151,7 +156,8 @@ The binary name is `vv`.
   The image view drops `Shift+J`/`Shift+K` from the pan while the open surface names a spread column, so those two keys step and never pan on a book.
   The press queue fires once per press, and the `spread_armed` latch in `main` needs a `j`/`k` release before the next step, so a hold never chains steps.
   The row comes from the aimed pan (`spread_row`), not the pixels on screen, so a step pressed while an earlier step still glides continues from the spread that step aimed at.
-  The step glides at `SPREAD_EASE_TIME` (4x `EASE_TIME`) while `ViewState::spread_glide` holds the goal, and any other pan motion clears that field.
+  The step glides at `SPREAD_EASE_TIME` (now the same as `EASE_TIME`) while `ViewState::spread_glide` holds the goal, and any other pan motion clears that field.
+  The step also prefetches the patch of the spread it lands on (`ViewState::prefetch_spread`), so the sharp spread arrives with the glide.
   A book answers both methods from `BookSurface`, and every other source keeps the defaults (0 and `None`), so its `Shift+J`/`Shift+K` still pans at double speed.
 - Read the held state of a key that no `KeyboardKey` names by learning its keycode.
   `src/zoomkeys.rs` pairs a typed `+`/`-` with the key that went down in the same frame, then the code polls that keycode.
