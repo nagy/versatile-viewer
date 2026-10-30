@@ -152,7 +152,7 @@ because stdout carries protocol frames only.
 |`f` then `Shift`     |—                           |while `f` is held, Shift switches the pan drag over to the free zoom, anchored at the view center|
 |`r` (hold)           |—                           |rotate by mouse travel: down turns clockwise, up turns counter-clockwise; the release snaps a near quarter turn|
 |`Shift+r` (hold)     |—                           |rotate around the mouse point instead of the image center|
-|`v` / `V` / `Ctrl+v` |visual selection: charwise / linewise / blockwise (dims the other cells)|region selection (hold `v` and drag)|
+|`v` / `V` / `Ctrl+v` |visual selection: charwise / linewise / blockwise (dims the other cells)|region selection (hold `v` and drag; hold inside it to move it)|
 |`Shift+v` (hold)     |—                           |region selection with equal sides (square)|
 |`o`                  |swap visual anchor and cursor|—                             |
 |`+` / `-`            |zoom thumbnails             |free zoom (hold: eased ramp)   |
@@ -168,9 +168,11 @@ because stdout carries protocol frames only.
 release. The rest of the picture dims by the same amount as the grid cells
 outside a visual selection, and a bright border marks the region. The region
 stays while the view pans, zooms and turns, because it belongs to the picture
-and not to the screen. `Shift+v` keeps both sides equal. A `v` press and
-release without travel drops the region, and so does `Esc`, which stays in the
-image view until the second press.
+and not to the screen. `Shift+v` keeps both sides equal. Hold `v` inside a kept
+region and drag to move it: the rect keeps its size and its edges stop at the
+picture border. A `v` press and release without travel drops the region,
+unless the press landed inside it, which commits nothing. `Esc` drops the
+region too, and stays in the image view until the second press.
 
 A PDF or a Typst source opens as a book: the cover page alone, then the
 pages in pairs, every spread stacked in one figure. A zoom past a settled

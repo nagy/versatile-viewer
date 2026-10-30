@@ -102,6 +102,17 @@ impl Crop {
             && other.bottom() <= self.bottom()
     }
 
+    /// Whether a source point lies inside this rect.
+    ///
+    /// The edges count as inside, so a press on the border grabs the rect.
+    #[must_use]
+    pub fn contains_point(&self, point: Vector2) -> bool {
+        point.x >= self.x
+            && point.y >= self.y
+            && point.x <= self.right()
+            && point.y <= self.bottom()
+    }
+
     /// Whether the rect covers no pixels.
     #[must_use]
     pub fn is_empty(&self) -> bool {

@@ -1125,8 +1125,8 @@ fn draw_patch(
 /// transform the draw inverts with [`region::Frame::to_screen`], and the drag
 /// rect lives in source units from there on.
 /// The drag wins while it runs, so a new region replaces the old one on the
-/// first real move, and a press that never leaves [`TAP_SLACK`] keeps the old
-/// region until the release drops it.
+/// first real move, a press inside the region carries it, and a press that
+/// never leaves [`TAP_SLACK`] commits nothing.
 fn selection_rect(
     frame: Option<region::Frame>,
     kept: Option<region::Crop>,
@@ -1137,10 +1137,10 @@ fn selection_rect(
     let Some(drag) = drag else {
         return kept;
     };
-    // A press that has not left the tap slack spans nothing yet, so the kept
-    // region holds the eye until the drag is real.
+    // A press that has not left the tap slack answers nothing new: a span
+    // commits no rect, and a move keeps the rect it grabbed.
     if drag.tapped(mouse) {
-        return kept;
+        return drag.tap_rect().or(kept);
     }
     Some(drag.rect(frame.to_image(mouse), frame.img))
         .filter(|rect| !rect.is_empty())
@@ -2913,9 +2913,11 @@ fn main() -> Result<()> {
                 // `v` region selection: the press anchors at the picture point
                 // under the pointer, the pointer moves the opposite corner, and
                 // the release keeps the rect.
-                // A press that releases without travel clears the kept region,
-                // so an empty `v` click drops it the way an empty `v` click
-                // drops the visual selection in Vim.
+                // A press inside the kept region carries that rect instead, and
+                // keeps its size, so `v` both spans and moves.
+                // A press that releases without travel commits nothing: outside
+                // the region it drops the rect the way an empty `v` click drops
+                // the visual selection in Vim, and inside it keeps the rect.
                 // The cursor stays free, and the rect lives in source units, so
                 // a pan, a zoom and a turn keep the region on the picture while
                 // the drag runs.
@@ -2927,12 +2929,18 @@ fn main() -> Result<()> {
                     && let Some(frame) = frame
                 {
                     let mouse = rl.get_mouse_position();
-                    let anchor = region_sel::clamp(frame.to_image(mouse), img);
-                    region_drag = Some(region_sel::Drag::new(anchor, mouse, v_square_edge));
+                    let drag = region_sel::press(
+                        frame.to_image(mouse),
+                        mouse,
+                        img,
+                        st.selection,
+                        v_square_edge,
+                    );
+                    region_drag = Some(drag);
                     if debug {
                         eprintln!(
-                            "vv: region grab at ({:.0},{:.0}) -> image ({:.0},{:.0}), square {}",
-                            mouse.x, mouse.y, anchor.x, anchor.y, v_square_edge
+                            "vv: region grab at ({:.0},{:.0}) -> image ({:.0},{:.0}), {:?}",
+                            mouse.x, mouse.y, drag.anchor.x, drag.anchor.y, drag.kind
                         );
                     }
                 }
@@ -2942,8 +2950,8 @@ fn main() -> Result<()> {
                     && !rl.is_key_down(KeyboardKey::KEY_V)
                 {
                     // The release reads the same rect the draw shows, so the
-                    // committed region is the one on screen, and a tap drops
-                    // the kept region instead of committing a sliver.
+                    // committed region is the one on screen, and a tap commits
+                    // nothing: it drops a span and keeps a moved rect.
                     st.selection = selection_rect(
                         st.frame(Vector2::new(win_w, win_h)),
                         None,

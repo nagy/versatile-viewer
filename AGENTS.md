@@ -252,11 +252,13 @@ Both views share it, so the letterbox bars and the grid gaps match.
   `f` hit-tests a turned image through `unrotate_point`.
   Do not rotate pixels on the main thread: the turn is a draw transform.
 - The image view selects a region with a held `v`, `src/region_sel.rs`.
-  The press anchors one corner in source units (the units of `src/region.rs`), the free pointer drags the opposite corner, and the release keeps the rect in `ViewState::selection`.
-  A press that releases within `TAP_SLACK` (4 window pixels) counts as an empty `v` click and drops the region, like the grid's `v` toggle.
+  The press either spans a fresh rect or carries the kept one, and `region_sel::press` picks: a press outside the region anchors one corner in source units (the units of `src/region.rs`), the free pointer drags the opposite corner, and the release keeps the rect.
+  A press inside the region starts a move (`Kind::Move`) instead: `Drag::rect` shifts the grabbed rect by the pointer travel, the rect keeps its size, and `shift` stops each edge at the plane border, so a move never shrinks the region.
+  Shift only shapes a span, so a press inside the region moves with or without it.
+  A press that releases within `TAP_SLACK` (4 window pixels) commits nothing: outside the region it drops the rect, like the grid's `v` toggle, and inside it keeps the rect (`Drag::tap_rect`).
   `TAP_SLACK` lives in `src/lib.rs` beside `DIM_LEVEL`, and the `f` tap test reads the same constant, because both keys measure travel in window pixels and never in source units.
   The cursor stays free, so no capture: the region stops at the window edge, and the pan, the zoom and the turn keep working while the drag runs.
-  Shift at the press edge keeps both sides equal (`Drag::square`), and the side shrinks to the room the plane leaves past the anchor.
+  Shift at the press edge keeps both sides equal (`Kind::Span`), and the side shrinks to the room the plane leaves past the anchor.
   ESC drops a region first and stays in the image view, and only an ESC with nothing to drop returns to the grid.
   A fresh open, a step to another image and a return to the grid all drop the region.
   The rect lives in source units, so `region::to_screen` maps its corners through the same transform the picture uses, and a pan, a zoom and a turn all keep it on the picture.

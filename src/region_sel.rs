@@ -2,10 +2,13 @@
 //!
 //! A press of `v` anchors a rect in the units of [`crate::region`], the
 //! pointer drags the opposite corner, and the release keeps the rect.
+//! A press inside the kept rect carries it instead, so the same key spans a
+//! region and moves one.
 //! The pointer stays free, so the drag reads the real cursor and the region
 //! stops at the window edge.
-//! A press and release without travel clears the kept rect, the way an empty
-//! `v` click does in Vim, and ESC drops it too.
+//! A press and release without travel commits nothing: outside the rect it
+//! clears it, the way an empty `v` click does in Vim, and inside it keeps the
+//! rect as it was. ESC drops the rect too.
 //!
 //! The rect lives in source units, so a pan, a zoom and a turn all keep it on
 //! the picture: a [`crate::region::Frame`] maps its corners to the window,
@@ -20,62 +23,113 @@ use raylib::prelude::Vector2;
 
 use crate::{TAP_SLACK, region::Crop};
 
+/// What a `v` press does with the region.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Kind {
+    /// The press landed outside the region: anchor one corner and drag the
+    /// opposite one.
+    Span {
+        /// True when a Shift at the press edge keeps both sides equal.
+        square: bool,
+    },
+    /// The press landed inside the region: carry the whole rect, which keeps
+    /// its size and stops at the picture edge.
+    Move {
+        /// The rect the press grabbed.
+        from: Crop,
+    },
+}
+
 /// A region drag in flight.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Drag {
-    /// The corner the press landed on, in source units.
+    /// The press point in source units: the anchor of a span, and the point the
+    /// move carries.
     pub anchor: Vector2,
-    /// The same corner on screen, in window pixels, for the click test.
+    /// The same point on screen, in window pixels, for the click test.
     pub grab: Vector2,
-    /// True when a Shift at the press edge keeps both sides equal.
-    pub square: bool,
+    /// Whether the press spans a fresh rect or carries the kept one.
+    pub kind: Kind,
 }
 
 impl Drag {
-    /// Start a drag at `anchor`, which the caller already clamped into the
+    /// Start a span at `anchor`, which the caller already clamped into the
     /// plane.
     #[must_use]
     pub fn new(anchor: Vector2, grab: Vector2, square: bool) -> Self {
         Self {
             anchor,
             grab,
-            square,
+            kind: Kind::Span { square },
         }
     }
 
-    /// The rect the drag spans now, clamped to the plane.
+    /// Start a move of `from`, grabbed at `anchor`.
+    #[must_use]
+    pub fn moving(anchor: Vector2, grab: Vector2, from: Crop) -> Self {
+        Self {
+            anchor,
+            grab,
+            kind: Kind::Move { from },
+        }
+    }
+
+    /// The rect the drag answers now, clamped to the plane.
     ///
     /// `corner` is the free pointer in source units, from
     /// [`crate::region::Frame::to_image`], so it shares the units of `anchor`
     /// and of `img`.
-    /// A square drag takes its side from the longer travel axis.
+    /// A square span takes its side from the longer travel axis.
     /// The side then shrinks to the room the plane leaves past the anchor, so
     /// the region never leaves the picture and never stops being square.
+    /// A move keeps the size of the grabbed rect and stops at the picture edge.
     #[must_use]
     pub fn rect(&self, corner: Vector2, img: Vector2) -> Crop {
         let anchor = clamp(self.anchor, img);
         let corner = clamp(corner, img);
-        if !self.square {
-            return span(anchor, corner);
+        match self.kind {
+            Kind::Span { square: false } => span(anchor, corner),
+            Kind::Span { square: true } => square(anchor, corner, img),
+            Kind::Move { from } => shift(from, corner - anchor, img),
         }
-        let dx = corner.x - anchor.x;
-        let dy = corner.y - anchor.y;
-        let sx = if dx < 0.0 { -1.0 } else { 1.0 };
-        let sy = if dy < 0.0 { -1.0 } else { 1.0 };
-        let room_x = if sx > 0.0 { img.x - anchor.x } else { anchor.x };
-        let room_y = if sy > 0.0 { img.y - anchor.y } else { anchor.y };
-        let side = dx.abs().max(dy.abs()).min(room_x).min(room_y).max(0.0);
-        span(
-            anchor,
-            Vector2::new(anchor.x + side * sx, anchor.y + side * sy),
-        )
     }
 
-    /// Whether the pointer stayed close enough to the anchor to count as a
-    /// click, which clears the kept region instead of committing a new one.
+    /// The rect a tap leaves behind: a move keeps the rect it grabbed, and a
+    /// span commits nothing, so an empty `v` click outside the region drops it.
+    #[must_use]
+    pub fn tap_rect(&self) -> Option<Crop> {
+        match self.kind {
+            Kind::Move { from } => Some(from),
+            Kind::Span { .. } => None,
+        }
+    }
+
+    /// Whether the pointer stayed close enough to the press point to count as a
+    /// click, which commits nothing.
     #[must_use]
     pub fn tapped(&self, cursor: Vector2) -> bool {
         (cursor - self.grab).length() <= TAP_SLACK
+    }
+}
+
+/// Start the drag that a `v` press begins.
+///
+/// A press inside `kept` carries that rect, and a press outside spans a fresh
+/// one.
+/// Shift only shapes a span: a move keeps the sides the rect already has, so
+/// the Shift state changes nothing inside the region.
+#[must_use]
+pub fn press(
+    point: Vector2,
+    grab: Vector2,
+    img: Vector2,
+    kept: Option<Crop>,
+    square: bool,
+) -> Drag {
+    let anchor = clamp(point, img);
+    match kept.filter(|rect| rect.contains_point(anchor)) {
+        Some(from) => Drag::moving(anchor, grab, from),
+        None => Drag::new(anchor, grab, square),
     }
 }
 
@@ -143,6 +197,35 @@ fn span(a: Vector2, b: Vector2) -> Crop {
         y: a.y.min(b.y),
         w: (b.x - a.x).abs(),
         h: (b.y - a.y).abs(),
+    }
+}
+
+/// The square that two opposite corners span, shrunk to the room the plane
+/// leaves past the anchor.
+fn square(anchor: Vector2, corner: Vector2, img: Vector2) -> Crop {
+    let dx = corner.x - anchor.x;
+    let dy = corner.y - anchor.y;
+    let sx = if dx < 0.0 { -1.0 } else { 1.0 };
+    let sy = if dy < 0.0 { -1.0 } else { 1.0 };
+    let room_x = if sx > 0.0 { img.x - anchor.x } else { anchor.x };
+    let room_y = if sy > 0.0 { img.y - anchor.y } else { anchor.y };
+    let side = dx.abs().max(dy.abs()).min(room_x).min(room_y).max(0.0);
+    span(
+        anchor,
+        Vector2::new(anchor.x + side * sx, anchor.y + side * sy),
+    )
+}
+
+/// Move a rect by `delta` and hold it inside the plane.
+///
+/// The rect keeps its size, so a move that reaches an edge stops there and
+/// never shrinks.
+fn shift(rect: Crop, delta: Vector2, img: Vector2) -> Crop {
+    Crop {
+        x: (rect.x + delta.x).clamp(0.0, (img.x - rect.w).max(0.0)),
+        y: (rect.y + delta.y).clamp(0.0, (img.y - rect.h).max(0.0)),
+        w: rect.w,
+        h: rect.h,
     }
 }
 
@@ -263,6 +346,74 @@ mod tests {
         assert!(d.tapped(Vector2::new(400.0, 300.0)));
         assert!(d.tapped(Vector2::new(403.0, 300.0)));
         assert!(!d.tapped(Vector2::new(405.0, 300.0)));
+    }
+
+    #[test]
+    fn a_press_inside_the_region_moves_it() {
+        let img = plane();
+        let kept = Crop {
+            x: 100.0,
+            y: 100.0,
+            w: 200.0,
+            h: 100.0,
+        };
+        // A press on the border counts as inside, so the edge still moves it.
+        let inside = press(
+            Vector2::new(300.0, 150.0),
+            Vector2::ZERO,
+            img,
+            Some(kept),
+            false,
+        );
+        assert!(matches!(inside.kind, Kind::Move { .. }));
+        // Shift only shapes a span, so a move reads the same with it.
+        let shifted = press(
+            Vector2::new(300.0, 150.0),
+            Vector2::ZERO,
+            img,
+            Some(kept),
+            true,
+        );
+        assert_eq!(shifted.kind, inside.kind);
+        // A press outside the region still spans a fresh rect.
+        let outside = press(
+            Vector2::new(10.0, 10.0),
+            Vector2::ZERO,
+            img,
+            Some(kept),
+            false,
+        );
+        assert!(matches!(outside.kind, Kind::Span { square: false }));
+        // With no kept region every press spans.
+        let fresh = press(Vector2::new(10.0, 10.0), Vector2::ZERO, img, None, true);
+        assert!(matches!(fresh.kind, Kind::Span { square: true }));
+    }
+
+    #[test]
+    fn a_move_carries_the_rect_and_stops_at_the_edge() {
+        let img = plane();
+        let kept = Crop {
+            x: 100.0,
+            y: 100.0,
+            w: 200.0,
+            h: 100.0,
+        };
+        let grab = Vector2::new(150.0, 150.0);
+        let d = press(grab, Vector2::ZERO, img, Some(kept), false);
+        // The rect follows the pointer and keeps its size.
+        let moved = d.rect(Vector2::new(250.0, 250.0), img);
+        assert_eq!(
+            (moved.x, moved.y, moved.w, moved.h),
+            (200.0, 200.0, 200.0, 100.0)
+        );
+        // A move past the edge stops there and never shrinks.
+        let far = d.rect(Vector2::new(5000.0, 5000.0), img);
+        assert_eq!((far.right(), far.bottom()), (img.x, img.y));
+        assert_eq!((far.w, far.h), (200.0, 100.0));
+        // A tap keeps the rect the move grabbed, and a span tap commits
+        // nothing.
+        assert_eq!(d.tap_rect(), Some(kept));
+        assert_eq!(Drag::new(grab, Vector2::ZERO, false).tap_rect(), None);
     }
 
     #[test]
@@ -412,6 +563,33 @@ mod property_tests {
                     prop_assert!((0.0..=outer.h).contains(&p.y));
                 }
             }
+        }
+
+        /// A move keeps the size of the rect it grabbed and stays on the
+        /// plane.
+        #[test]
+        fn a_move_keeps_the_size_and_stays_on_the_plane(
+            x in 0.0f32..1000.0,
+            y in 0.0f32..500.0,
+            w in 1.0f32..1000.0,
+            h in 1.0f32..500.0,
+            px in -500.0f32..1500.0,
+            py in -500.0f32..1000.0,
+        ) {
+            let img = Vector2::new(1000.0, 500.0);
+            let rect = Crop {
+                x,
+                y,
+                w: w.min(img.x - x),
+                h: h.min(img.y - y),
+            };
+            let grab = Vector2::new(x + rect.w / 2.0, y + rect.h / 2.0);
+            let moved = Drag::moving(grab, Vector2::ZERO, rect).rect(Vector2::new(px, py), img);
+            prop_assert!((moved.w - rect.w).abs() < 1e-3);
+            prop_assert!((moved.h - rect.h).abs() < 1e-3);
+            prop_assert!(moved.x >= -1e-3 && moved.y >= -1e-3);
+            prop_assert!(moved.right() <= img.x + 1e-3);
+            prop_assert!(moved.bottom() <= img.y + 1e-3);
         }
 
         /// A drag always answers a rect inside the plane, whatever the
