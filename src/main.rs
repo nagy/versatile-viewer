@@ -53,14 +53,14 @@ use raylib::{
 #[cfg(target_os = "linux")]
 use versatile_viewer::wmclass;
 use versatile_viewer::{
-    DecodedImage, UploadError,
+    DIM_VEIL, DecodedImage, TAP_SLACK, UploadError,
     blurbg::{self, BlurBg},
     book::BookSurface,
     dim::{ImgH, ImgW, PreviewPx, RampTime, Rect, WinH, WinW},
     grid::{DecodeFailure, EntrySource, Grid, GridAction},
     keyrepeat,
     loader::{DecodeMsg, Loader},
-    mcp, region, rotate,
+    mcp, region, region_sel, rotate,
     surface::{Size, Surface, View, open_book_surface, open_surface},
     tween::Ramp,
     upload_rgba,
@@ -71,6 +71,13 @@ use versatile_viewer::{
 /// The grid and the image view both clear to it, so the letterbox bars and the
 /// gaps between thumbnails match.
 const BACKGROUND: Color = Color::new(0x06, 0x23, 0x29, 0xff);
+
+/// The border that marks a region selection.
+/// It stays bright over the veil, so a region reads on a dark picture too.
+const SELECTION_BORDER: Color = Color::new(0xff, 0xff, 0xff, 0xff);
+
+/// The width of the region border, in window pixels.
+const SELECTION_BORDER_PX: f32 = 2.0;
 
 /// The fraction of the remaining distance to the window center that the
 /// zoomed image point (and the cursor riding it) drifts over one zoom ease.
@@ -243,6 +250,13 @@ struct ViewState {
     /// The hold moves the pan through `rotate::pivot`, so the point stays on
     /// its window spot at every angle.
     pivot: Option<Vector2>,
+    /// The region the user selected with `v`, in source units (the units of
+    /// [`region`]).
+    /// A pan, a zoom and a turn keep it on the picture, because the draw maps
+    /// its corners through the same transform the picture uses.
+    /// A fresh open, a step to another image, a return to the grid and an
+    /// empty `v` click all drop it.
+    selection: Option<region::Crop>,
     /// `a` toggles nearest-neighbor filtering (pixelated) for pixel peeping.
     /// The default is smooth (bilinear).
     pixelated: bool,
@@ -388,7 +402,25 @@ impl ViewState {
         // the next image.
         self.angle = 0.0;
         self.pivot = None;
+        // A region of the previous image points at nothing here.
+        self.selection = None;
         self.ramps = Ramps::default();
+    }
+
+    /// The window mapping of the open plane, or `None` while the plane size or
+    /// the view scale is still unknown.
+    ///
+    /// One frame answers a screen point for the draw, the `f` hit test and the
+    /// `v` region drag, so no caller re-derives the transform on its own.
+    fn frame(&self, win: Vector2) -> Option<region::Frame> {
+        Some(region::Frame {
+            img: Vector2::new(self.img_w, self.img_h),
+            win,
+            pan: self.pan,
+            scale: self.view_scale?,
+            angle: self.angle,
+        })
+        .filter(region::Frame::drawable)
     }
 
     /// Frame the opening box again once the image dimensions land.
@@ -1083,6 +1115,70 @@ fn draw_patch(
     }
 }
 
+/// The region the view marks now: the rect a `v` drag spans, or the kept
+/// selection.
+///
+/// One function answers both the frame draw and the release, so the veil, the
+/// border and the committed rect can never read the pointer in different
+/// units.
+/// The free pointer converts through [`region::Frame::to_image`], the
+/// transform the draw inverts with [`region::Frame::to_screen`], and the drag
+/// rect lives in source units from there on.
+/// The drag wins while it runs, so a new region replaces the old one on the
+/// first real move, and a press that never leaves [`TAP_SLACK`] keeps the old
+/// region until the release drops it.
+fn selection_rect(
+    frame: Option<region::Frame>,
+    kept: Option<region::Crop>,
+    drag: Option<region_sel::Drag>,
+    mouse: Vector2,
+) -> Option<region::Crop> {
+    let frame = frame.filter(region::Frame::drawable)?;
+    let Some(drag) = drag else {
+        return kept;
+    };
+    // A press that has not left the tap slack spans nothing yet, so the kept
+    // region holds the eye until the drag is real.
+    if drag.tapped(mouse) {
+        return kept;
+    }
+    Some(drag.rect(frame.to_image(mouse), frame.img))
+        .filter(|rect| !rect.is_empty())
+        .or(kept)
+}
+
+/// Darken the picture outside a region selection, and mark the region itself.
+///
+/// The four bands of [`region_sel::around`] take one veil, so the dim amount
+/// matches the grid's dim tint (see [`versatile_viewer::DIM_LEVEL`]).
+/// The bands and the border map through [`region::Frame::to_screen`], so they
+/// follow the pan, the zoom and the turn of the draw.
+fn draw_selection(d: &mut impl RaylibDraw, frame: region::Frame, selection: region::Crop) {
+    let outer = region::Crop {
+        x: 0.0,
+        y: 0.0,
+        w: frame.img.x,
+        h: frame.img.y,
+    };
+    for band in region_sel::around(outer, selection) {
+        let p = band.map(|point| frame.to_screen(point));
+        // raylib culls a back face, so the band goes out in its winding (see
+        // [`region_sel::veil_triangles`]).
+        for tri in region_sel::veil_triangles(p) {
+            d.draw_triangle(tri[0], tri[1], tri[2], DIM_VEIL);
+        }
+    }
+    let corners = region_sel::corners(selection).map(|point| frame.to_screen(point));
+    for i in 0..4 {
+        d.draw_line_ex(
+            corners[i],
+            corners[(i + 1) % 4],
+            SELECTION_BORDER_PX,
+            SELECTION_BORDER,
+        );
+    }
+}
+
 /// Whether the region patch covers the whole window at the current transform.
 ///
 /// The draw skips the whole-image texture then, because the patch already
@@ -1505,6 +1601,7 @@ fn main() -> Result<()> {
         zoom_anchor: None,
         angle: 0.0,
         pivot: None,
+        selection: None,
         ramps: Ramps::default(),
         pixelated: false,
         loader: None,
@@ -1649,6 +1746,12 @@ fn main() -> Result<()> {
     // continues from where the first one left it.
     // The release keeps the angle, so the image stays turned.
     let mut r_capture = false;
+    // `v` held drags a region selection with a free cursor: the press anchors
+    // in source units, the pointer moves the opposite corner, and the release
+    // keeps the rect.
+    // No capture here, so the cursor stays visible and the region stops at the
+    // window edge.
+    let mut region_drag: Option<region_sel::Drag> = None;
     // The held state of the zoom keys on layouts where `+`/`-` do not sit on
     // their US keycodes.
     // The raw character events repeat at the X auto-repeat rate, so this
@@ -1971,12 +2074,17 @@ fn main() -> Result<()> {
             // (xset r rate, from keyrepeat::settings).
             // g/G jump to the first or last image.
             let mut enter = false;
+            let mut escape = false;
             let mut quit_pressed = false;
             let mut pixelated_toggle = false;
             let mut f_key = false;
             let mut r_key = false;
             // The Shift state at the `r` press edge picks the pivot.
             let mut r_pivot_edge = false;
+            // The `v` press edge, and the Shift state that turns its drag into
+            // a square.
+            let mut v_key = false;
+            let mut v_square_edge = false;
             let mut nav_next_edge = false;
             let mut nav_prev_edge = false;
             let mut jump_first = false;
@@ -1994,9 +2102,10 @@ fn main() -> Result<()> {
             while let Some(k) = rl.get_key_pressed() {
                 pressed_key = Some(k);
                 match k {
-                    KeyboardKey::KEY_ESCAPE
-                    | KeyboardKey::KEY_ENTER
-                    | KeyboardKey::KEY_KP_ENTER => {
+                    // ESC drops a region selection first and keeps the image
+                    // view, so a second ESC returns to the grid.
+                    KeyboardKey::KEY_ESCAPE => escape = true,
+                    KeyboardKey::KEY_ENTER | KeyboardKey::KEY_KP_ENTER => {
                         enter = true;
                     }
                     KeyboardKey::KEY_Q => quit_pressed = true,
@@ -2005,6 +2114,10 @@ fn main() -> Result<()> {
                     KeyboardKey::KEY_R => {
                         r_key = true;
                         r_pivot_edge = shift;
+                    }
+                    KeyboardKey::KEY_V => {
+                        v_key = true;
+                        v_square_edge = shift;
                     }
                     KeyboardKey::KEY_SPACE => {
                         if shift {
@@ -2118,7 +2231,7 @@ fn main() -> Result<()> {
                 let delta = rl.get_mouse_delta();
                 drag_virtual.x += delta.x;
                 drag_virtual.y += delta.y;
-                let f_dragged = (drag_virtual - grab_pos).length() > 4.0;
+                let f_dragged = (drag_virtual - grab_pos).length() > TAP_SLACK;
                 if pointer_captured {
                     rl.enable_cursor();
                     rl.set_mouse_position(grab_pos);
@@ -2206,6 +2319,23 @@ fn main() -> Result<()> {
                     '+' => zoom_keys.typed_zoom_in(pressed_key),
                     '-' => zoom_keys.typed_zoom_out(pressed_key),
                     _ => {}
+                }
+            }
+            // ESC drops the region selection first: it clears a kept region
+            // and cancels a drag in flight.
+            // Only an ESC with nothing to drop returns to the grid, so the
+            // region never costs a surprise exit.
+            if escape {
+                let kept = st.selection.take();
+                let dragging = region_drag.take();
+                if kept.is_none() && dragging.is_none() {
+                    enter = true;
+                } else if debug {
+                    eprintln!(
+                        "vv: esc dropped region {:?}, drag {}",
+                        kept.map(|r| (r.x, r.y, r.w, r.h)),
+                        dragging.is_some()
+                    );
                 }
             }
 
@@ -2300,6 +2430,9 @@ fn main() -> Result<()> {
                 }
                 f_capture = false;
                 r_capture = false;
+                // The region belongs to the image view.
+                region_drag = None;
+                st.selection = None;
                 st.mode = Mode::Grid;
                 // Hand the shown texture back to its grid entry and make
                 // that entry the grid selection (nsxiv-like).
@@ -2777,6 +2910,54 @@ fn main() -> Result<()> {
                 if st.pan == st.target_pan {
                     st.spread_glide = None;
                 }
+                // `v` region selection: the press anchors at the picture point
+                // under the pointer, the pointer moves the opposite corner, and
+                // the release keeps the rect.
+                // A press that releases without travel clears the kept region,
+                // so an empty `v` click drops it the way an empty `v` click
+                // drops the visual selection in Vim.
+                // The cursor stays free, and the rect lives in source units, so
+                // a pan, a zoom and a turn keep the region on the picture while
+                // the drag runs.
+                let img = Vector2::new(st.img_w, st.img_h);
+                let frame = st.frame(Vector2::new(win_w, win_h));
+                if v_key
+                    && region_drag.is_none()
+                    && !pointer_captured
+                    && let Some(frame) = frame
+                {
+                    let mouse = rl.get_mouse_position();
+                    let anchor = region_sel::clamp(frame.to_image(mouse), img);
+                    region_drag = Some(region_sel::Drag::new(anchor, mouse, v_square_edge));
+                    if debug {
+                        eprintln!(
+                            "vv: region grab at ({:.0},{:.0}) -> image ({:.0},{:.0}), square {}",
+                            mouse.x, mouse.y, anchor.x, anchor.y, v_square_edge
+                        );
+                    }
+                }
+                // `!is_key_down` also covers a press and release that land
+                // inside one frame, like the `f` and `r` halves.
+                if let Some(drag) = region_drag
+                    && !rl.is_key_down(KeyboardKey::KEY_V)
+                {
+                    // The release reads the same rect the draw shows, so the
+                    // committed region is the one on screen, and a tap drops
+                    // the kept region instead of committing a sliver.
+                    st.selection = selection_rect(
+                        st.frame(Vector2::new(win_w, win_h)),
+                        None,
+                        Some(drag),
+                        rl.get_mouse_position(),
+                    );
+                    region_drag = None;
+                    if debug {
+                        eprintln!(
+                            "vv: region release {:?}",
+                            st.selection.map(|r| (r.x, r.y, r.w, r.h))
+                        );
+                    }
+                }
             } // st.img_w > 0.0: fit/pan math needs known dimensions
         }
 
@@ -2799,6 +2980,21 @@ fn main() -> Result<()> {
         {
             bg.transition(&mut rl, &thread, data, e.id);
         }
+
+        // The region the image view marks now, read before the draw borrows
+        // `rl`.
+        // A drag in flight answers a fresh rect from the pointer position, so
+        // the veil and the border follow the cursor every frame.
+        let selection = if st.mode == Mode::Image {
+            selection_rect(
+                st.frame(Vector2::new(win_w, win_h)),
+                st.selection,
+                region_drag,
+                rl.get_mouse_position(),
+            )
+        } else {
+            None
+        };
 
         let mut d = rl.begin_drawing(&thread);
         d.clear_background(BACKGROUND);
@@ -2880,6 +3076,15 @@ fn main() -> Result<()> {
                 for patch in st.crop.iter().chain(st.prefetch.iter()) {
                     draw_patch(&mut d, patch, img, win, st.pan, scale, st.angle);
                 }
+            }
+            // A region selection dims the picture outside it and marks the
+            // rect with a bright border.
+            // The bands draw over the whole image and the patches, so the dim
+            // holds whatever the view paints below it.
+            if let Some(selection) = selection
+                && let Some(frame) = st.frame(Vector2::new(win_w, win_h))
+            {
+                draw_selection(&mut d, frame, selection);
             }
             // VV_DEBUG: while the pointer is captured, draw a crosshair at
             // the virtual cursor position (clamped to the window).
@@ -3016,5 +3221,104 @@ mod tests {
         );
         // A book that fits the window has no row to read.
         assert_eq!(spread_row(200.0, 0.0, 1.0, 768.0, 100.0), 0);
+    }
+
+    #[test]
+    fn a_region_drag_wins_over_the_kept_region() {
+        // The window holds the plane one to one, so the pointer and the source
+        // units agree here and the test reads the region alone.
+        let frame = region::Frame {
+            img: Vector2::new(1000.0, 500.0),
+            win: Vector2::new(1000.0, 500.0),
+            pan: Vector2::ZERO,
+            scale: 1.0,
+            angle: 0.0,
+        };
+        let kept = region::Crop {
+            x: 10.0,
+            y: 10.0,
+            w: 100.0,
+            h: 100.0,
+        };
+        let drag = region_sel::Drag::new(Vector2::new(200.0, 100.0), Vector2::ZERO, false);
+        let still = region_sel::Drag::new(Vector2::ZERO, Vector2::ZERO, false);
+        // A press that has not left the tap slack spans no rect, so the old
+        // region keeps its place on screen.
+        assert_eq!(
+            selection_rect(Some(frame), Some(kept), Some(still), Vector2::ZERO),
+            Some(kept)
+        );
+        // Any travel replaces it with the fresh rect.
+        assert_eq!(
+            selection_rect(
+                Some(frame),
+                Some(kept),
+                Some(drag),
+                Vector2::new(500.0, 400.0)
+            ),
+            Some(region::Crop {
+                x: 200.0,
+                y: 100.0,
+                w: 300.0,
+                h: 300.0,
+            })
+        );
+        // A plane with no size and no drag marks nothing.
+        assert_eq!(selection_rect(None, Some(kept), None, Vector2::ZERO), None);
+    }
+
+    #[test]
+    fn a_region_drag_reads_the_pointer_in_source_units() {
+        // Half scale and a pan of 100 window pixels to the right: the window
+        // middle sits on the plane middle, one window pixel spans two source
+        // pixels, and the pan moves the picture the other way.
+        let frame = region::Frame {
+            img: Vector2::new(1000.0, 500.0),
+            win: Vector2::new(800.0, 600.0),
+            pan: Vector2::new(100.0, 0.0),
+            scale: 0.5,
+            angle: 0.0,
+        };
+        let drag = region_sel::Drag::new(Vector2::new(500.0, 250.0), Vector2::ZERO, false);
+        // The pointer at (600, 200) lands on the source point (700, 50), so the
+        // rect runs from the anchor to there.
+        // A raw window reading would answer (500, 200, 100, 50) instead.
+        assert_eq!(
+            selection_rect(Some(frame), None, Some(drag), Vector2::new(600.0, 200.0)),
+            Some(region::Crop {
+                x: 500.0,
+                y: 50.0,
+                w: 200.0,
+                h: 200.0,
+            })
+        );
+        // A press that has not left the tap slack keeps the old region, so a
+        // `v` click never flashes a sliver rect.
+        let tap = region_sel::Drag::new(
+            Vector2::new(500.0, 250.0),
+            Vector2::new(600.0, 200.0),
+            false,
+        );
+        let kept = region::Crop {
+            x: 10.0,
+            y: 10.0,
+            w: 100.0,
+            h: 100.0,
+        };
+        assert_eq!(
+            selection_rect(
+                Some(frame),
+                Some(kept),
+                Some(tap),
+                Vector2::new(601.0, 200.0)
+            ),
+            Some(kept)
+        );
+        // The release reads the same call, so a tap answers no region and
+        // drops the kept one.
+        assert_eq!(
+            selection_rect(Some(frame), None, Some(tap), Vector2::new(601.0, 200.0)),
+            None
+        );
     }
 }

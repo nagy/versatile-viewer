@@ -86,7 +86,8 @@ The binary name is `vv`.
   A raster plane measures the capped size it renders, so `bounds` and the pixels of a scale-1.0 render agree.
   The trait decisions live in `docs/adr/0001-surface-one-region-based-render-trait.md`.
 - The image view repaints the region its window shows, from the open surface, when `Surface::can_refine` says a sharper picture is possible.
-  `src/region.rs` holds the pure geometry and policy: `crop`, `to_screen`, `to_image`, `Crop`, `worth_painting`, `covers`, `MARGIN`, `SCALE_SLACK`, `QUIET`.
+  `src/region.rs` holds the pure geometry and policy: `crop`, `to_screen`, `to_image`, `Frame`, `Crop`, `worth_painting`, `covers`, `MARGIN`, `SCALE_SLACK`, `QUIET`.
+  `Frame` bundles one window mapping (`img`, `win`, `pan`, `scale`, `angle`), and `ViewState::frame` (`main.rs`) builds it, so a caller never re-derives the transform and never mixes window units with source units.
   A patch covers the window plus `MARGIN` (0.25 of each side), in source pixels, so the paint area follows the window and a deep zoom costs no more pixels than a shallow one.
   `Surface::render` paints that rect at the view scale, so the patch lands 1:1 on screen; a `VectorSurface` paints only those pixels, and a `PdfSurface` rasterizes only them.
   The region rect lives in surface units: base raster pixels for a vector file (`Vector::declared_per_base` converts to the tree's declared units), points for a PDF page.
@@ -206,6 +207,7 @@ The binary name is `vv`.
   A mode switch keeps the anchor, so `v` on row 1 then `V` on row 3 selects rows 1..=3.
   Do not store a selected bit per entry.
   An active visual selection dims every cell outside it with `DIM_TINT`.
+  `DIM_TINT` lives in `src/lib.rs` beside `DIM_LEVEL` and `DIM_VEIL`, and the image view's region veil shares that level, so both views darken by one amount.
   The cursor without a visual selection dims nothing.
   A left-button drag over the grid starts a `Block` visual selection from the press cell, so a drag matches `Ctrl+v`.
   `Drag` holds the press anchor for the length of the hold.
@@ -249,6 +251,20 @@ Both views share it, so the letterbox bars and the grid gaps match.
   A dest corner plus a half-size origin throws the image into the top-left corner.
   `f` hit-tests a turned image through `unrotate_point`.
   Do not rotate pixels on the main thread: the turn is a draw transform.
+- The image view selects a region with a held `v`, `src/region_sel.rs`.
+  The press anchors one corner in source units (the units of `src/region.rs`), the free pointer drags the opposite corner, and the release keeps the rect in `ViewState::selection`.
+  A press that releases within `TAP_SLACK` (4 window pixels) counts as an empty `v` click and drops the region, like the grid's `v` toggle.
+  `TAP_SLACK` lives in `src/lib.rs` beside `DIM_LEVEL`, and the `f` tap test reads the same constant, because both keys measure travel in window pixels and never in source units.
+  The cursor stays free, so no capture: the region stops at the window edge, and the pan, the zoom and the turn keep working while the drag runs.
+  Shift at the press edge keeps both sides equal (`Drag::square`), and the side shrinks to the room the plane leaves past the anchor.
+  ESC drops a region first and stays in the image view, and only an ESC with nothing to drop returns to the grid.
+  A fresh open, a step to another image and a return to the grid all drop the region.
+  The rect lives in source units, so `region::to_screen` maps its corners through the same transform the picture uses, and a pan, a zoom and a turn all keep it on the picture.
+  The free pointer converts back through `region::Frame::to_image`, and `selection_rect` (`main.rs`) owns that conversion for the frame draw and for the release, so the border, the veil and the committed rect never read the pointer in different units.
+  `region_sel::around` answers the four bands of the plane outside the rect, `draw_selection` (`main.rs`) paints them with one `DIM_VEIL` and draws the bright `SELECTION_BORDER` around the rect.
+  raylib culls a back face, so `region_sel::veil_triangles` reverses each band (`p0, p3, p2` then `p0, p2, p1`): a band in the other order draws nothing.
+  `DIM_VEIL` keeps the share of brightness that the grid's `DIM_TINT` keeps, because both read `DIM_LEVEL`, so the two views dim alike.
+  The bands draw after the whole-image texture and the region patches, so the dim holds over whatever the view paints below it.
 - Shift at the `r` press edge turns the image around the mouse point (`ViewState::pivot`) instead of the image center.
   The hold keeps the image point under that pivot on its window spot, so `rotate::pivot` shifts the pan and its target every frame, and again through the release snap (`keep_pivot` in `main.rs`).
   The pivot is a pan shift and not a second draw origin: the draw and the `f` hit test keep one center, the window middle plus the pan.

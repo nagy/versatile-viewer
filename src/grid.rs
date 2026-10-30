@@ -66,7 +66,7 @@ use derive_more::{Display, Error, From};
 use raylib::{color::Color, prelude::*};
 
 use crate::{
-    DecodedImage,
+    DIM_TINT, DecodedImage,
     blurbg::{self},
     dim::{ImgH, ImgW, LongSide, Rect, WinH, WinW},
     surface::{Surface, SurfaceError, View, open_book_surface, open_surface},
@@ -137,9 +137,6 @@ const PLACEHOLDER_UPLOADS_PER_FRAME: usize = 16;
 const GRID_ZOOM_STEP: f32 = 1.25;
 /// Lower bound for the thumbnail side when the grid zooms out.
 const GRID_MIN_SIDE: f32 = 32.0;
-/// The tint of a cell that a visual selection excludes.
-/// The dim keeps every image visible, while the selected set holds the eye.
-const DIM_TINT: Color = Color::new(90, 90, 90, 255);
 /// The maximum number of decodes in flight at once.
 /// Jobs run in parallel on the shared rayon pool.
 /// jxl-oxide parallelizes each decode further inside.

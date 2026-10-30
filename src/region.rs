@@ -109,6 +109,48 @@ impl Crop {
     }
 }
 
+/// One window mapping of a plane: the numbers the draw uses, bundled.
+///
+/// The picture centers at the window middle plus the pan, scales by `scale`
+/// and turns clockwise by `angle` degrees.
+/// [`Frame::to_screen`] and [`Frame::to_image`] are the one conversion pair,
+/// so a caller that keeps a `Frame` never mixes window units with source
+/// units.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Frame {
+    /// The plane size, in source pixels.
+    pub img: Vector2,
+    /// The window size, in window pixels.
+    pub win: Vector2,
+    /// The offset of the plane center from the window middle, in window
+    /// pixels.
+    pub pan: Vector2,
+    /// Output pixels per source pixel.
+    pub scale: f32,
+    /// The clockwise turn, in degrees.
+    pub angle: f32,
+}
+
+impl Frame {
+    /// The window position of a source point.
+    #[must_use]
+    pub fn to_screen(&self, point: Vector2) -> Vector2 {
+        to_screen(point, self.img, self.win, self.pan, self.scale, self.angle)
+    }
+
+    /// The source point under a window position.
+    #[must_use]
+    pub fn to_image(&self, point: Vector2) -> Vector2 {
+        to_image(point, self.img, self.win, self.pan, self.scale, self.angle)
+    }
+
+    /// Whether the frame names a plane the view can draw.
+    #[must_use]
+    pub fn drawable(&self) -> bool {
+        self.img.x > 0.0 && self.img.y > 0.0
+    }
+}
+
 /// The window position of a source point, matching the draw transform.
 ///
 /// The image center sits at the window middle plus the pan, the image scales

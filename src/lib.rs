@@ -45,6 +45,8 @@
 //! source repaints the part of the window it shows, at the scale it shows it,
 //! so a deep zoom never stretches the base raster.
 //! [`rotate`] holds the image-view rotation angle behind the `r` hold.
+//! [`region_sel`] holds the image-view region selection behind the `v` hold,
+//! and the geometry that dims the picture around it.
 //! [`thumbcache`] keeps the grid thumbnails in `$XDG_CACHE_HOME`, so a warm
 //! cache fills the grid without a decode, across the exit of the viewer.
 //! [`placeholder`] holds the few-byte `ThumbHash` of a thumb, which the cache
@@ -68,6 +70,7 @@ pub mod mermaid;
 pub mod pdf;
 pub mod placeholder;
 pub mod region;
+pub mod region_sel;
 pub mod rotate;
 pub mod sign;
 pub mod surface;
@@ -99,6 +102,33 @@ pub use crate::error::{DecodeError, UploadError};
 /// pan and the image free zoom.
 /// Both views read this one constant, so the two speeds never drift apart.
 pub const SHIFT_SPEED_MULTIPLIER: u32 = 2;
+
+/// The brightness a dimmed area keeps, as a 0..=255 channel value.
+///
+/// The grid dims every cell outside a visual selection, and the image view
+/// dims the picture outside a region selection.
+/// Both read this one level, so the two views never show a different
+/// darkness.
+/// [`DIM_TINT`] multiplies a dimmed texture by it, and [`DIM_VEIL`] blends the
+/// same share away, so one number drives both.
+pub const DIM_LEVEL: u8 = 90;
+
+/// The pointer travel, in window pixels, that still counts as a click.
+///
+/// The `f` pan hold and the `v` region drag both read it, so a shaky hand
+/// never turns a tap into a drag.
+/// Both keys measure the travel in window pixels, never in source units,
+/// because a deep zoom makes one window pixel a wide source span.
+pub const TAP_SLACK: f32 = 4.0;
+
+/// The tint of a dimmed draw: a texture multiplied by [`DIM_LEVEL`].
+pub const DIM_TINT: Color = Color::new(DIM_LEVEL, DIM_LEVEL, DIM_LEVEL, 255);
+
+/// The black veil over a dimmed part of the image view.
+///
+/// Alpha `255 - DIM_LEVEL` leaves the share of brightness that [`DIM_TINT`]
+/// keeps, so a veiled pixel darkens exactly like a tinted one.
+pub const DIM_VEIL: Color = Color::new(0, 0, 0, 255 - DIM_LEVEL);
 
 /// Holds the decoded image data.
 #[derive(Debug, Clone, PartialEq, Eq)]
