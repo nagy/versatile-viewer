@@ -46,9 +46,9 @@
 //!
 //! A diagram paints no page: the emitted SVG draws the boxes and the labels,
 //! and every other pixel stays transparent.
-//! The surface therefore names [`BACKGROUND`], the white paper a Mermaid
-//! diagram assumes, and the image view clears to it, so the lines never sit on
-//! the viewer default.
+//! The surface therefore paints [`BACKGROUND`], the white paper a Mermaid
+//! diagram assumes, under every render, so the lines never sit on the viewer
+//! default.
 //! That color lives here, and no other module knows the choice.
 
 use std::{borrow::Cow, collections::BTreeSet, path::Path, sync::LazyLock};
@@ -68,9 +68,10 @@ use crate::surface::{Surface, SurfaceError, VectorSurface};
 ///
 /// Mermaid emits no page rectangle, so every pixel the diagram does not draw
 /// stays transparent.
-/// The SVG backend therefore names this color as the background of the
-/// surface ([`Surface::background`]), and the image view clears to it instead
-/// of the viewer default.
+/// The SVG backend therefore paints this color under the tree
+/// (`VectorSurface::with_background`), so the paper rides the pixels of the
+/// grid cell, the thumbnail and the window patch, and the viewer window keeps
+/// its own background.
 const BACKGROUND: Color = Color::new(0xff, 0xff, 0xff, 0xff);
 
 /// The directive that turns HTML labels off.
@@ -319,28 +320,41 @@ mod tests {
     }
 
     #[test]
-    fn mermaid_names_a_white_background() {
+    fn mermaid_paints_its_white_paper() {
+        // The diagram draws no page, so the render carries the paper under its
+        // lines: the grid cell, the thumbnail and the window patch all show
+        // the diagram on white, and no window color arrives late.
         let tmp = tempfile::TempDir::new().unwrap();
         let path = write(tmp.path(), "diagram.mmd", FLOW);
         let surface = crate::surface::open_surface(&path).unwrap();
-        assert_eq!(surface.background(), Some(BACKGROUND));
+        let image = surface
+            .render(crate::surface::View::whole(0, 0.25))
+            .unwrap();
+        // The top-left corner holds no box of a `flowchart LR`, so it shows
+        // the paper.
+        assert_eq!(&image.data[..4], &[0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(
+            &image.data[image.data.len() - 4..],
+            &[0xff, 0xff, 0xff, 0xff]
+        );
     }
 
     #[test]
     fn mermaid_paints_text_not_only_boxes() {
         // A label box without its text is the failure mode of a raw merman
-        // SVG with `usvg`, so the test counts painted pixels inside the
-        // picture instead of trusting the size alone.
+        // SVG with `usvg`, so the test counts the pixels the diagram draws
+        // over its paper instead of trusting the size alone.
         let tmp = tempfile::TempDir::new().unwrap();
         let path = write(tmp.path(), "diagram.mmd", FLOW);
         let surface = crate::surface::open_surface(&path).unwrap();
         let image = surface.render_whole(0, 1.0).unwrap();
+        let paper = [BACKGROUND.r, BACKGROUND.g, BACKGROUND.b, BACKGROUND.a];
         let painted = image
             .data
             .as_chunks::<4>()
             .0
             .iter()
-            .filter(|px| px[3] > 0)
+            .filter(|px| **px != paper)
             .count();
         assert!(painted > 0, "the diagram painted no pixel");
     }

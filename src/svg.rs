@@ -125,6 +125,12 @@ impl Vector {
     /// A filter that samples past the region loses its outer context, so the
     /// caller paints a margin around what it shows.
     ///
+    /// A tree that draws no page of its own (a Mermaid diagram) assumes a
+    /// paper color, and `background` fills that color, as RGBA8, under the
+    /// paint.
+    /// The paper then rides the pixels, so the grid cell, the thumbnail and
+    /// the window patch all carry it without a window color that lands late.
+    ///
     /// # Errors
     ///
     /// The function errors when the pixmap allocation fails.
@@ -132,6 +138,7 @@ impl Vector {
         &self,
         region: crate::region::Crop,
         scale: f32,
+        background: Option<[u8; 4]>,
     ) -> Result<DecodedImage, DecodeError> {
         let scale = if scale.is_finite() && scale > 0.0 {
             scale
@@ -148,6 +155,11 @@ impl Vector {
         let height = (region.h * scale * fit).round().max(1.0);
         let (rw, rh) = (width as u32, height as u32);
         let mut pixmap = tiny_skia::Pixmap::new(rw, rh).ok_or(DecodeError::Raster)?;
+        // The paper fills before the tree paints, so a transparent part of the
+        // tree shows the paper the tree assumes and never what lies below.
+        if let Some([red, green, blue, alpha]) = background {
+            pixmap.fill(tiny_skia::Color::from_rgba8(red, green, blue, alpha));
+        }
         // The region arrives in base raster pixels, and the tree paints in
         // declared units.
         let per_base = self.declared_per_base();
@@ -671,7 +683,7 @@ mod tests {
             w: 512.0,
             h: 512.0,
         };
-        let patch = vector.render_region(right, 1.0).expect("paint");
+        let patch = vector.render_region(right, 1.0, None).expect("paint");
         assert_eq!(
             (patch.width, patch.height),
             (ImgW::new(512), ImgH::new(512))
@@ -685,7 +697,7 @@ mod tests {
             w: 100.0,
             h: 50.0,
         };
-        let patch = vector.render_region(left, 2.0).expect("paint");
+        let patch = vector.render_region(left, 2.0, None).expect("paint");
         assert_eq!(
             (patch.width, patch.height),
             (ImgW::new(200), ImgH::new(100))
@@ -715,7 +727,7 @@ mod tests {
             w: 512.0,
             h: 341.0,
         };
-        let patch = vector.render_region(right, 2.0).expect("paint");
+        let patch = vector.render_region(right, 2.0, None).expect("paint");
         // The patch measures base pixels times the view scale.
         assert_eq!(
             (patch.width, patch.height),

@@ -374,12 +374,6 @@ impl Surface for BookSurface {
             h: self.slot.h * self.base,
         })
     }
-
-    fn background(&self) -> Option<raylib::color::Color> {
-        // The book paints no paper of its own, so it shows on whatever the
-        // pages it wraps ask for.
-        self.inner.background()
-    }
 }
 
 /// The overlap of two regions, or `None` when they miss.

@@ -67,9 +67,11 @@ use versatile_viewer::{
     zoomkeys::TypedKeys,
 };
 
-/// The background color of the window, `#062329`.
-/// The code clears with it unless the open source names its own
-/// ([`window_background`]), so the letterbox bars and the grid gaps match.
+/// The window background color, `#062329`.
+/// The grid and the image view both clear to it, so the letterbox bars and the
+/// gaps between thumbnails match.
+/// A source that paints no paper carries its own paper in its pixels (see
+/// `src/mermaid.rs`), so the window color never has to follow a picture.
 const BACKGROUND: Color = Color::new(0x06, 0x23, 0x29, 0xff);
 
 /// The border that marks a region selection.
@@ -1199,21 +1201,6 @@ fn patch_covers(st: &ViewState, win_w: f32, win_h: f32) -> bool {
     let win = Vector2::new(win_w, win_h);
     let needed = region::crop(img, win, st.pan, scale, st.angle, 0.0);
     crop.rect.contains(&needed)
-}
-
-/// The color the window clears to.
-///
-/// The image view honors the color its source names ([`Surface::background`]),
-/// so a picture that paints no paper shows on the color it assumes.
-/// The grid and every source without a preference clear to [`BACKGROUND`].
-fn window_background(st: &ViewState) -> Color {
-    if st.mode != Mode::Image {
-        return BACKGROUND;
-    }
-    st.source
-        .as_ref()
-        .and_then(|source| source.background())
-        .unwrap_or(BACKGROUND)
 }
 
 /// Keep the pivot of a turned image on its window spot.
@@ -3020,7 +3007,7 @@ fn main() -> Result<()> {
         };
 
         let mut d = rl.begin_drawing(&thread);
-        d.clear_background(window_background(&st));
+        d.clear_background(BACKGROUND);
 
         if st.mode == Mode::Grid {
             // VV_BLUR_BG gimmick: the blurred background follows the

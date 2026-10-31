@@ -54,6 +54,7 @@ impl Vector {
         &self,
         _region: crate::region::Crop,
         _scale: f32,
+        _background: Option<[u8; 4]>,
     ) -> Result<DecodedImage, DecodeError> {
         Err(DecodeError::VectorOff)
     }
