@@ -29,13 +29,13 @@ mermaid = ["svg", "dep:merman"]
 elk = ["mermaid", "merman/layout-elk"]
 
 [dependencies]
-anyhow = "1"
+anyhow = "1.0.104"
 # JPEG XL decode, pure Rust (no libjxl C dependency).
-jxl-oxide = "0.12"
+jxl-oxide = "0.12.6"
 # Common-format decode. Keep in sync with grid.rs is_image_path(): every
 # extension it accepts must have a feature here, except "pdf" (see below).
 # webp = image-webp, pure Rust (lossy VP8 + lossless VP8L decode).
-image = { version = "0.25", default-features = false, features = [
+image = { version = "0.25.10", default-features = false, features = [
   "bmp",
   "gif",
   "jpeg",
@@ -44,47 +44,47 @@ image = { version = "0.25", default-features = false, features = [
   "tiff",
   "webp",
 ] }
-raylib = "6"
+raylib = "6.0.0"
 # Work pool for parallel background decodes (grid prefetch); jxl-oxide also
 # uses rayon internally for single-image decode (its default feature).
-rayon = "1"
+rayon = "1.12.0"
 # PDF rasterization, pure Rust (no C dependency; vello_cpu rendering).
 # Confined to pdf.rs: the rest of the viewer only sees the Surface trait
 # (surface.rs), so a pdfium fallback swap touches one file. The default
 # features embed the standard-14 fonts and the cmaps.
 # 0.8 is required: render_into() takes an arbitrary kurbo::Affine, which is
 # what makes a region render (visible crop) possible.
-hayro = "0.8"
+hayro = "0.8.0"
 # Typst compile -> PDF export pipeline (pure Rust). Confined to typst.rs,
 # which hands the exported PDF bytes to the hayro backend in pdf.rs, so one
 # rasterizer draws every document. The exported pages are resolution
 # independent, so a region render and a settled-zoom refine work for a Typst
 # page exactly as for a PDF.
-typst = "0.15"
-typst-layout = "0.15"
-typst-pdf = "0.15"
+typst = "0.15.1"
+typst-layout = "0.15.1"
+typst-pdf = "0.15.1"
 # Fonts embedded in the binary (its "fonts" feature), so the viewer needs no
 # font directory and no environment variable.
-typst-assets = { version = "0.15", features = ["fonts"] }
+typst-assets = { version = "0.15.1", features = ["fonts"] }
 # SIMD image resize (the grid thumb, the texture cap, the preview and the
 # blur background).
 # Picks the best CPU extension at runtime.
 # The `rayon` feature stays off: the project runs one resize per decode
 # worker, and a nested parallel resize fights that pool for cores.
-fast_image_resize = { version = "6.1", default-features = false, features = [
+fast_image_resize = { version = "6.1.0", default-features = false, features = [
   "std",
   "bytemuck",
 ] }
 # Casts between `u8` and the typed RGBA pixel of `fast_image_resize`.
-bytemuck = "1"
+bytemuck = "1.25.2"
 # Natural-order file name sort (img2 before img10).
-natord = "1"
+natord = "1.0.9"
 # The few-byte placeholder of a grid thumbnail (ThumbHash, MIT, no
 # dependencies). The cache header carries one payload per entry, so a warm
 # launch paints the grid from headers before any JPEG XL decode.
-thumbhash = "0.1"
+thumbhash = "0.1.0"
 # Memory-mapped file reads for the streaming JXL loader.
-memmap2 = "0.9"
+memmap2 = "0.9.12"
 derive_more = { version = "2.1.1", default-features = false, features = [
   "display",
   "error",
@@ -92,29 +92,29 @@ derive_more = { version = "2.1.1", default-features = false, features = [
 ] }
 # MCP (Model Context Protocol) server, spec revision 2026-07-28.
 # The server runs on a background thread and owns stdin and stdout.
-rmcp = { version = "3.5", default-features = false, features = [
+rmcp = { version = "3.8.0", default-features = false, features = [
   "server",
   "transport-io",
 ] }
 # Async runtime for the rmcp server thread only.
 # `rt` gives the current-thread runtime builder.
-tokio = { version = "1", default-features = false, features = [
+tokio = { version = "1.54.1", default-features = false, features = [
   "rt",
   "io-util",
 ] }
 # The MCP tool schemas and the tool results.
-serde_json = "1"
+serde_json = "1.0.154"
 # The thumbnail cache directory.
 # `get_cache_home` resolves $XDG_CACHE_HOME, and falls back to `~/.cache`.
-xdg = { version = "3", optional = true }
+xdg = { version = "3.0.0", optional = true }
 # The thumbnail cache file name: SHA-256 of the canonical image path.
-sha2 = { version = "0.10", optional = true }
+sha2 = { version = "0.11.1", optional = true }
 # Lossy JPEG XL encode for a cache entry. Pure Rust, BSD-3-Clause OR
 # Apache-2.0, so it carries no license drag.
 # It is a second JXL codebase beside jxl-oxide, which only decodes.
 # `extraslow` stays off: it pulls the perceptual metric crates, and a 512 px
 # thumbnail never needs them. The SIMD backends stay on.
-jixel = { version = "0.5", default-features = false, features = [
+jixel = { version = "0.5.2", default-features = false, features = [
   "avx",
   "sse",
 ], optional = true }
@@ -166,7 +166,7 @@ usvg = { version = "0.49.0", default-features = false, features = [
 # feeds from the fontdb scan of svg.rs, so a fallback label box fits its text.
 # `system-fonts` stays off: the viewer passes the face files itself, so no
 # second system scan and no fontconfig dependency.
-merman = { version = "0.9.2", default-features = false, features = [
+merman = { version = "0.9.3", default-features = false, features = [
   "all-diagrams",
   "native-fonts",
   "svg",
@@ -175,15 +175,15 @@ merman = { version = "0.9.2", default-features = false, features = [
 # X11 WM_CLASS setup (XSetClassHint); Linux only, links the same libX11
 # raylib's X11 backend already pulls in.
 [target.'cfg(target_os = "linux")'.dependencies]
-x11 = "2.21"
+x11 = "2.21.0"
 
 [[bin]]
 name = "vv"
 path = "src/main.rs"
 
 [dev-dependencies]
-tempfile = "3"
-proptest = "1"
+tempfile = "3.27.0"
+proptest = "1.12.0"
 
 [lints.clippy]
 # Warning count stays at zero; pedantic is warn and burned down
