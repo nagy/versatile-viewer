@@ -74,6 +74,7 @@ The binary name is `vv`.
   A rejected source, a missing diagram and a panicking renderer all become `SurfaceError::Render`, never a crash.
   `is_mermaid` reads the extension only (`.mmd`), because Mermaid text has no magic bytes.
   A cold `.mmd` cell stays grey until its decode lands, like a Typst cell, because no cheap header parse exists.
+  A diagram paints no paper: the emitted SVG draws its boxes and labels and leaves every other pixel transparent, so `mermaid::BACKGROUND` (white) is the `Surface::background` of that surface (`VectorSurface::with_background`) and the image view clears to it; the color lives in `mermaid.rs`, and no other module names it.
 - Every showable source is a `src/surface.rs` `Surface`: `plane_count`, `bounds`, `render_whole`, `render`, `progressive` and `previews`.
   `open_surface` sniffs the content with `src/sign.rs` and picks the backend: a raster file (`ImageSurface`), a vector file (`VectorSurface`), a PDF (`PdfSurface`), a Typst source (`TypstSurface`, which compiles to PDF bytes) or a Mermaid source (`src/mermaid.rs`, which renders to SVG text).
   A backend writes `render_whole`; `render` is a provided method that renders the whole plane and crops the region out of it.
@@ -83,6 +84,7 @@ The binary name is `vv`.
   `Surface::progressive` returns a `Box<dyn ChunkSource>` and not a path, so an in-memory or network source can stream, and the default `Ok(None)` means one step.
   `Surface::can_refine` says whether a settled zoom can yield a sharper picture of the same plane: a vector tree or a document page answers true, a raster image false.
   `Surface::spread_count` and `Surface::spread_box` name the spread column of a book (0 and `None` for every other source), so the image view steps a spread with the book's own geometry.
+  `Surface::background` names the color a plane assumes behind its pixels, and `None` (the default) means the viewer `BACKGROUND`; only a source that paints no paper answers one, so a picture never picks the window color for itself.
   A raster plane measures the capped size it renders, so `bounds` and the pixels of a scale-1.0 render agree.
   The trait decisions live in `docs/adr/0001-surface-one-region-based-render-trait.md`.
 - The image view repaints the region its window shows, from the open surface, when `Surface::can_refine` says a sharper picture is possible.
@@ -222,8 +224,8 @@ The binary name is `vv`.
 Run `nix run . -- <image-path-or-directory>`.
 ESC never quits.
 
-The window clears to `BACKGROUND` (`#062329`, `main.rs`).
-Both views share it, so the letterbox bars and the grid gaps match.
+The window clears to `BACKGROUND` (`#062329`, `main.rs`) through `window_background`.
+The image view takes the color the open source names (`Surface::background`), and the grid and every source without one keep `BACKGROUND`, so the letterbox bars and the grid gaps match.
 
 - Keys: see the README table.
   `Space` steps forward and `Shift+Space` steps back, both as held states, so one key serves both ways.

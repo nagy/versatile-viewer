@@ -22,6 +22,7 @@ use std::{
 };
 
 use derive_more::{Display, Error, From};
+use raylib::color::Color;
 
 use crate::{
     DecodedImage,
@@ -282,6 +283,18 @@ pub trait Surface: Send + Sync {
     fn spread_box(&self, _spread: usize) -> Option<Region> {
         None
     }
+
+    /// The color the picture assumes behind its pixels, or `None` to let the
+    /// viewer clear to its own background.
+    ///
+    /// A source whose picture draws no paper (a Mermaid diagram) answers the
+    /// color its lines expect, and the image view clears to it, so no
+    /// transparent part of the picture shows the viewer default.
+    /// Every other source answers `None`, because its own pixels cover the
+    /// plane.
+    fn background(&self) -> Option<Color> {
+        None
+    }
 }
 
 /// Why a surface could not open, describe or render a plane.
@@ -499,6 +512,9 @@ impl Surface for ImageSurface {
 #[derive(Debug)]
 pub struct VectorSurface {
     vector: std::sync::Arc<crate::svg::Vector>,
+    /// The color the tree assumes behind its paints, or `None` for the viewer
+    /// default.
+    background: Option<Color>,
 }
 
 #[cfg(feature = "svg")]
@@ -511,6 +527,7 @@ impl VectorSurface {
     pub fn open(path: &Path) -> Result<Self, SurfaceError> {
         Ok(VectorSurface {
             vector: std::sync::Arc::new(crate::svg::parse(path)?),
+            background: None,
         })
     }
 
@@ -522,7 +539,19 @@ impl VectorSurface {
     pub(crate) fn from_vector(vector: crate::svg::Vector) -> Self {
         VectorSurface {
             vector: std::sync::Arc::new(vector),
+            background: None,
         }
+    }
+
+    /// Name the color the tree assumes behind its paints.
+    ///
+    /// The caller owns that choice, so a generated diagram picks its paper
+    /// without a change to this module (see [`Self::background`]).
+    #[cfg(feature = "mermaid")]
+    #[must_use]
+    pub(crate) fn with_background(mut self, background: Color) -> Self {
+        self.background = Some(background);
+        self
     }
 }
 
@@ -580,6 +609,10 @@ impl Surface for VectorSurface {
     // of the same picture.
     fn can_refine(&self) -> bool {
         true
+    }
+
+    fn background(&self) -> Option<Color> {
+        self.background
     }
 }
 
@@ -966,6 +999,9 @@ mod tests {
         assert!(!surface.previews());
         // The tree paints at any scale, so the view repaints a settled zoom.
         assert!(surface.can_refine());
+        // A vector file paints its own page, so it keeps the viewer
+        // background.
+        assert_eq!(surface.background(), None);
     }
 
     #[cfg(feature = "svg")]

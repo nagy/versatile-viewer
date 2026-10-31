@@ -43,6 +43,13 @@
 //! open runs on a decode worker.
 //! A source that holds no diagram, or one that the parser rejects, becomes a
 //! readable message, so the grid marks the cell as failed.
+//!
+//! A diagram paints no page: the emitted SVG draws the boxes and the labels,
+//! and every other pixel stays transparent.
+//! The surface therefore names [`BACKGROUND`], the white paper a Mermaid
+//! diagram assumes, and the image view clears to it, so the lines never sit on
+//! the viewer default.
+//! That color lives here, and no other module knows the choice.
 
 use std::{borrow::Cow, collections::BTreeSet, path::Path, sync::LazyLock};
 
@@ -53,8 +60,18 @@ use merman::{
         export::{NativeFontContext, NativeFontLimits, NativeFontOptions},
     },
 };
+use raylib::color::Color;
 
 use crate::surface::{Surface, SurfaceError, VectorSurface};
+
+/// The color a diagram paints on.
+///
+/// Mermaid emits no page rectangle, so every pixel the diagram does not draw
+/// stays transparent.
+/// The SVG backend therefore names this color as the background of the
+/// surface ([`Surface::background`]), and the image view clears to it instead
+/// of the viewer default.
+const BACKGROUND: Color = Color::new(0xff, 0xff, 0xff, 0xff);
 
 /// The directive that turns HTML labels off.
 ///
@@ -127,9 +144,9 @@ pub fn open(path: &Path) -> Result<Box<dyn Surface>, SurfaceError> {
     let source = String::from_utf8(bytes)
         .map_err(|_| SurfaceError::Unsupported("the Mermaid source is not UTF-8".into()))?;
     let svg = render(&svg_label_source(&source))?;
-    Ok(Box::new(VectorSurface::from_vector(crate::svg::from_str(
-        &svg,
-    )?)))
+    Ok(Box::new(
+        VectorSurface::from_vector(crate::svg::from_str(&svg)?).with_background(BACKGROUND),
+    ))
 }
 
 /// Render one Mermaid source to an SVG string.
@@ -299,6 +316,14 @@ mod tests {
         let bounds = surface.bounds(0).unwrap();
         assert!(bounds.w >= 1024.0 || bounds.h >= 1024.0);
         assert!(surface.can_refine());
+    }
+
+    #[test]
+    fn mermaid_names_a_white_background() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = write(tmp.path(), "diagram.mmd", FLOW);
+        let surface = crate::surface::open_surface(&path).unwrap();
+        assert_eq!(surface.background(), Some(BACKGROUND));
     }
 
     #[test]
