@@ -177,6 +177,8 @@ The binary name is `vv`.
   Without it `src/thumbcache_off.rs` answers `CacheError::Off` from every call, so every launch decodes every file.
   One constant sizes the runtime thumb and the entry: `THUMB_LONG_SIDE` (512).
   A warm cell and a cold one therefore match, because a decode resizes once to the entry size and a cache write copies no pixels.
+  A thumb texture is always bilinear (`grid::upload_thumb`), and the `a` key never reaches it: the cell fills with the thumb, and the image view stretches it over the image rect while the full-res decode catches up, so both draw it far larger than the texture and nearest aliases badly there.
+  The flag reaches the whole-image texture and the region patches only.
   An entry holds a fixed header and a JPEG XL codestream, so a 512 px thumb costs tens of kilobytes instead of one megabyte of RGBA8.
   The encode is `jixel`, pure Rust (BSD-3-Clause OR Apache-2.0), lossy at `QUALITY` (95) with `ALPHA_DISTANCE` 0, so only the alpha channel stays exact.
   The decode is the same `jxl-oxide` the viewer uses for a file.

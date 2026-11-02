@@ -66,7 +66,7 @@ use derive_more::{Display, Error, From};
 use raylib::{color::Color, prelude::*};
 
 use crate::{
-    DIM_TINT, DecodedImage,
+    DIM_TINT, DecodedImage, UploadError,
     blurbg::{self},
     dim::{ImgH, ImgW, LongSide, Rect, WinH, WinW},
     surface::{Surface, SurfaceError, View, open_book_surface, open_surface},
@@ -566,6 +566,22 @@ fn run_placeholder(cache: &Cache, path: &Path) -> ((ImgW, ImgH), Option<DecodedI
     )
 }
 
+/// Upload one thumbnail texture and filter it bilinear.
+/// A thumb measures [`THUMB_LONG_SIDE`] at most, and both users draw it far
+/// larger than that: a grid cell fills the cell, and the image view stretches
+/// it over the image rect while the full-res decode catches up.
+/// Nearest would show stair steps in both, so a thumb never takes the view
+/// filter of `a`, which picks the filter of the whole-image texture only.
+fn upload_thumb(
+    rl: &mut RaylibHandle,
+    thread: &RaylibThread,
+    rgba: &DecodedImage,
+) -> Result<Texture2D, UploadError> {
+    let tex = crate::upload_rgba(rl, thread, &rgba.data, rgba.width, rgba.height)?;
+    tex.set_texture_filter(thread, TextureFilter::TEXTURE_FILTER_BILINEAR);
+    Ok(tex)
+}
+
 impl Grid {
     /// List the images in a directory (sorted by file name) and start the
     /// background decode worker.
@@ -750,13 +766,8 @@ impl Grid {
             if e.texture.is_some() || e.placeholder.is_some() || e.failed.is_some() {
                 continue;
             }
-            match crate::upload_rgba(rl, thread, &rgba.data, rgba.width, rgba.height) {
-                Ok(tex) => {
-                    // Bilinear hides the small source size: the cell draws the
-                    // placeholder far larger than its texture.
-                    tex.set_texture_filter(thread, TextureFilter::TEXTURE_FILTER_BILINEAR);
-                    e.placeholder = Some(tex);
-                }
+            match upload_thumb(rl, thread, &rgba) {
+                Ok(tex) => e.placeholder = Some(tex),
                 Err(err) => eprintln!("vv: {}: {err:#}", e.source.label()),
             }
         }
@@ -781,7 +792,7 @@ impl Grid {
             full,
             no_full,
         } = ok;
-        match crate::upload_rgba(rl, thread, &thumb.data, thumb.width, thumb.height) {
+        match upload_thumb(rl, thread, &thumb) {
             Ok(tex) => {
                 let e = &mut self.entries[i];
                 e.texture = Some(tex);

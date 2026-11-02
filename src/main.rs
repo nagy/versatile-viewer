@@ -962,8 +962,10 @@ fn show_frame(
 /// Set the texture filter for the image view.
 /// The default is bilinear, which suits photos.
 /// `a` toggles nearest-neighbor (pixelated) for 1:1 pixel peeping.
-/// Grid thumbs always stay bilinear, because they are heavily downscaled and
-/// nearest aliases badly.
+/// The flag reaches the whole-image texture and the region patches only.
+/// A grid thumb stays bilinear through [`crate::grid`], because the cell and
+/// the image-view placeholder both draw it far larger than the texture, and
+/// nearest aliases badly there.
 fn apply_view_filter(thread: &RaylibThread, tex: &Texture2D, pixelated: bool) {
     tex.set_texture_filter(
         thread,
