@@ -227,7 +227,8 @@ struct DecodeOk {
 
 /// A decode job for one entry, as the worker sees it.
 /// The worker reads the cache first and decodes on a miss.
-#[derive(Debug, Clone)]
+/// The job holds an [`EntrySource`], so a job copy costs one refcount bump.
+#[derive(Debug)]
 struct Job {
     id: u64,
     source: EntrySource,
@@ -1699,7 +1700,7 @@ mod tests {
         // A keep-set job ignores the cache, because it needs the full image.
         let keep = Job {
             want_full: true,
-            ..job.clone()
+            ..job
         };
         let refill = run_job(&keep, &cache).expect("decode");
         assert!(refill.full.is_some());
@@ -1741,7 +1742,7 @@ mod tests {
         // on more pixels than the cell shows.
         let keep = Job {
             want_full: true,
-            ..job.clone()
+            ..job
         };
         let refill = run_job(&keep, &cache).expect("decode");
         let full = refill.full.expect("the keep set keeps the full image");

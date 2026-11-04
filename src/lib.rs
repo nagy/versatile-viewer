@@ -647,7 +647,7 @@ mod tests {
         let out = downscale_rgba_ref(img.as_rgba(), img.width(), img.height(), LongSide::new(64));
         assert_eq!((out.width(), out.height()), (ImgW::new(32), ImgH::new(16)));
         assert_eq!(out.as_rgba(), img.as_rgba());
-        assert_eq!(out, downscale_rgba(img.clone(), LongSide::new(64)));
+        assert_eq!(out, downscale_rgba(img, LongSide::new(64)));
     }
 
     #[test]
