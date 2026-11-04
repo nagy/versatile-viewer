@@ -163,6 +163,15 @@ The binary name is `vv`.
   Read the pixels with `as_rgba`, the extents with `width` and `height`, and consume it with `into_rgba` or `into_parts`.
   A crate path that just computed both the buffer and its size uses `DecodedImage::from_exact`, which debug-asserts the pair, so a wrong buffer still trips a test build.
   The type therefore retires the hand-written length checks: a wrong buffer never exists to check.
+- Ownership follows one rule: every `clone` names what it buys, and "the borrow checker complained" is not an answer.
+  A borrow conflict (`E0502`, `E0499`) is fixed in the structure that the error describes, never in a clone that silences it.
+  A value that must outlive a borrow and has more than one holder is an `Arc`, and its `.clone()` is the honest answer: a handle moves into a `rayon` closure, because `rayon::spawn` needs `'static`.
+  `EntrySource` therefore holds an `Arc<PathBuf>` and `Job` copies it with one refcount bump, and `ViewState::source` is an `Arc<dyn Surface>` that a paint moves into a worker.
+  An mpsc `Sender` clone and a `NativeFontContext` clone are the same kind of thing: a shared handle, not a copy of the data.
+  `mem::replace` swaps the visual anchor, and no code clones a pixel buffer: `downscale_rgba_ref` borrows.
+  A function that only reads takes `&Path`, `&str` or `&[T]`, and takes ownership only when it stores the value.
+  A process-wide table is a `LazyLock` or an `OnceLock` (the embedded font list and its book, the Mermaid renderer and its font context, the host font database, the X auto-repeat rate, the core count), because a third-party API reads it with no seam for an owner, and each static docstring names that reason.
+  The one `RefCell` (`Grid::layout_cache`) is a memo of a pure function of its key, and the grid is its only owner.
 - Two motion styles, and a key picks one:
   - Auto-repeat steps a discrete move.
     `src/keyrepeat.rs` reimplements the X rate for the grid selection and image next/previous.

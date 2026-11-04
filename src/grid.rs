@@ -552,6 +552,10 @@ pub struct Grid {
     /// The code recomputes it only when one of those changes, because the
     /// layout math is O(n).
     /// The field uses interior mutability because `draw` takes &self.
+    /// The grid is the only owner of the value, so this is a memo of a pure
+    /// function of the key and not shared state: a `&mut self` layout would
+    /// have to reach `draw`, which holds the grid immutably for the whole
+    /// frame.
     layout_cache: RefCell<Option<(LayoutKey, Layout)>>,
     /// The `VV_BLUR_BG` gimmick settings, read once.
     /// Decode workers compute the tiny blurred copy only when the gimmick is
