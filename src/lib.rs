@@ -576,8 +576,8 @@ pub fn upload_rgba(
     }
     let ffi_image = raylib::ffi::Image {
         data: pixels.as_ptr() as *mut std::os::raw::c_void,
-        width: width.raw() as i32,
-        height: height.raw() as i32,
+        width: width.as_i32(),
+        height: height.as_i32(),
         mipmaps: 1,
         format: PixelFormat::PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 as i32,
     };

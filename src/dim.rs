@@ -185,6 +185,30 @@ uint_newtype!(
     PreviewPx,
     "The longest side of a progressive preview, in pixels."
 );
+impl ImgW {
+    /// The width as a raylib texture dimension.
+    ///
+    /// raylib takes an `i32` where a texture dimension goes, and a width past
+    /// `i32::MAX` clamps instead of wrapping, so the comparison with a
+    /// texture never reads a negative size.
+    #[must_use]
+    pub fn as_i32(self) -> i32 {
+        i32::try_from(self.0).unwrap_or(i32::MAX)
+    }
+}
+
+impl ImgH {
+    /// The height as a raylib texture dimension.
+    ///
+    /// raylib takes an `i32` where a texture dimension goes, and a height past
+    /// `i32::MAX` clamps instead of wrapping, so the comparison with a
+    /// texture never reads a negative size.
+    #[must_use]
+    pub fn as_i32(self) -> i32 {
+        i32::try_from(self.0).unwrap_or(i32::MAX)
+    }
+}
+
 float_newtype!(WinW, "A window width, in pixels.");
 float_newtype!(WinH, "A window height, in pixels.");
 float_newtype!(Delay, "An auto-repeat initial delay, in seconds.");

@@ -631,10 +631,7 @@ fn crop_and_resample(
     img_scale: f32,
     scale: f32,
 ) -> Result<DecodedImage, SurfaceError> {
-    let (iw, ih) = (img.width.raw(), img.height.raw());
-    if img.data.len() != iw as usize * ih as usize * 4 {
-        return Err(SurfaceError::Buffer);
-    }
+    let (iw, ih) = (img.width().raw(), img.height().raw());
     // Crop in `img` pixels: surface units times the buffer's own scale.
     let px = |v: f32| (v * img_scale).round();
     let x = px(region.x.max(0.0)).clamp(0.0, iw as f32) as u32;
@@ -649,9 +646,9 @@ fn crop_and_resample(
     let tw = (region.w * scale).round().max(1.0) as u32;
     let th = (region.h * scale).round().max(1.0) as u32;
     let out = if tw == cw && th == ch {
-        crop_rows(&img.data, iw, x, y, cw, ch)
+        crop_rows(img.as_rgba(), iw, x, y, cw, ch)
     } else {
-        let cropped = crop_rows(&img.data, iw, x, y, cw, ch);
+        let cropped = crop_rows(img.as_rgba(), iw, x, y, cw, ch);
         crate::resample_rgba(&cropped, cw, ch, tw, th)
     };
     Ok(DecodedImage::from_exact(ImgW::new(tw), ImgH::new(th), out))
@@ -716,7 +713,7 @@ mod tests {
             (decoded.width, decoded.height),
             (ImgW::new(3), ImgH::new(2))
         );
-        assert_eq!(decoded.data.len(), 3 * 2 * 4);
+        assert_eq!(decoded.as_rgba().len(), 3 * 2 * 4);
     }
 
     #[test]
@@ -736,7 +733,7 @@ mod tests {
             (decoded.width, decoded.height),
             (ImgW::new(5), ImgH::new(4))
         );
-        assert_eq!(decoded.data.len(), 5 * 4 * 4);
+        assert_eq!(decoded.as_rgba().len(), 5 * 4 * 4);
     }
 
     #[test]
@@ -800,7 +797,7 @@ mod tests {
             (decoded.width, decoded.height),
             (ImgW::new(4), ImgH::new(4))
         );
-        assert_eq!(decoded.data.len(), 4 * 4 * 4);
+        assert_eq!(decoded.as_rgba().len(), 4 * 4 * 4);
     }
 
     #[test]
@@ -824,7 +821,7 @@ mod tests {
         );
         // The pixels past the edge repeat the crop, so the buffer stays
         // valid.
-        assert_eq!(decoded.data.len(), 8 * 8 * 4);
+        assert_eq!(decoded.as_rgba().len(), 8 * 8 * 4);
     }
 
     #[test]
@@ -961,7 +958,7 @@ mod tests {
         let base = surface.render(View::whole(0, 1.0)).unwrap();
         assert_eq!((base.width, base.height), (ImgW::new(1024), ImgH::new(512)));
         // The left half paints red.
-        assert_eq!(&base.data[..4], &[255, 0, 0, 255]);
+        assert_eq!(&base.as_rgba()[..4], &[255, 0, 0, 255]);
         assert!(surface.progressive().unwrap().is_none());
         assert!(!surface.previews());
         // The tree paints at any scale, so the view repaints a settled zoom.
@@ -983,7 +980,7 @@ mod tests {
             (thumb.width, thumb.height),
             (ImgW::new(512), ImgH::new(256))
         );
-        assert_eq!(thumb.data.len(), 512 * 256 * 4);
+        assert_eq!(thumb.as_rgba().len(), 512 * 256 * 4);
     }
 
     #[cfg(feature = "svg")]
@@ -1005,7 +1002,7 @@ mod tests {
             (patch.width, patch.height),
             (ImgW::new(512), ImgH::new(512))
         );
-        assert_eq!(&patch.data[..4], &[0, 0, 255, 255]);
+        assert_eq!(&patch.as_rgba()[..4], &[0, 0, 255, 255]);
         // A deeper zoom paints the same window rect at more pixels per source
         // pixel.
         let zoomed = surface.render(View::region(0, right, 2.0)).unwrap();
@@ -1091,7 +1088,7 @@ mod tests {
         };
         let out = WholeOnly.render(View::region(0, region, 1.0)).unwrap();
         assert_eq!((out.width, out.height), (ImgW::new(4), ImgH::new(2)));
-        assert_eq!(out.data.len(), 4 * 2 * 4);
+        assert_eq!(out.as_rgba().len(), 4 * 2 * 4);
     }
 
     #[test]

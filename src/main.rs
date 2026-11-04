@@ -936,7 +936,7 @@ fn show_frame(
     pixelated: bool,
 ) -> Result<(), UploadError> {
     match view_tex {
-        Some(tex) if tex.width() == width.raw() as i32 && tex.height() == height.raw() as i32 => {
+        Some(tex) if tex.width() == width.as_i32() && tex.height() == height.as_i32() => {
             tex.update_texture(rgba)?;
         }
         _ => {
@@ -1575,7 +1575,7 @@ fn main() -> Result<()> {
         .as_ref()
         .filter(|_| !book)
         .map_or((1024, 768), |image| {
-            (image.width().raw() as i32, image.height().raw() as i32)
+            (image.width().as_i32(), image.height().as_i32())
         });
 
     let (mut rl, thread) = raylib::init()

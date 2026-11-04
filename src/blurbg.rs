@@ -191,7 +191,7 @@ impl BlurBg {
     /// (streaming previews).
     fn upload(&mut self, rl: &mut RaylibHandle, thread: &RaylibThread, data: &DecodedImage) {
         let (width, height, rgba) = (data.width(), data.height(), data.as_rgba());
-        let same = matches!(&self.tex, Some(t) if t.width() == width.raw() as i32 && t.height() == height.raw() as i32);
+        let same = matches!(&self.tex, Some(t) if t.width() == width.as_i32() && t.height() == height.as_i32());
         if same {
             if let Some(t) = &mut self.tex
                 && t.update_texture(rgba).is_err()

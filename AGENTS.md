@@ -152,6 +152,7 @@ The binary name is `vv`.
   `main.rs` keeps `anyhow`.
 - Wrap raw pixel and window primitives in the `src/dim.rs` newtypes (`ImgW`, `ImgH`, `WinW`, `WinH`, `LongSide`, `PreviewPx`, `Delay`, `Rate`, `RampTime`, `Rect`).
   The newtype accessor is `raw()`, never `get()`: `ImgW::new(4).raw() == 4`.
+  `ImgW::as_i32` and `ImgH::as_i32` cross into a raylib texture dimension with `i32::try_from`, so a width past `i32::MAX` clamps instead of wrapping into a negative size; the draw and upload code never casts a dimension by hand.
   Public API boundaries take the newtype, not the bare primitive.
   `Rect` is a `#[repr(C)]` axis-aligned rectangle with raylib `Rectangle` field names.
   It converts with `From`, so a raylib call that takes `impl Into<Rectangle>` takes a `Rect` value directly.
