@@ -365,7 +365,7 @@ mod tests {
         let path = write(tmp.path(), "diagram.mmd", FLOW);
         let surface = open_surface(&path).unwrap();
         let bounds = surface.bounds(0).unwrap();
-        let region = crate::surface::Region {
+        let region = crate::surface::Crop {
             x: 0.0,
             y: 0.0,
             w: (bounds.w / 4.0).max(1.0),

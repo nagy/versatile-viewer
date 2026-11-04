@@ -417,7 +417,7 @@ Hello from page two.
         let tmp = tempfile::TempDir::new().unwrap();
         let path = write(tmp.path(), "doc.typ", TWO_PAGES);
         let surface = TypstSurface::open(&path).unwrap();
-        let region = crate::surface::Region {
+        let region = crate::surface::Crop {
             x: 0.0,
             y: 0.0,
             w: 100.0,

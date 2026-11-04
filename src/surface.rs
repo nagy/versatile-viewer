@@ -44,10 +44,10 @@ pub struct Size {
 }
 
 impl Size {
-    /// The whole plane as a [`Region`].
+    /// The whole plane as a [`Crop`].
     #[must_use]
-    pub const fn whole(self) -> Region {
-        Region {
+    pub const fn whole(self) -> Crop {
+        Crop {
             x: 0.0,
             y: 0.0,
             w: self.w,
@@ -56,40 +56,11 @@ impl Size {
     }
 }
 
-/// A rectangle in surface units.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Region {
-    /// The left edge, in surface units.
-    pub x: f32,
-    /// The top edge, in surface units.
-    pub y: f32,
-    /// The width, in surface units.
-    pub w: f32,
-    /// The height, in surface units.
-    pub h: f32,
-}
-
-impl From<crate::region::Crop> for Region {
-    fn from(crop: crate::region::Crop) -> Self {
-        Region {
-            x: crop.x,
-            y: crop.y,
-            w: crop.w,
-            h: crop.h,
-        }
-    }
-}
-
-impl From<Region> for crate::region::Crop {
-    fn from(region: Region) -> Self {
-        crate::region::Crop {
-            x: region.x,
-            y: region.y,
-            w: region.w,
-            h: region.h,
-        }
-    }
-}
+/// A rectangle in surface units: the one rect type of the plane and the view.
+///
+/// [`crate::region::Crop`] names the same pixels, so a view and a renderer pass
+/// one value and never convert between two shapes that say the same thing.
+pub use crate::region::Crop;
 
 /// What to render: which plane, which region of it, and at what scale.
 /// `None` region means the whole plane.
@@ -101,7 +72,7 @@ pub struct View {
     pub plane: usize,
     /// The region to rasterize, in surface units ([`Size::whole`] when
     /// absent).
-    pub region: Option<Region>,
+    pub region: Option<Crop>,
     /// The output pixels per surface unit (1.0 = natural size).
     pub scale: f32,
 }
@@ -119,7 +90,7 @@ impl View {
 
     /// A region view at `scale`.
     #[must_use]
-    pub const fn region(plane: usize, region: Region, scale: f32) -> Self {
+    pub const fn region(plane: usize, region: Crop, scale: f32) -> Self {
         View {
             plane,
             region: Some(region),
@@ -281,7 +252,7 @@ pub trait Surface: Send + Sync {
     ///
     /// A book answers the full width of the plane and one page tall, at the
     /// row the spread stacks in, so the image view can aim a step at it.
-    fn spread_box(&self, _spread: usize) -> Option<Region> {
+    fn spread_box(&self, _spread: usize) -> Option<Crop> {
         None
     }
 }
@@ -586,9 +557,7 @@ impl Surface for VectorSurface {
             return Err(SurfaceError::Scale(scale));
         }
         let region = self.bounds(0)?.whole();
-        Ok(self
-            .vector
-            .render_region(crate::region::Crop::from(region), scale, self.paper())?)
+        Ok(self.vector.render_region(region, scale, self.paper())?)
     }
 
     fn render(&self, view: View) -> Result<DecodedImage, SurfaceError> {
@@ -601,11 +570,9 @@ impl Surface for VectorSurface {
         // The tree has a region anchor, so it paints the requested rect and
         // never rasterizes the whole document for a window-sized patch.
         let region = view.region.unwrap_or(self.bounds(0)?.whole());
-        Ok(self.vector.render_region(
-            crate::region::Crop::from(region),
-            view.scale,
-            self.paper(),
-        )?)
+        Ok(self
+            .vector
+            .render_region(region, view.scale, self.paper())?)
     }
 
     fn progressive(&self) -> Result<Option<Box<dyn ChunkSource>>, SurfaceError> {
@@ -660,7 +627,7 @@ fn capped(width: ImgW, height: ImgH) -> (ImgW, ImgH) {
 /// the crop is empty.
 fn crop_and_resample(
     img: &DecodedImage,
-    region: Region,
+    region: Crop,
     img_scale: f32,
     scale: f32,
 ) -> Result<DecodedImage, SurfaceError> {
@@ -668,7 +635,7 @@ fn crop_and_resample(
     if img.data.len() != iw as usize * ih as usize * 4 {
         return Err(SurfaceError::Buffer);
     }
-    // Region in `img` pixels: surface units times the buffer's own scale.
+    // Crop in `img` pixels: surface units times the buffer's own scale.
     let px = |v: f32| (v * img_scale).round();
     let x = px(region.x.max(0.0)).clamp(0.0, iw as f32) as u32;
     let y = px(region.y.max(0.0)).clamp(0.0, ih as f32) as u32;
@@ -707,7 +674,7 @@ fn crop_rows(rgba: &[u8], width: u32, x: u32, y: u32, cw: u32, ch: u32) -> Vec<u
 }
 
 /// Scale the whole of `img` to `scale` output pixels per surface unit.
-fn resample(img: &DecodedImage, region: Region, scale: f32) -> Result<DecodedImage, SurfaceError> {
+fn resample(img: &DecodedImage, region: Crop, scale: f32) -> Result<DecodedImage, SurfaceError> {
     crop_and_resample(img, region, 1.0, scale)
 }
 
@@ -823,7 +790,7 @@ mod tests {
         // scale 1.0 is 4x4 pixels.
         let dir = temp_dir();
         let path = write_png(dir.path(), "img.png", 8, 4);
-        let region = Region {
+        let region = Crop {
             x: 0.0,
             y: 0.0,
             w: 4.0,
@@ -844,7 +811,7 @@ mod tests {
     fn a_region_off_the_edge_crops_instead_of_failing() {
         let dir = temp_dir();
         let path = write_png(dir.path(), "img.png", 8, 4);
-        let region = Region {
+        let region = Crop {
             x: 6.0,
             y: 2.0,
             w: 8.0,
@@ -1031,7 +998,7 @@ mod tests {
         let surface = open_surface(&path).unwrap();
         // The region arrives in base raster pixels, so the right half starts
         // at x = 512.
-        let right = Region {
+        let right = Crop {
             x: 512.0,
             y: 0.0,
             w: 512.0,
@@ -1061,26 +1028,23 @@ mod tests {
     }
 
     #[test]
-    fn a_region_converts_from_a_crop_and_back() {
+    fn a_crop_is_one_type_for_the_view_and_the_plane() {
         // The image view computes its patch as a `region::Crop`, and a surface
-        // takes a `Region`, so the two must keep the same fields.
+        // takes the same type, so no call site converts one shape into
+        // another.
         let crop = crate::region::Crop {
             x: 1.0,
             y: 2.0,
             w: 3.0,
             h: 4.0,
         };
-        let region = Region::from(crop);
-        assert_eq!(
-            region,
-            Region {
-                x: 1.0,
-                y: 2.0,
-                w: 3.0,
-                h: 4.0
-            }
-        );
-        assert_eq!(crate::region::Crop::from(region), crop);
+        let whole = Crop {
+            x: 1.0,
+            y: 2.0,
+            w: 3.0,
+            h: 4.0,
+        };
+        assert_eq!(crop, whole);
     }
 
     /// A backend that writes only `render_whole`: it inherits region support
@@ -1123,7 +1087,7 @@ mod tests {
     fn default_render_crops_a_region_from_the_whole_plane() {
         // WholeOnly has no region anchor; the trait default must render the
         // whole plane and crop the requested region out of it.
-        let region = Region {
+        let region = Crop {
             x: 2.0,
             y: 1.0,
             w: 4.0,
@@ -1136,7 +1100,7 @@ mod tests {
 
     #[test]
     fn default_render_scales_a_region() {
-        let region = Region {
+        let region = Crop {
             x: 0.0,
             y: 0.0,
             w: 4.0,
@@ -1185,7 +1149,7 @@ mod tests {
 
     #[test]
     fn a_backend_without_an_anchor_fails_loudly_on_a_region() {
-        let region = Region {
+        let region = Crop {
             x: 0.0,
             y: 0.0,
             w: 2.0,

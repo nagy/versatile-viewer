@@ -17,12 +17,13 @@ planes. A plane has a natural extent in surface units. Rendering takes a
 
 ```rust
 pub struct Size { pub w: f32, pub h: f32 }
-pub struct Region { pub x: f32, pub y: f32, pub w: f32, pub h: f32 }
+// One rect type serves the plane and the view: `region::Crop`.
+pub struct Crop { pub x: f32, pub y: f32, pub w: f32, pub h: f32 }
 
 pub struct View {
     pub plane: usize,
-    pub region: Option<Region>, // None = the whole plane
-    pub scale: f32,             // output pixels per surface unit
+    pub region: Option<Crop>, // None = the whole plane
+    pub scale: f32,           // output pixels per surface unit
 }
 
 pub trait ChunkSource: Send {
@@ -97,3 +98,10 @@ view fits a scale. `bounds` is cheap and must not decode.
   browses like a directory, with no file behind it.
 - The thumbnail cache keys on a file path, so a cell with no file skips the
   cache and the placeholder pass by construction.
+
+## Amendment: one rect type
+
+`region::Crop` is the one rectangle of a source: the image view computes its
+patch with it, `View` carries it, and a backend renders it. The earlier
+`surface::Region` differed only in name, so it is gone. `surface::Crop` stays a
+re-export, so a backend that writes `surface::Crop` still reads.

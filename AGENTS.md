@@ -79,7 +79,8 @@ The binary name is `vv`.
   `open_surface` sniffs the content with `src/sign.rs` and picks the backend: a raster file (`ImageSurface`), a vector file (`VectorSurface`), a PDF (`PdfSurface`), a Typst source (`TypstSurface`, which compiles to PDF bytes) or a Mermaid source (`src/mermaid.rs`, which renders to SVG text).
   A backend writes `render_whole`; `render` is a provided method that renders the whole plane and crops the region out of it.
   A backend with a region anchor (the vector tree, the PDF rasterizer) overrides `render` to pay only for the pixels the caller asked for, and returns `SurfaceError::Unsupported` rather than the whole plane for a region it cannot serve.
-  A `View` names a plane, an optional `Region` and a scale (output pixels per surface unit), so the grid asks for a thumbnail, the loader for the whole plane and the image view for the patch it shows.
+  A `View` names a plane, an optional `region::Crop` and a scale (output pixels per surface unit), so the grid asks for a thumbnail, the loader for the whole plane and the image view for the patch it shows.
+  `region::Crop` is the one rectangle type of a source and of the view, and `surface::Crop` re-exports it, so no call site converts one rect shape into another.
   `src/sign.rs` owns the content sniffing (`detect`, `Kind`, `Format`, `file_magic`, `is_common_magic`, `dimensions`), and both the surface layer and `svg.rs` use it.
   `detect` reads the magic once and answers a `Kind`: `Kind::Vector` for an SVG document, or `Kind::Raster(Format)` with the decoder that reads the file.
   The raster backend keeps that `Format`, so its header read and its progressive open never sniff the same bytes again.

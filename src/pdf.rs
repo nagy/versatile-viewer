@@ -40,7 +40,7 @@ use hayro::{
 use crate::{
     DecodedImage,
     dim::{ImgH, ImgW},
-    surface::{ChunkSource, Region, Size, Surface, SurfaceError, View},
+    surface::{ChunkSource, Crop, Size, Surface, SurfaceError, View},
 };
 
 /// Pixel budget for one render.
@@ -148,7 +148,7 @@ impl PdfSurface {
     fn rasterize(
         &self,
         plane: usize,
-        region: Region,
+        region: Crop,
         scale: f32,
     ) -> Result<(DecodedImage, f32), SurfaceError> {
         if !scale.is_finite() || scale <= 0.0 {
@@ -266,7 +266,7 @@ impl Surface for PdfSurface {
 /// The pixmap dimensions for `region` at `scale`, and the scale after the
 /// pixel-budget clamp.
 /// The returned scale is at least as small as the requested one.
-fn pixel_dimensions(region: Region, scale: f32) -> (u16, u16, f32) {
+fn pixel_dimensions(region: Crop, scale: f32) -> (u16, u16, f32) {
     let (rw, rh) = (f64::from(region.w.max(0.0)), f64::from(region.h.max(0.0)));
     let mut scale = f64::from(scale);
     let area = (rw * rh).max(1.0);
@@ -378,7 +378,7 @@ trailer<</Root 1 0 R/Size 8>>";
     #[test]
     fn region_render_crops_and_scales() {
         let surface = PdfSurface::from_bytes(MINIMAL_PDF.to_vec()).unwrap();
-        let region = Region {
+        let region = Crop {
             x: 70.0,
             y: 70.0,
             w: 100.0,
@@ -393,7 +393,7 @@ trailer<</Root 1 0 R/Size 8>>";
         // Crop the page exactly around the text and confirm the ink lands
         // inside the crop: the region path must not shift the content.
         let surface = PdfSurface::from_bytes(MINIMAL_PDF.to_vec()).unwrap();
-        let region = Region {
+        let region = Crop {
             x: 70.0,
             y: 70.0,
             w: 100.0,

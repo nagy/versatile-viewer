@@ -37,7 +37,7 @@ use std::sync::Arc;
 use crate::{
     DecodedImage, MAX_TEXTURE_SIDE,
     dim::{ImgH, ImgW},
-    surface::{Region, Size, Surface, SurfaceError, View},
+    surface::{Crop, Size, Surface, SurfaceError, View},
 };
 
 /// The pages before the first pair.
@@ -254,7 +254,7 @@ impl BookSurface {
     }
 
     /// Paint `region` (in base units) at `scale` output pixels per base unit.
-    fn paint(&self, region: Region, scale: f32) -> Result<DecodedImage, SurfaceError> {
+    fn paint(&self, region: Crop, scale: f32) -> Result<DecodedImage, SurfaceError> {
         if !(scale.is_finite() && scale > 0.0) {
             return Err(SurfaceError::Scale(scale));
         }
@@ -280,17 +280,17 @@ impl BookSurface {
                 };
                 let page_size = self.inner.bounds(page)?;
                 let (origin_x, origin_y) = self.page_origin(row, side, page_size);
-                let on_canvas = Region {
+                let on_canvas = Crop {
                     x: origin_x,
                     y: origin_y,
                     w: page_size.w,
                     h: page_size.h,
                 };
-                let Some(hit) = intersect(on_canvas, Region { x: x0, y: y0, w, h }) else {
+                let Some(hit) = intersect(on_canvas, Crop { x: x0, y: y0, w, h }) else {
                     continue;
                 };
                 // The request in page points, moved to the page origin.
-                let part = Region {
+                let part = Crop {
                     x: hit.x - origin_x,
                     y: hit.y - origin_y,
                     w: hit.w,
@@ -361,13 +361,13 @@ impl Surface for BookSurface {
         self.rows
     }
 
-    fn spread_box(&self, spread: usize) -> Option<Region> {
+    fn spread_box(&self, spread: usize) -> Option<Crop> {
         if spread >= self.rows {
             return None;
         }
         // Every spread spans the whole canvas and stands one page tall, so a
         // step from one to the next moves the pan by one row.
-        Some(Region {
+        Some(Crop {
             x: 0.0,
             y: spread as f32 * (self.slot.h + ROW_GAP) * self.base,
             w: self.canvas.w * self.base,
@@ -377,12 +377,12 @@ impl Surface for BookSurface {
 }
 
 /// The overlap of two regions, or `None` when they miss.
-fn intersect(a: Region, b: Region) -> Option<Region> {
+fn intersect(a: Crop, b: Crop) -> Option<Crop> {
     let x = a.x.max(b.x);
     let y = a.y.max(b.y);
     let right = (a.x + a.w).min(b.x + b.w);
     let bottom = (a.y + a.h).min(b.y + b.h);
-    (right > x && bottom > y).then_some(Region {
+    (right > x && bottom > y).then_some(Crop {
         x,
         y,
         w: right - x,
@@ -527,7 +527,7 @@ mod tests {
             (100.0, 200.0),
         ]);
         // Row 1 holds pages 1 and 2: a window across the seam sees both.
-        let seam = Region {
+        let seam = Crop {
             x: 90.0,
             y: 200.0,
             w: 30.0,
@@ -538,7 +538,7 @@ mod tests {
         assert_eq!(pixel(&img, 0, 100), [20, 0, 0, 255]);
         assert_eq!(pixel(&img, 29, 100), [30, 0, 0, 255]);
         // A window down the right column sees the page of the last row.
-        let down = Region {
+        let down = Crop {
             x: 150.0,
             y: 380.0,
             w: 50.0,
@@ -551,7 +551,7 @@ mod tests {
     #[test]
     fn a_region_past_the_canvas_clips_instead_of_failing() {
         let b = book(vec![(100.0, 200.0), (100.0, 200.0)]);
-        let region = Region {
+        let region = Crop {
             x: -10.0,
             y: -10.0,
             w: 50.0,
@@ -559,7 +559,7 @@ mod tests {
         };
         let img = b.render(View::region(0, region, 1.0)).unwrap();
         assert_eq!((img.width.get(), img.height.get()), (40, 40));
-        let far = Region {
+        let far = Crop {
             x: 1000.0,
             y: 1000.0,
             w: 10.0,
@@ -580,7 +580,7 @@ mod tests {
         assert!(img.width.get() < img.height.get());
         // The patch at a settled zoom converts back to points, so the page
         // backend rasterizes 100 x 100 points of text.
-        let region = Region {
+        let region = Crop {
             x: 0.0,
             y: 0.0,
             w: 100.0 * b.base(),
@@ -634,7 +634,7 @@ mod tests {
         // spans two of them plus the gutter.
         assert_eq!(
             first,
-            Region {
+            Crop {
                 x: 0.0,
                 y: 0.0,
                 w: 120.0 * SLOTS as f32 + GUTTER,
@@ -644,7 +644,7 @@ mod tests {
         // The pair spread sits one page under the cover spread.
         assert_eq!(
             b.spread_box(1).unwrap(),
-            Region {
+            Crop {
                 x: 0.0,
                 y: 200.0,
                 w: 120.0 * SLOTS as f32 + GUTTER,
@@ -678,7 +678,7 @@ mod tests {
             (plane.h * scale - win_h) / 2.0 - spread.y * scale
         };
         // The window, expressed as a region of the plane.
-        let window = |pan: f32| Region {
+        let window = |pan: f32| Crop {
             x: -((win_w - plane.w * scale) / 2.0) / scale,
             y: -((win_h - plane.h * scale) / 2.0 + pan) / scale,
             w: win_w / scale,

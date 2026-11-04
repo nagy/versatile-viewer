@@ -64,19 +64,23 @@ pub const SCALE_SLACK: f32 = 1.002;
 /// past it, and a continuous drag never queues a paint per frame.
 pub const QUIET: Duration = Duration::from_millis(150);
 
-/// An axis-aligned rectangle in source pixels.
+/// An axis-aligned rectangle in surface units.
 ///
 /// `x` and `y` give the top-left corner, and the axes grow right and down,
 /// like the base raster the region belongs to.
+/// The unit is the plane's own: base raster pixels for an image or a vector
+/// file, and PostScript points for a document page.
+/// [`crate::surface::View`] carries this same type, so the view and a backend
+/// pass one value and never convert between two rect shapes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Crop {
-    /// The left edge, in source pixels.
+    /// The left edge, in surface units.
     pub x: f32,
-    /// The top edge, in source pixels.
+    /// The top edge, in surface units.
     pub y: f32,
-    /// The width, in source pixels.
+    /// The width, in surface units.
     pub w: f32,
-    /// The height, in source pixels.
+    /// The height, in surface units.
     pub h: f32,
 }
 

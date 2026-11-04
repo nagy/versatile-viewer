@@ -544,7 +544,7 @@ impl ViewState {
         let (generation, id, tx) = (self.crop_gen, self.prefetch_id, self.crop_tx.clone());
         let plane = self.source_plane;
         rayon::spawn(move || {
-            match source.render(View::region(plane, paint.into(), scale)) {
+            match source.render(View::region(plane, paint, scale)) {
                 Ok(image) => {
                     let _ = tx.send(CropMsg::Prefetch {
                         generation,
@@ -713,7 +713,7 @@ impl ViewState {
         let (generation, tx) = (self.crop_gen, self.crop_tx.clone());
         let plane = self.source_plane;
         rayon::spawn(
-            move || match source.render(View::region(plane, paint.into(), scale)) {
+            move || match source.render(View::region(plane, paint, scale)) {
                 Ok(image) => {
                     let _ = tx.send(CropMsg::Crop {
                         generation,
