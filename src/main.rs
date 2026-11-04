@@ -34,6 +34,7 @@
 //! The viewer window stays interactive; the server owns stdin and stdout.
 
 use std::{
+    borrow::Cow,
     env, fs,
     path::{Path, PathBuf},
     sync::{
@@ -679,13 +680,13 @@ impl ViewState {
     fn request_source(&mut self, entry: &EntrySource) {
         self.close_crop();
         self.source_plane = 0;
-        let path = entry.path().to_path_buf();
+        let path = entry.handle();
         let (generation, tx) = (self.crop_gen, self.crop_tx.clone());
         rayon::spawn(move || {
             // The open reads the head and, for a vector file, parses the tree
             // once. A source that cannot refine keeps no handle: a repaint
             // would only decode the same pixels again.
-            let source: Option<Arc<dyn Surface>> = open_book_surface(&path)
+            let source: Option<Arc<dyn Surface>> = open_book_surface(path.as_path())
                 .ok()
                 .filter(|surface| surface.can_refine())
                 .map(Arc::from);
@@ -1400,6 +1401,9 @@ fn show_entry(
             e.source.clone(),
             e.queued,
             e.cell.thumb().is_some(),
+            // The copy is a tiny texture (`VV_BLUR_PX` long side, 128 by
+            // default), and the entry keeps its own for a later open, because
+            // a return to the grid and back reuses it.
             e.blur.clone(),
             e.no_full,
         )
@@ -1937,6 +1941,8 @@ fn main() -> Result<()> {
         // Back to the launch title in grid mode.
         if st.open_id != title_open_id {
             title_open_id = st.open_id;
+            // A grid title is the launch title already, so the borrow costs
+            // no allocation.
             let title = st
                 .open_id
                 .and_then(|id| {
@@ -1944,9 +1950,9 @@ fn main() -> Result<()> {
                         .entries
                         .iter()
                         .find(|e| e.id == id)
-                        .map(|e| image_title(e.source.path()))
+                        .map(|e| Cow::Owned(image_title(e.source.path())))
                 })
-                .unwrap_or_else(|| launch_title.clone());
+                .unwrap_or(Cow::Borrowed(launch_title.as_str()));
             rl.set_window_title(&thread, &title);
         }
 
