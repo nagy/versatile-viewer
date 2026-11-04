@@ -78,26 +78,34 @@ use crate::{
 ///
 /// The type stays cheap to clone, and it keeps the seam for a future
 /// in-memory or network source.
+/// The path rides an [`Arc`], because a decode job outlives the borrow of the
+/// grid that names it, and a refcount bump beats one path copy per job.
 #[derive(Clone, Debug)]
-pub struct EntrySource(PathBuf);
+pub struct EntrySource(Arc<PathBuf>);
 
 impl EntrySource {
     /// A cell over the file at `path`.
     #[must_use]
     pub fn new(path: PathBuf) -> EntrySource {
-        EntrySource(path)
+        EntrySource(Arc::new(path))
     }
 
     /// The file path.
     #[must_use]
     pub fn path(&self) -> &Path {
-        &self.0
+        self.0.as_path()
+    }
+
+    /// A shared handle on the path, for a worker that outlives this borrow.
+    #[must_use]
+    pub fn handle(&self) -> Arc<PathBuf> {
+        Arc::clone(&self.0)
     }
 
     /// A human-readable label for log lines.
     #[must_use]
     pub fn label(&self) -> String {
-        self.0.display().to_string()
+        self.path().display().to_string()
     }
 
     /// The file, opened plain with its first plane.
@@ -110,7 +118,7 @@ impl EntrySource {
     /// The function errors when the file cannot be read or the content is not
     /// a decodable surface.
     pub fn open(&self) -> Result<(Arc<dyn Surface>, usize), SurfaceError> {
-        let surface: Arc<dyn Surface> = open_surface(&self.0)?.into();
+        let surface: Arc<dyn Surface> = open_surface(self.path())?.into();
         Ok((surface, 0))
     }
 
@@ -122,7 +130,7 @@ impl EntrySource {
     /// The function errors when the file cannot be read or the content is not
     /// a decodable surface.
     pub fn open_book(&self) -> Result<(Arc<dyn Surface>, usize), SurfaceError> {
-        let surface: Arc<dyn Surface> = open_book_surface(&self.0)?.into();
+        let surface: Arc<dyn Surface> = open_book_surface(self.path())?.into();
         Ok((surface, 0))
     }
 }
@@ -356,6 +364,82 @@ pub enum DecodeFailure {
     TextureUpload,
 }
 
+/// What one grid cell draws now.
+///
+/// One value says whether the cell shows a thumbnail, its few-byte placeholder
+/// or an error square, so no cell holds a thumb and a failure at the same time.
+#[derive(Debug)]
+pub enum Cell {
+    /// No decode has landed yet: the placeholder draws, or the cell stays
+    /// grey.
+    Pending {
+        /// The uploaded [`Placeholder`], so a warm launch never shows a plain
+        /// grey cell.
+        /// The decoded thumb drops it.
+        placeholder: Option<Texture2D>,
+    },
+    /// The decoded thumbnail.
+    Thumb(Texture2D),
+    /// The decode or the texture upload failed.
+    /// The cell stays visible as a dimmed error square instead of vanishing,
+    /// so the grid count never lies.
+    Failed(DecodeFailure),
+}
+
+impl Cell {
+    /// A cell with nothing decoded yet.
+    #[must_use]
+    pub const fn cold() -> Self {
+        Self::Pending { placeholder: None }
+    }
+
+    /// Whether the cell still waits for its first decode and holds no
+    /// placeholder.
+    #[must_use]
+    pub fn is_cold(&self) -> bool {
+        matches!(self, Self::Pending { placeholder: None })
+    }
+
+    /// The decoded thumbnail, and never a placeholder.
+    #[must_use]
+    pub fn thumb(&self) -> Option<&Texture2D> {
+        match self {
+            Self::Thumb(tex) => Some(tex),
+            Self::Pending { .. } | Self::Failed(_) => None,
+        }
+    }
+
+    /// The placeholder of a cell that has not decoded yet.
+    #[must_use]
+    pub fn placeholder(&self) -> Option<&Texture2D> {
+        match self {
+            Self::Pending { placeholder } => placeholder.as_ref(),
+            Self::Thumb(_) | Self::Failed(_) => None,
+        }
+    }
+
+    /// The texture to draw now: the thumb, or else its placeholder.
+    #[must_use]
+    pub fn texture(&self) -> Option<&Texture2D> {
+        self.thumb().or_else(|| self.placeholder())
+    }
+
+    /// Whether the cell shows an error square.
+    #[must_use]
+    pub fn is_failed(&self) -> bool {
+        matches!(self, Self::Failed(_))
+    }
+
+    /// Why the cell failed, if it did.
+    #[must_use]
+    pub fn failure(&self) -> Option<DecodeFailure> {
+        match self {
+            Self::Failed(err) => Some(*err),
+            Self::Pending { .. } | Self::Thumb(_) => None,
+        }
+    }
+}
+
 /// One grid cell: the source it shows plus its uploaded full-resolution
 /// texture.
 /// The code draws thumbs by cropping a center square, so a resize never
@@ -370,18 +454,13 @@ pub struct GridEntry {
     /// Full-resolution image dimensions (as decoded, not the thumb's).
     pub width: ImgW,
     pub height: ImgH,
-    /// The thumbnail texture (the whole image with the aspect preserved,
-    /// long side `THUMB_LONG_SIDE`).
-    /// The grid cell draws this texture center-cropped at draw time.
-    /// The image view shows it as a placeholder while a decode catches up.
+    /// What the cell draws now: nothing, its few-byte [`Placeholder`], the
+    /// decoded thumbnail, or an error square.
+    /// The thumbnail covers the whole image with the aspect preserved, long
+    /// side `THUMB_LONG_SIDE`, and the grid cell draws it center-cropped.
     /// Full-resolution textures live in `full` only for the image-view keep
     /// set, so VRAM stays bounded on large directories.
-    pub texture: Option<Texture2D>,
-    /// The few-byte [`Placeholder`] of the thumb, uploaded as a small texture.
-    /// The grid draws it until `texture` lands, so a warm launch never shows
-    /// a plain grey cell.
-    /// The code drops it as soon as the decoded thumb uploads.
-    pub placeholder: Option<Texture2D>,
+    pub cell: Cell,
     /// The full-resolution texture.
     /// The code keeps it only for the open image and its prefetched neighbors
     /// (see `load_pending`), so opening them is instant.
@@ -393,9 +472,6 @@ pub struct GridEntry {
     pub id: u64,
     /// A decode job for this entry is queued or in flight.
     pub queued: bool,
-    /// Set when the decode (or texture upload) failed.
-    /// The cell stays visible as a dimmed error square instead of vanishing.
-    pub failed: Option<DecodeFailure>,
     /// The texture the image view holds now (taken out of the grid).
     /// The grid puts it back when the view ends and never re-dispatches it
     /// in between.
@@ -650,12 +726,10 @@ impl Grid {
                 source: EntrySource::new(path),
                 width: ImgW::new(0),
                 height: ImgH::new(0),
-                texture: None,
-                placeholder: None,
+                cell: Cell::cold(),
                 full: None,
                 id: i as u64,
                 queued: false,
-                failed: None,
                 viewing: false,
                 blur: None,
                 no_full: false,
@@ -764,11 +838,15 @@ impl Grid {
             let Some(rgba) = res.rgba else {
                 continue;
             };
-            if e.texture.is_some() || e.placeholder.is_some() || e.failed.is_some() {
+            if !e.cell.is_cold() {
                 continue;
             }
             match upload_thumb(rl, thread, &rgba) {
-                Ok(tex) => e.placeholder = Some(tex),
+                Ok(tex) => {
+                    e.cell = Cell::Pending {
+                        placeholder: Some(tex),
+                    }
+                }
                 Err(err) => eprintln!("vv: {}: {err:#}", e.source.label()),
             }
         }
@@ -796,10 +874,9 @@ impl Grid {
         match upload_thumb(rl, thread, &thumb) {
             Ok(tex) => {
                 let e = &mut self.entries[i];
-                e.texture = Some(tex);
                 // The decoded thumb replaces the placeholder, so its texture
-                // goes now.
-                e.placeholder = None;
+                // drops now.
+                e.cell = Cell::Thumb(tex);
                 e.width = image.0;
                 e.height = image.1;
                 e.blur = blur;
@@ -831,7 +908,7 @@ impl Grid {
                 eprintln!("vv: {}: {err:#}", self.entries[i].source.label());
                 let e = &mut self.entries[i];
                 e.queued = false;
-                e.failed = Some(DecodeFailure::TextureUpload);
+                e.cell = Cell::Failed(DecodeFailure::TextureUpload);
             }
         }
     }
@@ -848,7 +925,7 @@ impl Grid {
                 continue; // entry was spliced out meanwhile; drop the result
             };
             match res.res {
-                Ok(ok) if self.entries[i].texture.is_none() => {
+                Ok(ok) if self.entries[i].cell.thumb().is_none() => {
                     self.land_thumb(i, ok, rl, thread, keep);
                 }
                 Ok(DecodeOk {
@@ -882,7 +959,7 @@ impl Grid {
                             Ok(ft) => e.full = Some(ft),
                             Err(err) => {
                                 eprintln!("vv: {}: {err:#}", e.source.label());
-                                e.failed = Some(DecodeFailure::TextureUpload);
+                                e.cell = Cell::Failed(DecodeFailure::TextureUpload);
                             }
                         }
                     }
@@ -910,7 +987,7 @@ impl Grid {
                     );
                     let e = &mut self.entries[i];
                     e.queued = false;
-                    e.failed = Some(DecodeFailure::Decode);
+                    e.cell = Cell::Failed(DecodeFailure::Decode);
                 }
             }
         }
@@ -952,7 +1029,7 @@ impl Grid {
                 break;
             }
             let e = &mut self.entries[i];
-            if e.queued || e.viewing || e.failed.is_some() {
+            if e.queued || e.viewing || e.cell.is_failed() {
                 continue;
             }
             // Decode when there is no thumb yet.
@@ -964,7 +1041,7 @@ impl Grid {
             // The code never re-decodes thumb-only entries outside the keep
             // set.
             let wants_full = keep.contains(&e.id) && !e.no_full && e.full.is_none();
-            if e.texture.is_some() && !wants_full {
+            if e.cell.thumb().is_some() && !wants_full {
                 continue;
             }
             e.queued = true;
@@ -1017,7 +1094,7 @@ impl Grid {
     pub fn mark_failed(&mut self, id: u64, err: DecodeFailure) {
         if let Some(e) = self.entries.iter_mut().find(|e| e.id == id) {
             e.queued = false;
-            e.failed = Some(err);
+            e.cell = Cell::Failed(err);
         }
     }
 
@@ -1398,13 +1475,13 @@ impl Grid {
             } else {
                 Color::WHITE
             };
-            if let Some(tex) = &e.texture {
+            if let Some(tex) = e.cell.thumb() {
                 // The thumb texture keeps the aspect ratio of the image.
                 // The square cell shows its center crop (draw-time crop, so a
                 // resize never needs a re-decode).
                 let src = Rect::sized(tex.width() as f32, tex.height() as f32).center_square();
                 d.draw_texture_pro(tex, src, thumb, Vector2::ZERO, 0.0, tint);
-            } else if e.failed.is_some() {
+            } else if e.cell.is_failed() {
                 // Decode failed: dim red placeholder with an error glyph.
                 // The file stays visible instead of vanishing silently.
                 d.draw_rectangle_rec(thumb, Color::new(72, 26, 26, 255).tint(tint));
@@ -1417,7 +1494,7 @@ impl Grid {
                     24,
                     Color::new(214, 92, 92, 255).tint(tint),
                 );
-            } else if let Some(tex) = &e.placeholder {
+            } else if let Some(tex) = e.cell.placeholder() {
                 // The few-byte ThumbHash placeholder, until the decoded thumb
                 // lands.
                 // It holds the whole image, so the draw crops it like a thumb.
@@ -1716,7 +1793,7 @@ mod tests {
         let id = grid.entries[0].id;
         grid.mark_failed(id, DecodeFailure::Decode);
         assert_eq!(grid.entries.len(), 1, "failed entry stays in the grid");
-        assert_eq!(grid.entries[0].failed, Some(DecodeFailure::Decode));
+        assert_eq!(grid.entries[0].cell.failure(), Some(DecodeFailure::Decode));
         assert!(!grid.entries[0].queued);
     }
 

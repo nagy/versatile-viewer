@@ -120,6 +120,8 @@ The binary name is `vv`.
 - Grid extension filter: `src/grid.rs` `is_image_path` (also `pdf`, `typ` and `mmd`).
   Keep the crate features in sync (neither `pdf`, `typ` nor `mmd` is an image crate feature).
 - A grid cell holds an `EntrySource`, which is a path opened (and sniffed) lazily at decode time.
+  What the cell draws is one `grid::Cell`: `Pending { placeholder }`, `Thumb(texture)` or `Failed(reason)`.
+  One value says whether the cell shows a thumb or an error square, so no cell holds both; `Cell::texture` answers the draw, `thumb` and `placeholder` answer one kind alone, and `is_cold` names a cell that waits for its first decode.
   One file is one cell, so a document cell shows page 0 and never a second page.
   `Grid::from_paths` builds a grid from a path list, and `Grid::from_dir` hands it the sorted directory listing.
   A single-file launch of a document hands it one path, so ESC still has a grid to return to.

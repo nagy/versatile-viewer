@@ -283,40 +283,32 @@ struct ViewState {
     /// A book answers its first spread, so the cover page shows whole; every
     /// other source answers `None` and the fit frames the whole plane.
     open_box: Option<Size>,
-    /// The opening box waits at the top of the window: the fit centers the
-    /// plane, and this flag holds the pan on the box until the user moves the
-    /// view.
+    /// Whether the align still holds the opening box at the top of the
+    /// window.
+    ///
+    /// The fit centers the plane, so the align scrolls to the box and keeps it
+    /// there until the user moves the view.
     /// A window manager often resizes the window right after it maps, and a
     /// resize re-fits the scale, so the align repeats every frame instead of
     /// running once.
-    top_pending: bool,
-    /// The pan the last align wrote.
-    /// A pan or a target that moved away from it marks a user move, and the
-    /// align then stops.
-    open_pan: Vector2,
+    open_align: OpenAlign,
     /// The pan a Shift+J/K spread step glides to.
     /// A step eases at [`SPREAD_EASE_TIME`], which now matches the ordinary
     /// pan ease, so the glide reads as a scroll of one spread.
     /// The field clears itself when the pan lands or the target moves away
     /// from it, so any other motion uses the ordinary ease again.
     spread_glide: Option<Vector2>,
-    /// The region patch a spread step paints ahead of its landing.
+    /// The prefetch of a spread step: the patch a worker paints, or the patch
+    /// that landed and draws in place until the glide does.
     ///
     /// The step knows where it lands, so the patch of the target spread is on
     /// its way before the glide ends, and the view then holds a sharp spread
     /// the moment the pan arrives instead of a stretched one.
-    /// A patch replaces [`ViewState::crop`] once it covers the window, and it
-    /// draws in place until then.
-    prefetch: Option<CropState>,
-    /// The rect and scale of the prefetch a worker paints now.
-    /// The view waits for it instead of starting an ordinary paint on the same
-    /// region, and it drops the entry when the worker never answers.
-    prefetch_want: Option<region::Patch>,
-    /// When the in-flight prefetch started, so [`PREFETCH_GIVE_UP`] bounds the
-    /// wait.
-    prefetch_at: Instant,
-    /// The token of the newest prefetch, so the result of an earlier aim drops.
-    prefetch_id: u64,
+    /// A patch replaces [`ViewState::crop`] once it covers the window.
+    prefetch: Prefetch,
+    /// The newest prefetch token, so a result of an earlier aim drops.
+    /// The counter stays beside the state, because it only ever grows.
+    prefetch_seq: u64,
     /// The region patch on screen: the visible part of the document, painted
     /// at the scale the window shows it.
     /// None until the first paint lands, and then the whole-image texture in
@@ -349,6 +341,60 @@ struct CropState {
     /// The source rect the patch covers and the scale it holds, so a paint
     /// rule reads one value instead of a rect beside a loose scale.
     patch: region::Patch,
+}
+
+/// Whether the image view still holds the opening box at the top of its
+/// window.
+///
+/// One value carries the flag and the pan it last wrote, so a pan that the
+/// user moved can never be confused with the one the align owns.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum OpenAlign {
+    /// The view is free: no align runs.
+    Free,
+    /// The align holds the opening box at the top, and wrote `pan` last.
+    /// A pan or a target that moved away from it marks a user move, and the
+    /// align turns [`OpenAlign::Free`].
+    Holding {
+        /// The pan the align wrote.
+        pan: Vector2,
+    },
+}
+
+/// The prefetch of a spread step, as one state instead of a patch, an aim and
+/// a token that a caller has to read together.
+enum Prefetch {
+    /// Nothing prefetched.
+    Idle,
+    /// A worker paints `patch` under token `id`, from `at` on.
+    Painting {
+        /// The rect and the scale the worker paints.
+        patch: region::Patch,
+        /// The token the result must carry, so an earlier aim drops.
+        id: u64,
+        /// When the paint started, so [`PREFETCH_GIVE_UP`] bounds the wait.
+        at: Instant,
+    },
+    /// The patch of a step, drawn in place until the glide lands.
+    Ready(CropState),
+}
+
+impl Prefetch {
+    /// The patch this state holds on screen, if any.
+    fn held(&self) -> Option<&CropState> {
+        match self {
+            Self::Ready(state) => Some(state),
+            Self::Idle | Self::Painting { .. } => None,
+        }
+    }
+
+    /// The aim a worker paints now, with the token and the start time.
+    fn painting(&self) -> Option<(region::Patch, u64, Instant)> {
+        match self {
+            Self::Painting { patch, id, at } => Some((*patch, *id, *at)),
+            Self::Idle | Self::Ready(_) => None,
+        }
+    }
 }
 
 /// A message from a region worker to the image view.
@@ -391,8 +437,7 @@ impl ViewState {
         // The fit measures the opening box, so a book frames its first spread
         // and the cover page shows whole.
         self.zoom = ZoomMode::FitAll;
-        self.top_pending = self.open_box.is_some();
-        self.open_pan = Vector2::ZERO;
+        self.align_open_box_again();
         self.pan = Vector2::ZERO;
         self.target_pan = Vector2::ZERO;
         self.zoom_anchor = None;
@@ -446,11 +491,24 @@ impl ViewState {
         self.zoom = ZoomMode::FitAll;
         self.pan = Vector2::ZERO;
         self.target_pan = Vector2::ZERO;
-        self.open_pan = Vector2::ZERO;
+        self.align_open_box_again();
         self.spread_glide = None;
         // The frame computes the scale from the fit mode.
         self.view_scale = None;
-        self.top_pending = self.open_box.is_some();
+        self.align_open_box_again();
+    }
+
+    /// Arm the align of the opening box again, at the pan the caller just
+    /// wrote.
+    ///
+    /// A source without an opening box frames its whole plane, so the align
+    /// stays out of the way.
+    fn align_open_box_again(&mut self) {
+        self.open_align = if self.open_box.is_some() {
+            OpenAlign::Holding { pan: self.pan }
+        } else {
+            OpenAlign::Free
+        };
     }
 
     /// Hold the opening box at the top of the window while the view stays
@@ -461,23 +519,23 @@ impl ViewState {
     /// The align repeats every frame, because a window manager resize re-fits
     /// the scale after the first frame and the pan would drift to the middle
     /// of the document.
-    /// A pan or a target that moved away from [`Self::open_pan`] marks a user
-    /// move, and the align then stays out of the way.
+    /// A pan or a target that moved away from the held pan marks a user move,
+    /// and the align then stays out of the way.
     fn align_open_box(&mut self, win_h: f32) {
-        if !self.top_pending {
+        let OpenAlign::Holding { pan: held } = self.open_align else {
             return;
-        }
+        };
         let (Some(scale), Some(_)) = (self.view_scale, self.open_box) else {
             return;
         };
-        if self.pan != self.open_pan || self.target_pan != self.open_pan {
-            self.top_pending = false;
+        if self.pan != held || self.target_pan != held {
+            self.open_align = OpenAlign::Free;
             return;
         }
         let top = Vector2::new(0.0, Column::new(self.img, scale, win_h).top_pan());
         self.pan = top;
         self.target_pan = top;
-        self.open_pan = top;
+        self.open_align = OpenAlign::Holding { pan: top };
     }
 
     /// Ease the view to the spread `step` spreads away from the one the window
@@ -551,11 +609,13 @@ impl ViewState {
         if patch.rect.is_empty() {
             return;
         }
-        self.prefetch = None;
-        self.prefetch_want = Some(patch);
-        self.prefetch_at = Instant::now();
-        self.prefetch_id = self.prefetch_id.wrapping_add(1);
-        let (generation, id, tx) = (self.crop_gen, self.prefetch_id, self.crop_tx.clone());
+        let id = self.next_prefetch_id();
+        self.prefetch = Prefetch::Painting {
+            patch,
+            id,
+            at: Instant::now(),
+        };
+        let (generation, tx) = (self.crop_gen, self.crop_tx.clone());
         let plane = self.source_plane;
         rayon::spawn(move || {
             match source.render(View::region(plane, patch.rect, scale)) {
@@ -592,9 +652,14 @@ impl ViewState {
     /// Drop the prefetch of a spread step: the patch on screen, the aim a
     /// worker paints and every result still in flight.
     fn close_prefetch(&mut self) {
-        self.prefetch = None;
-        self.prefetch_want = None;
-        self.prefetch_id = self.prefetch_id.wrapping_add(1);
+        self.prefetch = Prefetch::Idle;
+        self.prefetch_seq = self.prefetch_seq.wrapping_add(1);
+    }
+
+    /// The token of a fresh prefetch, so a result of an earlier aim drops.
+    fn next_prefetch_id(&mut self) -> u64 {
+        self.prefetch_seq = self.prefetch_seq.wrapping_add(1);
+        self.prefetch_seq
     }
 
     /// Adopt a source that the launch already opened, so the view can repaint
@@ -654,11 +719,13 @@ impl ViewState {
         // sharp spread at once instead of waiting out [`region::QUIET`].
         if self
             .prefetch
-            .as_ref()
-            .is_some_and(|patch| region::covers(&needed, &patch.patch))
+            .held()
+            .is_some_and(|state| region::covers(&needed, &state.patch))
         {
-            self.crop = self.prefetch.take();
-            self.prefetch_want = None;
+            let ready = std::mem::replace(&mut self.prefetch, Prefetch::Idle);
+            if let Prefetch::Ready(state) = ready {
+                self.crop = Some(state);
+            }
             self.crop_seen = Some(needed);
             self.crop_quiet_at = now;
             return;
@@ -668,7 +735,7 @@ impl ViewState {
         // image, so it drops.
         // A patch still in flight lands and then drops the same way.
         if self.spread_glide.is_none() {
-            self.prefetch = None;
+            self.prefetch = Prefetch::Idle;
         }
         // The debounce: any movement of the seen region restarts the timer, so
         // a drag, a pan or an ease never queues a paint per frame.
@@ -686,13 +753,13 @@ impl ViewState {
         // A prefetch of this very region is on its way, so the paint that would
         // duplicate it waits instead.
         // A worker that never answers stops the wait at [`PREFETCH_GIVE_UP`].
-        if let Some(want) = self.prefetch_want
-            && region::covers(&needed, &want)
+        if let Some((aim, _, at)) = self.prefetch.painting()
+            && region::covers(&needed, &aim)
         {
-            if now.duration_since(self.prefetch_at) < PREFETCH_GIVE_UP {
+            if now.duration_since(at) < PREFETCH_GIVE_UP {
                 return;
             }
-            self.prefetch_want = None;
+            self.prefetch = Prefetch::Idle;
         }
         if !region::worth_painting(&needed, self.crop.as_ref().map(|crop| &crop.patch)) {
             return;
@@ -776,19 +843,26 @@ impl ViewState {
                 } => {
                     // A result of an earlier image or of an aim the view left
                     // drops, so an old spread never lands on the new one.
-                    if generation != self.crop_gen || id != self.prefetch_id {
+                    let aimed = matches!(
+                        self.prefetch,
+                        Prefetch::Painting { id: want, .. } if want == id
+                    );
+                    if generation != self.crop_gen || !aimed {
                         continue;
                     }
-                    self.prefetch_want = None;
                     let texture =
                         upload_rgba(rl, thread, image.as_rgba(), image.width(), image.height())?;
                     apply_view_filter(thread, &texture, self.pixelated);
-                    self.prefetch = Some(CropState { texture, patch });
+                    self.prefetch = Prefetch::Ready(CropState { texture, patch });
                 }
                 CropMsg::PrefetchFailed { generation, id } => {
-                    if generation == self.crop_gen && id == self.prefetch_id {
+                    let aimed = matches!(
+                        self.prefetch,
+                        Prefetch::Painting { id: want, .. } if want == id
+                    );
+                    if generation == self.crop_gen && aimed {
                         // The ordinary path paints after the glide instead.
-                        self.prefetch_want = None;
+                        self.prefetch = Prefetch::Idle;
                     }
                 }
             }
@@ -1325,7 +1399,7 @@ fn show_entry(
             e.height,
             e.source.clone(),
             e.queued,
-            e.texture.is_some(),
+            e.cell.thumb().is_some(),
             e.blur.clone(),
             e.no_full,
         )
@@ -1648,13 +1722,10 @@ fn main() -> Result<()> {
         source: None,
         source_plane: 0,
         open_box: None,
-        top_pending: false,
-        open_pan: Vector2::ZERO,
+        open_align: OpenAlign::Free,
         spread_glide: None,
-        prefetch: None,
-        prefetch_want: None,
-        prefetch_at: Instant::now(),
-        prefetch_id: 0,
+        prefetch: Prefetch::Idle,
+        prefetch_seq: 0,
         crop: None,
         crop_pending: false,
         crop_gen: 0,
@@ -1952,7 +2023,7 @@ fn main() -> Result<()> {
                         // decode re-enters here and starts the spread loader.
                         // A failed entry never re-enters, because its loader
                         // would fail the same way and spin.
-                        let ready = g.entries[i].failed.is_none()
+                        let ready = !g.entries[i].cell.is_failed()
                             && (g.entries[i].full.is_some()
                                 || (g.entries[i].no_full && !g.entries[i].queued));
                         if ready {
@@ -2428,7 +2499,7 @@ fn main() -> Result<()> {
                 if let Some(crop) = &st.crop {
                     apply_view_filter(&thread, &crop.texture, st.pixelated);
                 }
-                if let Some(patch) = &st.prefetch {
+                if let Some(patch) = st.prefetch.held() {
                     apply_view_filter(&thread, &patch.texture, st.pixelated);
                 }
             }
@@ -3110,7 +3181,7 @@ fn main() -> Result<()> {
                         .get(i)
                         // The decoded thumb first, then its few-byte
                         // placeholder.
-                        .and_then(|e| e.texture.as_ref().or(e.placeholder.as_ref()))
+                        .and_then(|e| e.cell.texture())
                 {
                     // No full-res frame yet (decode in flight): show the entry
                     // thumb instead of flashing black, or its ThumbHash
@@ -3133,7 +3204,7 @@ fn main() -> Result<()> {
             // A patch that still matches the view scale lands on whole
             // window pixels (see `draw_patch`), so its text stays sharp.
             if let Some(frame) = st.frame(Vector2::new(win_w, win_h)) {
-                for patch in st.crop.iter().chain(st.prefetch.iter()) {
+                for patch in st.crop.iter().chain(st.prefetch.held()) {
                     draw_patch(&mut d, patch, &frame);
                 }
             }

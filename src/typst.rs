@@ -51,7 +51,11 @@ static FONTS: LazyLock<Vec<Font>> = LazyLock::new(|| {
 });
 
 /// Font metadata for the embedded binaries, built once per process.
-static BOOK: LazyLock<FontBook> = LazyLock::new(|| FontBook::from_fonts(FONTS.iter()));
+/// The hash wrappers build once here, so every compile borrows the same
+/// table: a `FontBook` clone would copy one string and one coverage set per
+/// face on every open.
+static BOOK: LazyLock<LazyHash<FontBook>> =
+    LazyLock::new(|| LazyHash::new(FontBook::from_fonts(FONTS.iter())));
 
 /// Is this a Typst source file?
 /// The test is the extension only: a `.typ` file is plain UTF-8 text, so
@@ -70,7 +74,8 @@ struct FsWorld {
     /// The Typst standard library: built-ins and the default styles.
     library: LazyHash<Library>,
     /// Font metadata for `#set text(font: ...)`.
-    book: LazyHash<FontBook>,
+    /// The field borrows the process table, so it owns no copy.
+    book: &'static LazyHash<FontBook>,
     /// The entry point.
     main: FileId,
     /// The real directory that virtual paths resolve against.
@@ -81,7 +86,7 @@ impl FsWorld {
     fn new(root: PathBuf, main: FileId) -> Self {
         FsWorld {
             library: LazyHash::new(Library::default()),
-            book: LazyHash::new(BOOK.clone()),
+            book: &BOOK,
             main,
             root,
         }
@@ -111,7 +116,7 @@ impl World for FsWorld {
     }
 
     fn book(&self) -> &LazyHash<FontBook> {
-        &self.book
+        self.book
     }
 
     fn main(&self) -> FileId {
