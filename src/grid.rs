@@ -420,6 +420,35 @@ pub enum GridAction {
     Quit,
 }
 
+/// One frame's decode dispatch: which entries to decode first, whether the
+/// wraparound scan runs, and what the keep set holds.
+///
+/// The four facts travel together because they answer one question, so a
+/// caller names them instead of passing a bool beside a bool that compiles
+/// just as well when swapped.
+#[derive(Debug, Clone, Default)]
+pub struct LoadPlan {
+    /// The indices to decode first: the selection, or the neighbors of the
+    /// open image.
+    pub priority: Vec<usize>,
+    /// The index the wraparound scan starts at (the open image, or the
+    /// selection).
+    pub scan_start: usize,
+    /// Whether the wraparound scan runs at all.
+    /// False dispatches only the `priority` entries and pauses the rest of the
+    /// queue: the image view sets it while the open image still decodes, so
+    /// the visible image gets all the cores.
+    pub scan: bool,
+    /// Whether the keep set holds full-resolution textures: the entry at
+    /// `scan_start` plus the `priority` entries.
+    /// The grid view answers false, so a grid-only session uploads thumbnails
+    /// and nothing else: a 50 MP neighbor would otherwise cost 200 MB of VRAM
+    /// and a 30 ms main-thread upload.
+    /// The image view answers true, so the open image and its neighbors open
+    /// at once.
+    pub preload_full: bool,
+}
+
 /// The thumbnail grid, its entry list and its background decode workers.
 #[derive(Debug)]
 pub struct Grid {
@@ -682,43 +711,21 @@ impl Grid {
     }
 
     /// Drain finished background decodes, which upload textures on the main
-    /// thread, and hand out new jobs.
-    /// The code dispatches `priority` indices first (neighbors of what is on
-    /// screen), then a wraparound scan from `scan_start`.
-    /// With `scan` false it dispatches only `priority` entries and pauses the
-    /// rest of the queue.
-    /// The image view sets this while the open image still decodes, so the
-    /// visible image gets all the cores.
+    /// thread, and hand out new jobs for one [`LoadPlan`].
     /// The function runs every frame and never blocks.
     /// It skips entries whose texture the image view holds now.
-    ///
-    /// With `preload_full` the code keeps full-resolution textures for the
-    /// keep set: the entry at `scan_start` plus the `priority` entries.
-    /// The grid view passes false, so a grid-only session uploads thumbnails
-    /// and nothing else: a 50 MP neighbor would otherwise cost 200 MB of VRAM
-    /// and a 30 ms main-thread upload.
-    /// The image view passes true, so the open image and its neighbors open
-    /// at once.
-    pub fn load_pending(
-        &mut self,
-        rl: &mut RaylibHandle,
-        thread: &RaylibThread,
-        priority: &[usize],
-        scan_start: usize,
-        scan: bool,
-        preload_full: bool,
-    ) {
+    pub fn load_pending(&mut self, rl: &mut RaylibHandle, thread: &RaylibThread, plan: &LoadPlan) {
         // Ids that hold a full-resolution texture: the entry the
         // scan starts at (the open image) plus the prefetch priorities (its
         // neighbors).
         // Everything else stores only the thumbnail.
-        let keep: HashSet<u64> = if preload_full {
-            priority
+        let keep: HashSet<u64> = if plan.preload_full {
+            plan.priority
                 .iter()
                 .filter_map(|&i| self.entries.get(i).map(|e| e.id))
                 .chain(
                     self.entries
-                        .get(scan_start.min(self.entries.len().saturating_sub(1)))
+                        .get(plan.scan_start.min(self.entries.len().saturating_sub(1)))
                         .map(|e| e.id),
                 )
                 .collect()
@@ -728,7 +735,7 @@ impl Grid {
 
         self.drain_placeholders(rl, thread);
         self.drain_results(rl, thread, &keep);
-        self.dispatch(priority, scan_start, scan, &keep);
+        self.dispatch(plan, &keep);
     }
 
     /// Apply finished placeholder reads, bounded per frame.
@@ -908,8 +915,8 @@ impl Grid {
     }
 
     /// Step 2 of [`Self::load_pending`]: dispatch new jobs.
-    /// The code dispatches `priority` indices first (the selection or the
-    /// open image neighbors), then a wraparound scan from `scan_start`.
+    /// The code dispatches the `priority` indices of the plan first (the
+    /// selection or the open image neighbors), then its wraparound scan.
     /// Jobs run on the shared rayon pool, so several decodes proceed in
     /// parallel.
     /// Each job sends its result back over the channel for `drain_results` to
@@ -917,11 +924,12 @@ impl Grid {
     /// The per-entry checks below (texture present, queued, viewing) make
     /// revisiting a priority index in the wraparound harmless.
     /// The code needs no extra dedup bookkeeping: O(1) per entry.
-    fn dispatch(&mut self, priority: &[usize], scan_start: usize, scan: bool, keep: &HashSet<u64>) {
+    fn dispatch(&mut self, plan: &LoadPlan, keep: &HashSet<u64>) {
         let n = self.entries.len();
-        let start = scan_start.min(n);
-        let order = priority.iter().copied().filter(|&i| i < n).chain(
-            scan.then(|| (start..n).chain(0..start))
+        let start = plan.scan_start.min(n);
+        let order = plan.priority.iter().copied().filter(|&i| i < n).chain(
+            plan.scan
+                .then(|| (start..n).chain(0..start))
                 .into_iter()
                 .flatten(),
         );

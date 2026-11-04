@@ -57,7 +57,7 @@ use versatile_viewer::{
     blurbg::{self, BlurBg},
     book::BookSurface,
     dim::{ImgH, ImgW, PreviewPx, RampTime, Rect, WinH, WinW},
-    grid::{DecodeFailure, EntrySource, Grid, GridAction},
+    grid::{DecodeFailure, EntrySource, Grid, GridAction, LoadPlan},
     keyrepeat,
     loader::{DecodeMsg, Loader},
     mcp, region, region_sel, rotate,
@@ -1848,40 +1848,52 @@ fn main() -> Result<()> {
         // the visible image gets all the cores.
         // load_pending drains finished decodes (texture uploads happen here,
         // on the main thread) and dispatches new ones to the rayon pool.
-        let (priority, scan_start, scan, preload_full) = if st.mode == Mode::Image {
+        let plan = if st.mode == Mode::Image {
             match st
                 .open_id
                 .and_then(|id| grid.as_ref().and_then(|g| g.index_of(id)))
             {
                 Some(i) => {
                     let n = grid.as_ref().unwrap().entries.len();
-                    let mut v = Vec::new();
+                    let mut priority = Vec::new();
                     if st.view_loading {
-                        v.push(i);
+                        priority.push(i);
                     } else {
                         if i > 0 {
-                            v.push(i - 1);
+                            priority.push(i - 1);
                         }
                         if i + 1 < n {
-                            v.push(i + 1);
+                            priority.push(i + 1);
                         }
                     }
-                    (v, i, !st.view_loading, true)
+                    LoadPlan {
+                        priority,
+                        scan_start: i,
+                        scan: !st.view_loading,
+                        preload_full: true,
+                    }
                 }
-                None => (Vec::new(), 0, true, true),
+                None => LoadPlan {
+                    scan: true,
+                    preload_full: true,
+                    ..LoadPlan::default()
+                },
             }
         } else if let Some(g) = grid.as_ref() {
-            (
-                g.prefetch_neighbors(g.selected, WinW::new(win_w), WinH::new(win_h)),
-                g.selected,
-                true,
-                false,
-            )
+            LoadPlan {
+                priority: g.prefetch_neighbors(g.selected, WinW::new(win_w), WinH::new(win_h)),
+                scan_start: g.selected,
+                scan: true,
+                preload_full: false,
+            }
         } else {
-            (Vec::new(), 0, true, false)
+            LoadPlan {
+                scan: true,
+                ..LoadPlan::default()
+            }
         };
         if let Some(g) = grid.as_mut() {
-            g.load_pending(&mut rl, &thread, &priority, scan_start, scan, preload_full);
+            g.load_pending(&mut rl, &thread, &plan);
         }
 
         // Image mode: drain the streaming loader first.

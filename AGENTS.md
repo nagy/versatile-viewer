@@ -191,7 +191,8 @@ The binary name is `vv`.
   A `FORMAT` bump rejects every old entry, so a payload change needs no migration.
   The decode worker reads the cache first and decodes only on a miss, then stores the new thumbnail.
   A cache hit carries no full-resolution image, so a keep-set job (an entry that needs the full texture) skips the cache and decodes the file on its own.
-  Only the image view keeps full textures: `load_pending` takes a `preload_full` flag, the grid view passes false and the image view passes true.
+  Only the image view keeps full textures: `load_pending` takes a `LoadPlan` whose `preload_full` field the grid view leaves false and the image view sets true.
+  `LoadPlan` carries `priority`, `scan_start`, `scan` and `preload_full` together, so a caller names each fact and never passes a bool beside a bool that compiles just as well when swapped.
   A grid-only session therefore uploads thumbnails only, never a 200 MB source texture.
   The header carries the source dimensions, so `GridEntry::width`/`height` measure the image and not the thumb, on a hit and on a miss.
   The header also carries the placeholder of the thumb: a ThumbHash payload of at most `placeholder::MAX_BYTES` (32) bytes, from the `thumbhash` crate (MIT, no dependencies, `src/placeholder.rs`).
