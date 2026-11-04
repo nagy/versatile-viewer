@@ -654,11 +654,7 @@ fn crop_and_resample(
         let cropped = crop_rows(&img.data, iw, x, y, cw, ch);
         crate::resample_rgba(&cropped, cw, ch, tw, th)
     };
-    Ok(DecodedImage {
-        width: ImgW::new(tw),
-        height: ImgH::new(th),
-        data: out,
-    })
+    Ok(DecodedImage::from_exact(ImgW::new(tw), ImgH::new(th), out))
 }
 
 /// Copy the `cw` x `ch` rect at (`x`, `y`) out of a row-major RGBA8 buffer.
@@ -1071,11 +1067,11 @@ mod tests {
                 ImgW::new((8.0 * scale).round().max(1.0) as u32),
                 ImgH::new((4.0 * scale).round().max(1.0) as u32),
             );
-            Ok(DecodedImage {
-                width: w,
-                height: h,
-                data: vec![0u8; w.get() as usize * h.get() as usize * 4],
-            })
+            Ok(DecodedImage::from_exact(
+                w,
+                h,
+                vec![0u8; w.get() as usize * h.get() as usize * 4],
+            ))
         }
 
         fn progressive(&self) -> Result<Option<Box<dyn ChunkSource>>, SurfaceError> {

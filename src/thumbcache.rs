@@ -441,21 +441,15 @@ fn encode_entry(
     if src.len() > MAX_PATH {
         return Err(CacheError::Corrupt);
     }
-    let expect = usize::try_from(thumb.width.get())
-        .ok()
-        .and_then(|w| {
-            usize::try_from(thumb.height.get())
-                .ok()
-                .and_then(|h| w.checked_mul(h))
-        })
-        .and_then(|px| px.checked_mul(4));
-    if expect != Some(thumb.data.len()) || expect == Some(0) {
+    // The type already holds the pixel count and the buffer together, so this
+    // only rejects an image without pixels: a cached thumb always draws.
+    if thumb.width().get() == 0 || thumb.height().get() == 0 {
         return Err(CacheError::Corrupt);
     }
     let codestream = jixel::encode_image_with_alpha(
-        &thumb.data,
-        usize::try_from(thumb.width.get()).map_err(|_| CacheError::Corrupt)?,
-        usize::try_from(thumb.height.get()).map_err(|_| CacheError::Corrupt)?,
+        thumb.as_rgba(),
+        usize::try_from(thumb.width().get()).map_err(|_| CacheError::Corrupt)?,
+        usize::try_from(thumb.height().get()).map_err(|_| CacheError::Corrupt)?,
         &jixel::EncodeConfig::default()
             .with_quality(QUALITY)
             .with_alpha_distance(ALPHA_DISTANCE),
@@ -464,8 +458,8 @@ fn encode_entry(
     for field in [
         u32::from_le_bytes(MAGIC),
         FORMAT,
-        thumb.width.get(),
-        thumb.height.get(),
+        thumb.width().get(),
+        thumb.height().get(),
         image.0.get(),
         image.1.get(),
     ] {
@@ -646,11 +640,7 @@ mod tests {
     }
 
     fn thumb(w: u32, h: u32, v: u8) -> DecodedImage {
-        DecodedImage {
-            width: ImgW::new(w),
-            height: ImgH::new(h),
-            data: vec![v; (w * h * 4) as usize],
-        }
+        DecodedImage::from_exact(ImgW::new(w), ImgH::new(h), vec![v; (w * h * 4) as usize])
     }
 
     /// A thumbnail with a smooth color ramp and a transparent gradient, so a
@@ -669,11 +659,7 @@ mod tests {
                 ]);
             }
         }
-        DecodedImage {
-            width: ImgW::new(w),
-            height: ImgH::new(h),
-            data,
-        }
+        DecodedImage::from_exact(ImgW::new(w), ImgH::new(h), data)
     }
 
     /// The largest channel difference a lossy entry may show against its
@@ -685,14 +671,14 @@ mod tests {
     /// Assert that a loaded thumb keeps the shape, the alpha plane and a
     /// bounded color error.
     fn assert_lossy_match(out: &DecodedImage, src: &DecodedImage) {
-        assert_eq!((out.width, out.height), (src.width, src.height));
-        assert_eq!(out.data.len(), src.data.len());
+        assert_eq!((out.width(), out.height()), (src.width(), src.height()));
+        assert_eq!(out.as_rgba().len(), src.as_rgba().len());
         for (a, b) in out
-            .data
+            .as_rgba()
             .as_chunks::<4>()
             .0
             .iter()
-            .zip(src.data.as_chunks::<4>().0)
+            .zip(src.as_rgba().as_chunks::<4>().0)
         {
             assert_eq!(a[3], b[3], "the alpha channel stays exact");
             assert!(a[0].abs_diff(b[0]) <= MAX_DELTA, "red: {a:?} against {b:?}");
@@ -943,17 +929,21 @@ mod tests {
     }
 
     #[test]
-    fn a_mismatched_buffer_does_not_store() {
+    fn an_image_without_pixels_does_not_store() {
+        // `DecodedImage::new` already refuses a buffer that disagrees with its
+        // dimensions, so the only buffer the cache can still reject is one
+        // with no pixels at all.
         let (dir, cache) = temp_cache();
         let src = dir.path().join("img.png");
         fs::write(&src, b"x").expect("write");
-        let bad = DecodedImage {
-            width: ImgW::new(4),
-            height: ImgH::new(4),
-            data: vec![0; 3],
-        };
+        let empty = DecodedImage::new(ImgW::new(0), ImgH::new(0), Vec::new()).expect("no pixels");
         assert!(matches!(
-            cache.store(&src, LongSide::new(512), &bad, (ImgW::new(4), ImgH::new(4))),
+            cache.store(
+                &src,
+                LongSide::new(512),
+                &empty,
+                (ImgW::new(4), ImgH::new(4))
+            ),
             Err(CacheError::Corrupt)
         ));
     }

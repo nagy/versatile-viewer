@@ -19,7 +19,7 @@ use raylib::{color::Color, consts::TextureFilter, prelude::*, texture::RaylibTex
 
 use crate::{
     DecodedImage,
-    dim::{ImgH, ImgW, LongSide, Rect, WinH, WinW},
+    dim::{LongSide, Rect, WinH, WinW},
     downscale_rgba_ref,
 };
 
@@ -123,52 +123,34 @@ fn parse_dim(s: Option<&str>) -> f32 {
 /// # use versatile_viewer::dim::{ImgH, ImgW, LongSide};
 /// // Landscape: the long side lands exactly on `long_side`.
 /// // The aspect stays and each pixel holds 4 bytes.
-/// let img = DecodedImage {
-///     width: ImgW::new(200),
-///     height: ImgH::new(100),
-///     data: vec![0; 4 * 200 * 100],
-/// };
+/// let img = DecodedImage::new(ImgW::new(200), ImgH::new(100), vec![0; 4 * 200 * 100]).unwrap();
 /// let img = small_blur(&img, LongSide::new(128));
-/// assert_eq!((img.width.get(), img.height.get()), (128, 64));
+/// assert_eq!((img.width().get(), img.height().get()), (128, 64));
 /// assert_eq!(
-///     img.data.len(),
-///     4 * img.width.get() as usize * img.height.get() as usize
+///     img.as_rgba().len(),
+///     4 * img.width().get() as usize * img.height().get() as usize
 /// );
 ///
 /// // Portrait: the long side switches to the height.
-/// let img = DecodedImage {
-///     width: ImgW::new(100),
-///     height: ImgH::new(200),
-///     data: vec![0; 4 * 100 * 200],
-/// };
+/// let img = DecodedImage::new(ImgW::new(100), ImgH::new(200), vec![0; 4 * 100 * 200]).unwrap();
 /// let img = small_blur(&img, LongSide::new(128));
-/// assert_eq!((img.width.get(), img.height.get()), (64, 128));
+/// assert_eq!((img.width().get(), img.height().get()), (64, 128));
 /// assert_eq!(
-///     img.data.len(),
-///     4 * img.width.get() as usize * img.height.get() as usize
+///     img.as_rgba().len(),
+///     4 * img.width().get() as usize * img.height().get() as usize
 /// );
 /// ```
 #[must_use]
 pub fn small_blur(image: &DecodedImage, long_side: LongSide) -> DecodedImage {
-    let (width, height) = (image.width.get(), image.height.get());
-    let long_side = long_side.get();
     // The SIMD resample reads the borrowed buffer, so the code never clones
     // the input.
-    let small = downscale_rgba_ref(
-        &image.data,
-        ImgW::new(width),
-        ImgH::new(height),
-        LongSide::new(long_side),
-    );
+    let small = downscale_rgba_ref(image.as_rgba(), image.width(), image.height(), long_side);
+    let (width, height) = (small.width(), small.height());
     let pixels: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
-        image::ImageBuffer::from_raw(small.width.get(), small.height.get(), small.data)
+        image::ImageBuffer::from_raw(width.get(), height.get(), small.into_rgba())
             .expect("resampled buffer matches dims");
     let blurred = image::imageops::blur(&pixels, BLUR_SIGMA);
-    DecodedImage {
-        width: ImgW::new(small.width.get()),
-        height: ImgH::new(small.height.get()),
-        data: blurred.into_raw(),
-    }
+    DecodedImage::from_exact(width, height, blurred.into_raw())
 }
 
 /// GPU side of the gimmick.
@@ -208,12 +190,7 @@ impl BlurBg {
     /// The function updates the texture in place when the dimensions match
     /// (streaming previews).
     fn upload(&mut self, rl: &mut RaylibHandle, thread: &RaylibThread, data: &DecodedImage) {
-        let DecodedImage {
-            width,
-            height,
-            data: rgba,
-        } = data;
-        let (width, height) = (*width, *height);
+        let (width, height, rgba) = (data.width(), data.height(), data.as_rgba());
         let same = matches!(&self.tex, Some(t) if t.width() == width.get() as i32 && t.height() == height.get() as i32);
         if same {
             if let Some(t) = &mut self.tex
@@ -271,7 +248,7 @@ impl BlurBg {
         if self.current == Some(tag) {
             return;
         }
-        let (rgba, width, height) = (&data.data, data.width, data.height);
+        let (rgba, width, height) = (data.as_rgba(), data.width(), data.height());
         // First background ever (empty window at startup): show it
         // at once, with no fade-in from the window background.
         let first = self.tex.is_none();
@@ -355,33 +332,32 @@ const fn cover_rect(w: u32, h: u32, win_w: WinW, win_h: WinH) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dim::{ImgH, ImgW};
 
     // Compile-time check that these stay const-evaluable.
     const _: f32 = cover_rect(64, 32, WinW::new(800.0), WinH::new(600.0)).width;
 
     #[test]
     fn small_blur_dims_and_size() {
-        let img = |w: u32, h: u32, v: u8| DecodedImage {
-            width: ImgW::new(w),
-            height: ImgH::new(h),
-            data: vec![v; (w * h * 4) as usize],
+        let img = |w: u32, h: u32, v: u8| {
+            DecodedImage::from_exact(ImgW::new(w), ImgH::new(h), vec![v; (w * h * 4) as usize])
         };
         // Long side 64 (VV_BLUR_PX): 800x200 in -> 64x16 out, RGBA8 matches.
         let out = small_blur(&img(800, 200, 128), LongSide::new(64));
-        assert_eq!((out.width, out.height), (ImgW::new(64), ImgH::new(16)));
-        assert_eq!(out.data.len(), (64 * 16 * 4) as usize);
+        assert_eq!((out.width(), out.height()), (ImgW::new(64), ImgH::new(16)));
+        assert_eq!(out.as_rgba().len(), (64 * 16 * 4) as usize);
         // Portrait input keeps the aspect the other way around.
         let out = small_blur(&img(100, 400, 0), LongSide::new(64));
-        assert_eq!((out.width, out.height), (ImgW::new(16), ImgH::new(64)));
+        assert_eq!((out.width(), out.height()), (ImgW::new(16), ImgH::new(64)));
         // The code honors the configurable long side (VV_BLUR_PX).
         let out = small_blur(&img(800, 200, 0), LongSide::new(256));
-        assert_eq!((out.width, out.height), (ImgW::new(256), ImgH::new(64)));
+        assert_eq!((out.width(), out.height()), (ImgW::new(256), ImgH::new(64)));
         // Degenerate 1xN input still yields at least 1px on each side.
         let out = small_blur(&img(1, 9, 0), LongSide::new(64));
-        assert!(out.width.get() >= 1 && out.height.get() >= 1);
+        assert!(out.width().get() >= 1 && out.height().get() >= 1);
         assert_eq!(
-            out.data.len(),
-            (out.width.get() * out.height.get() * 4) as usize
+            out.as_rgba().len(),
+            (out.width().get() * out.height().get() * 4) as usize
         );
     }
 

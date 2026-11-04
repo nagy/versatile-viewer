@@ -102,7 +102,7 @@ impl Placeholder {
         let small =
             crate::downscale_rgba_ref(&image.data, image.width, image.height, ENCODE_LONG_SIDE);
         let hash = thumbhash::rgba_to_thumb_hash(
-            small.width.get() as usize,
+            small.width().get() as usize,
             small.height.get() as usize,
             &small.data,
         );
@@ -128,11 +128,11 @@ impl Placeholder {
             ((w as f32 * scale).round() as u32).max(1),
             ((h as f32 * scale).round() as u32).max(1),
         );
-        Some(DecodedImage {
-            width: ImgW::new(nw),
-            height: ImgH::new(nh),
-            data: crate::resample_rgba(&rgba, w, h, nw, nh),
-        })
+        Some(DecodedImage::from_exact(
+            ImgW::new(nw),
+            ImgH::new(nh),
+            crate::resample_rgba(&rgba, w, h, nw, nh),
+        ))
     }
 }
 
@@ -153,22 +153,18 @@ mod tests {
                 ]);
             }
         }
-        DecodedImage {
-            width: ImgW::new(w),
-            height: ImgH::new(h),
-            data,
-        }
+        DecodedImage::from_exact(ImgW::new(w), ImgH::new(h), data)
     }
 
     /// The average RGBA of a buffer, per channel.
     fn average(img: &DecodedImage) -> [f32; 4] {
         let mut sum = [0.0; 4];
-        for px in img.data.as_chunks::<4>().0 {
+        for px in img.as_rgba().as_chunks::<4>().0 {
             for (s, c) in sum.iter_mut().zip(px) {
                 *s += f32::from(*c);
             }
         }
-        let n = img.data.len() as f32 / 4.0;
+        let n = img.as_rgba().len() as f32 / 4.0;
         sum.map(|s| s / n)
     }
 

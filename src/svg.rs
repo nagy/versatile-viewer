@@ -178,11 +178,7 @@ impl Vector {
         resvg::render(&self.tree, transform, &mut pixmap.as_mut());
         let mut data = pixmap.take();
         demultiply(&mut data);
-        Ok(DecodedImage {
-            width: ImgW::new(rw),
-            height: ImgH::new(rh),
-            data,
-        })
+        Ok(DecodedImage::from_exact(ImgW::new(rw), ImgH::new(rh), data))
     }
 
     /// Paint the tree with its long side on `long`, keeping the aspect.
@@ -199,11 +195,11 @@ impl Vector {
         resvg::render(&self.tree, transform, &mut pixmap.as_mut());
         let mut data = pixmap.take();
         demultiply(&mut data);
-        Ok(cap_texture_side(DecodedImage {
-            width: ImgW::new(rw),
-            height: ImgH::new(rh),
+        Ok(cap_texture_side(DecodedImage::from_exact(
+            ImgW::new(rw),
+            ImgH::new(rh),
             data,
-        }))
+        )))
     }
 }
 
@@ -495,8 +491,8 @@ mod tests {
         std::fs::write(&path, gzip(SQUARE.as_bytes())).expect("write");
         assert!(sniff(&path));
         let decoded = parse(&path).expect("parse").render_base().expect("paint");
-        assert_eq!(decoded.width, ImgW::new(1024));
-        assert_eq!(decoded.height, ImgH::new(512));
+        assert_eq!(decoded.width(), ImgW::new(1024));
+        assert_eq!(decoded.height(), ImgH::new(512));
     }
 
     #[test]
@@ -542,11 +538,14 @@ mod tests {
         let vector = parse(&path).expect("parse");
         assert_eq!(vector.base_size(), (ImgW::new(1024), ImgH::new(512)));
         let img = vector.render_base().expect("render");
-        assert_eq!((img.width, img.height), (ImgW::new(1024), ImgH::new(512)));
-        assert_eq!(img.data.len(), 1024 * 512 * 4);
+        assert_eq!(
+            (img.width(), img.height()),
+            (ImgW::new(1024), ImgH::new(512))
+        );
+        assert_eq!(img.as_rgba().len(), 1024 * 512 * 4);
         // The red rectangle covers the frame, and the painter writes opaque
         // red, so the demultiply pass changes nothing.
-        assert_eq!(&img.data[..4], &[255, 0, 0, 255]);
+        assert_eq!(&img.as_rgba()[..4], &[255, 0, 0, 255]);
     }
 
     #[test]
@@ -627,7 +626,7 @@ mod tests {
             .expect("parse")
             .rasterize(LongSide::new(512))
             .expect("thumb");
-        assert_eq!((d.width, d.height), (ImgW::new(512), ImgH::new(256)));
+        assert_eq!((d.width(), d.height()), (ImgW::new(512), ImgH::new(256)));
     }
 
     #[test]
@@ -685,11 +684,14 @@ mod tests {
         };
         let patch = vector.render_region(right, 1.0, None).expect("paint");
         assert_eq!(
-            (patch.width, patch.height),
+            (patch.width(), patch.height()),
             (ImgW::new(512), ImgH::new(512))
         );
-        assert_eq!(&patch.data[..4], &[0, 0, 255, 255]);
-        assert_eq!(&patch.data[patch.data.len() - 4..], &[0, 0, 255, 255]);
+        assert_eq!(&patch.as_rgba()[..4], &[0, 0, 255, 255]);
+        assert_eq!(
+            &patch.as_rgba()[patch.as_rgba().len() - 4..],
+            &[0, 0, 255, 255]
+        );
         // The left half paints red, so the region origin lands on pixel 0.
         let left = crate::region::Crop {
             x: 0.0,
@@ -699,10 +701,10 @@ mod tests {
         };
         let patch = vector.render_region(left, 2.0, None).expect("paint");
         assert_eq!(
-            (patch.width, patch.height),
+            (patch.width(), patch.height()),
             (ImgW::new(200), ImgH::new(100))
         );
-        assert_eq!(&patch.data[..4], &[255, 0, 0, 255]);
+        assert_eq!(&patch.as_rgba()[..4], &[255, 0, 0, 255]);
     }
 
     #[test]
@@ -730,10 +732,10 @@ mod tests {
         let patch = vector.render_region(right, 2.0, None).expect("paint");
         // The patch measures base pixels times the view scale.
         assert_eq!(
-            (patch.width, patch.height),
+            (patch.width(), patch.height()),
             (ImgW::new(1024), ImgH::new(682))
         );
-        assert_eq!(&patch.data[..4], &[0, 0, 255, 255]);
+        assert_eq!(&patch.as_rgba()[..4], &[0, 0, 255, 255]);
     }
 
     #[test]

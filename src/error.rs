@@ -45,6 +45,11 @@ pub enum DecodeError {
     /// The build has no SVG support.
     #[display("svg support not compiled in")]
     VectorOff,
+    /// The RGBA buffer did not match its dimensions.
+    /// [`crate::DecodedImage::new`] answers this instead of building an image
+    /// whose pixel count and buffer disagree.
+    #[display("rgba buffer does not match its dimensions")]
+    Buffer,
 }
 
 /// A failed GL texture upload.

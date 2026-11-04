@@ -752,7 +752,8 @@ impl ViewState {
                         continue;
                     }
                     self.crop_pending = false;
-                    let texture = upload_rgba(rl, thread, &image.data, image.width, image.height)?;
+                    let texture =
+                        upload_rgba(rl, thread, image.as_rgba(), image.width(), image.height())?;
                     apply_view_filter(thread, &texture, self.pixelated);
                     // The old patch drops here, so one patch lives at a time.
                     self.crop = Some(CropState { texture, patch });
@@ -777,7 +778,8 @@ impl ViewState {
                         continue;
                     }
                     self.prefetch_want = None;
-                    let texture = upload_rgba(rl, thread, &image.data, image.width, image.height)?;
+                    let texture =
+                        upload_rgba(rl, thread, image.as_rgba(), image.width(), image.height())?;
                     apply_view_filter(thread, &texture, self.pixelated);
                     self.prefetch = Some(CropState { texture, patch });
                 }
@@ -1530,7 +1532,7 @@ fn main() -> Result<()> {
         .as_ref()
         .filter(|_| !book)
         .map_or((1024, 768), |image| {
-            (image.width.get() as i32, image.height.get() as i32)
+            (image.width().get() as i32, image.height().get() as i32)
         });
 
     let (mut rl, thread) = raylib::init()
@@ -1624,9 +1626,9 @@ fn main() -> Result<()> {
         st.view_tex = Some(upload_rgba(
             &mut rl,
             &thread,
-            &image.data,
-            image.width,
-            image.height,
+            image.as_rgba(),
+            image.width(),
+            image.height(),
         )?);
         apply_view_filter(
             &thread,
@@ -1634,8 +1636,8 @@ fn main() -> Result<()> {
             st.pixelated,
         );
         st.adopt_source(single_source);
-        st.img_w = image.width.as_f32();
-        st.img_h = image.height.as_f32();
+        st.img_w = image.width().as_f32();
+        st.img_h = image.height().as_f32();
         // A book frames its first spread, a picture frames the whole plane.
         st.open_box = single_box;
         st.reset_view();
@@ -1950,9 +1952,9 @@ fn main() -> Result<()> {
                             &mut rl,
                             &thread,
                             &mut st.view_tex,
-                            &image.data,
-                            image.width,
-                            image.height,
+                            image.as_rgba(),
+                            image.width(),
+                            image.height(),
                             st.pixelated,
                         )?;
                         attach_blur_bg(
@@ -1966,17 +1968,17 @@ fn main() -> Result<()> {
                     Ok(DecodeMsg::Done { image, blur }) => {
                         // Non-JXL formats only learn dimensions here.
                         if st.img_w == 0.0 {
-                            st.img_w = image.width.as_f32();
-                            st.img_h = image.height.as_f32();
+                            st.img_w = image.width().as_f32();
+                            st.img_h = image.height().as_f32();
                             st.refit_open();
                         }
                         show_frame(
                             &mut rl,
                             &thread,
                             &mut st.view_tex,
-                            &image.data,
-                            image.width,
-                            image.height,
+                            image.as_rgba(),
+                            image.width(),
+                            image.height(),
                             st.pixelated,
                         )?;
                         attach_blur_bg(

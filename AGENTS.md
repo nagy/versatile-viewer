@@ -154,6 +154,10 @@ The binary name is `vv`.
   `Rect` is a `#[repr(C)]` axis-aligned rectangle with raylib `Rectangle` field names.
   It converts with `From`, so a raylib call that takes `impl Into<Rectangle>` takes a `Rect` value directly.
   Do not build a bare `Rectangle` in the draw code.
+- `DecodedImage` (`src/lib.rs`) keeps its fields private: `DecodedImage::new(width, height, data)` is the only checked entrance, and it answers `DecodeError::Buffer` unless `data` holds exactly `width * height * 4` bytes.
+  Read the pixels with `as_rgba`, the extents with `width` and `height`, and consume it with `into_rgba` or `into_parts`.
+  A crate path that just computed both the buffer and its size uses `DecodedImage::from_exact`, which debug-asserts the pair, so a wrong buffer still trips a test build.
+  The type therefore retires the hand-written length checks: a wrong buffer never exists to check.
 - Two motion styles, and a key picks one:
   - Auto-repeat steps a discrete move.
     `src/keyrepeat.rs` reimplements the X rate for the grid selection and image next/previous.

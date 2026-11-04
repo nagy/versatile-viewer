@@ -541,7 +541,8 @@ fn run_job(job: &Job, cache: &Cache) -> Result<DecodeOk, SurfaceError> {
     let blur = job.blur.map(|config| config.blur(&full));
     // Borrow the decoded buffer for the thumb: a clone of a large image costs
     // hundreds of megabytes.
-    let thumb = crate::downscale_rgba_ref(&full.data, full.width, full.height, THUMB_LONG_SIDE);
+    let thumb =
+        crate::downscale_rgba_ref(full.as_rgba(), full.width(), full.height(), THUMB_LONG_SIDE);
     store_thumb(cache, path, &thumb, image.0, image.1);
     // The keep-set refill is the only job that carries the full image to the
     // main thread; otherwise the large buffer drops here.
@@ -600,7 +601,7 @@ fn upload_thumb(
     thread: &RaylibThread,
     rgba: &DecodedImage,
 ) -> Result<Texture2D, UploadError> {
-    let tex = crate::upload_rgba(rl, thread, &rgba.data, rgba.width, rgba.height)?;
+    let tex = crate::upload_rgba(rl, thread, rgba.as_rgba(), rgba.width(), rgba.height())?;
     tex.set_texture_filter(thread, TextureFilter::TEXTURE_FILTER_BILINEAR);
     Ok(tex)
 }
@@ -807,7 +808,13 @@ impl Grid {
                 if keep.contains(&e.id)
                     && let Some(full) = full
                 {
-                    match crate::upload_rgba(rl, thread, &full.data, full.width, full.height) {
+                    match crate::upload_rgba(
+                        rl,
+                        thread,
+                        full.as_rgba(),
+                        full.width(),
+                        full.height(),
+                    ) {
                         Ok(ft) => e.full = Some(ft),
                         Err(err) => {
                             // Non-fatal: the thumb still shows.
@@ -865,7 +872,13 @@ impl Grid {
                         && let Some(e) = self.entries.get_mut(i)
                         && e.full.is_none()
                     {
-                        match crate::upload_rgba(rl, thread, &full.data, full.width, full.height) {
+                        match crate::upload_rgba(
+                            rl,
+                            thread,
+                            full.as_rgba(),
+                            full.width(),
+                            full.height(),
+                        ) {
                             Ok(ft) => e.full = Some(ft),
                             Err(err) => {
                                 eprintln!("vv: {}: {err:#}", e.source.label());
@@ -1599,8 +1612,8 @@ mod tests {
         // The entry is lossy, so the hit keeps the shape and the alpha plane
         // and only the color samples drift.
         assert_eq!(
-            (hit.thumb.width, hit.thumb.height),
-            (miss.thumb.width, miss.thumb.height)
+            (hit.thumb.width(), hit.thumb.height()),
+            (miss.thumb.width(), miss.thumb.height())
         );
         assert_eq!(hit.thumb.data.len(), miss.thumb.data.len());
         // The hit still reports the source dimensions, so the image view fits
@@ -1655,7 +1668,10 @@ mod tests {
         };
         let refill = run_job(&keep, &cache).expect("decode");
         let full = refill.full.expect("the keep set keeps the full image");
-        assert_eq!((full.width, full.height), (ImgW::new(1024), ImgH::new(512)));
+        assert_eq!(
+            (full.width(), full.height()),
+            (ImgW::new(1024), ImgH::new(512))
+        );
         assert_eq!(refill.image, miss.image);
     }
 

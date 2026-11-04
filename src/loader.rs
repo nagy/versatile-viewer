@@ -383,10 +383,8 @@ mod tests {
 
     #[test]
     fn downscale_rgba_caps_long_side_and_never_upscales() {
-        let img = |w: u32, h: u32, v: u8| DecodedImage {
-            width: ImgW::new(w),
-            height: ImgH::new(h),
-            data: vec![v; (w * h * 4) as usize],
+        let img = |w: u32, h: u32, v: u8| {
+            DecodedImage::from_exact(ImgW::new(w), ImgH::new(h), vec![v; (w * h * 4) as usize])
         };
         // Above the cap: 800x200 with cap 64 -> 64x16, RGBA8 length matches.
         let out = downscale_rgba(img(800, 200, 7), LongSide::new(64));

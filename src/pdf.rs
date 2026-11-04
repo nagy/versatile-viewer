@@ -206,11 +206,11 @@ impl PdfSurface {
         // An opaque white background makes every alpha 255, so premultiplied
         // equals straight and the buffer uploads as is.
         Ok((
-            DecodedImage {
-                width: ImgW::new(u32::from(w)),
-                height: ImgH::new(u32::from(h)),
-                data: pixmap.data_as_u8_slice().to_vec(),
-            },
+            DecodedImage::from_exact(
+                ImgW::new(u32::from(w)),
+                ImgH::new(u32::from(h)),
+                pixmap.data_as_u8_slice().to_vec(),
+            ),
             scale,
         ))
     }
