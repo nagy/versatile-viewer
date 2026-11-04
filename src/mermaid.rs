@@ -378,8 +378,8 @@ mod tests {
                 scale: 2.0,
             })
             .unwrap();
-        assert_eq!(image.width.get(), (region.w * 2.0).round() as u32);
-        assert_eq!(image.height.get(), (region.h * 2.0).round() as u32);
+        assert_eq!(image.width.raw(), (region.w * 2.0).round() as u32);
+        assert_eq!(image.height.raw(), (region.h * 2.0).round() as u32);
     }
 
     #[test]

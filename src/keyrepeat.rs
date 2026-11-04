@@ -65,7 +65,7 @@ impl RepeatState {
     pub fn tick(&mut self, edge: bool, down: bool, now: f64, delay: Delay, rate: Rate) -> bool {
         if edge {
             self.held = true;
-            self.next = now + f64::from(delay.get()).max(0.0);
+            self.next = now + f64::from(delay.raw()).max(0.0);
             return true;
         }
         if !down || !self.held {
@@ -76,7 +76,7 @@ impl RepeatState {
             // Schedule relative to the last fire (not to `now`).
             // The repeats then stay at the configured rate.
             // The code never fires twice in one frame.
-            self.next = (self.next + 1.0 / f64::from(rate.get()).max(0.001)).max(now);
+            self.next = (self.next + 1.0 / f64::from(rate.raw()).max(0.001)).max(now);
             return true;
         }
         false
@@ -103,7 +103,7 @@ fn xset_settings() -> Option<(Delay, Rate)> {
         }
     }
     match (delay, rate) {
-        (Some(d), Some(r)) if d.get() > 0.0 && r.get() > 0.0 => Some((d, r)),
+        (Some(d), Some(r)) if d.raw() > 0.0 && r.raw() > 0.0 => Some((d, r)),
         _ => None,
     }
 }

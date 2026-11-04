@@ -347,7 +347,7 @@ trailer<</Root 1 0 R/Size 8>>";
         // Both planes render independently.
         for plane in 0..2 {
             let image = surface.render(View::whole(plane, 1.0)).unwrap();
-            assert!(image.width.get() > 0 && image.height.get() > 0);
+            assert!(image.width.raw() > 0 && image.height.raw() > 0);
         }
     }
 

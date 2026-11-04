@@ -108,7 +108,8 @@ The binary name is `vv`.
   Every open, every n/p step and every return to the grid bumps that counter, so the result of a worker for an earlier image drops.
   An image opened from the grid opens its own surface on a worker (`request_source`), because the grid keeps none, and keeps it only when `can_refine` is true.
   A single-file launch keeps the surface it already opened, under the same rule.
-  `img_w`/`img_h` keep measuring the source, never the patch, so a bigger texture never disturbs fit, pan or zoom.
+  `ViewState::img` (a `Size`) keeps measuring the source plane, never the patch, so a bigger texture never disturbs fit, pan or zoom, and no site can set or read the two axes apart.
+  The spread math reads only the y axis, so it takes a `Column` (`Column::new(Size, scale, win_h)`), which names the plane height, the scale and the window height instead of passing three loose floats.
   The whole-image texture (`view_tex`) stays as the fallback and draws only where the patch cannot reach (`patch_covers`), so a resize or a pan that outruns the repaint never shows background.
   Drawing both over the same pixels would double the alpha of an antialiased edge, so the patch hides the whole image where it covers.
   A spread step paints the region it lands on before the glide ends: `ViewState::prefetch_spread` (`main.rs`) renders the target rect on a `rayon` worker at the press edge, so the glide never waits on it.
@@ -150,6 +151,7 @@ The binary name is `vv`.
   `src/mermaid.rs` follows the same rule: a rejected source, a missing diagram and a panicking renderer become `SurfaceError::Render`, and a non-UTF-8 or oversized file becomes `SurfaceError::Unsupported`.
   `main.rs` keeps `anyhow`.
 - Wrap raw pixel and window primitives in the `src/dim.rs` newtypes (`ImgW`, `ImgH`, `WinW`, `WinH`, `LongSide`, `PreviewPx`, `Delay`, `Rate`, `RampTime`, `Rect`).
+  The newtype accessor is `raw()`, never `get()`: `ImgW::new(4).raw() == 4`.
   Public API boundaries take the newtype, not the bare primitive.
   `Rect` is a `#[repr(C)]` axis-aligned rectangle with raylib `Rectangle` field names.
   It converts with `From`, so a raylib call that takes `impl Into<Rectangle>` takes a `Rect` value directly.

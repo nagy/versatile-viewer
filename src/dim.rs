@@ -31,7 +31,7 @@ macro_rules! uint_newtype {
 
             /// The wrapped raw value.
             #[must_use]
-            pub const fn get(self) -> u32 {
+            pub const fn raw(self) -> u32 {
                 self.0
             }
 
@@ -59,7 +59,7 @@ macro_rules! float_newtype {
 
             /// The wrapped raw value.
             #[must_use]
-            pub const fn get(self) -> f32 {
+            pub const fn raw(self) -> f32 {
                 self.0
             }
         }

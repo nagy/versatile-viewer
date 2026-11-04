@@ -227,9 +227,9 @@ impl DecodedImage {
 /// The RGBA8 byte length of a `width` x `height` image, or `None` when the
 /// product overflows.
 fn pixel_bytes(width: ImgW, height: ImgH) -> Option<usize> {
-    usize::try_from(width.get())
+    usize::try_from(width.raw())
         .ok()?
-        .checked_mul(usize::try_from(height.get()).ok()?)?
+        .checked_mul(usize::try_from(height.raw()).ok()?)?
         .checked_mul(4)
 }
 
@@ -266,7 +266,7 @@ pub(crate) fn fb_to_rgba(fb: &jxl_oxide::FrameBuffer) -> Result<DecodedImage, De
         return Err(DecodeError::Channels(channels as u32));
     }
 
-    let mut rgba = vec![0u8; width.get() as usize * height.get() as usize * 4];
+    let mut rgba = vec![0u8; width.raw() as usize * height.raw() as usize * 4];
     for (dst, src) in rgba
         .as_chunks_mut::<4>()
         .0
@@ -361,7 +361,7 @@ pub const MAX_TEXTURE_SIDE: u32 = 8192;
 /// // Below the limit: the same buffer comes back, untouched.
 /// let img = DecodedImage::new(ImgW::new(64), ImgH::new(32), vec![7; 4 * 64 * 32]).unwrap();
 /// let img = cap_texture_side(img);
-/// assert_eq!((img.width().get(), img.height().get()), (64, 32));
+/// assert_eq!((img.width().raw(), img.height().raw()), (64, 32));
 /// assert_eq!(img.as_rgba().len(), 4 * 64 * 32);
 ///
 /// // Over the limit: the long side lands exactly on the limit.
@@ -373,13 +373,13 @@ pub const MAX_TEXTURE_SIDE: u32 = 8192;
 /// .unwrap();
 /// let img = cap_texture_side(img);
 /// assert_eq!(
-///     (img.width().get(), img.height().get()),
+///     (img.width().raw(), img.height().raw()),
 ///     (MAX_TEXTURE_SIDE, 1)
 /// );
 /// ```
 #[must_use]
 pub fn cap_texture_side(image: DecodedImage) -> DecodedImage {
-    if image.width().get().max(image.height().get()) > MAX_TEXTURE_SIDE {
+    if image.width().raw().max(image.height().raw()) > MAX_TEXTURE_SIDE {
         downscale_rgba(image, LongSide::new(MAX_TEXTURE_SIDE))
     } else {
         image
@@ -400,19 +400,19 @@ pub fn cap_texture_side(image: DecodedImage) -> DecodedImage {
 /// // Below the cap: returned unchanged.
 /// let img = DecodedImage::new(ImgW::new(2), ImgH::new(2), vec![0; 4 * 2 * 2]).unwrap();
 /// let img = downscale_rgba(img, LongSide::new(8));
-/// assert_eq!((img.width().get(), img.height().get()), (2, 2));
+/// assert_eq!((img.width().raw(), img.height().raw()), (2, 2));
 /// assert_eq!(img.as_rgba().len(), 4 * 2 * 2);
 ///
 /// // Over it: the aspect stays and the long side equals the cap.
 /// let img = DecodedImage::new(ImgW::new(200), ImgH::new(100), vec![0; 4 * 200 * 100]).unwrap();
 /// let img = downscale_rgba(img, LongSide::new(100));
-/// assert_eq!((img.width().get(), img.height().get()), (100, 50));
+/// assert_eq!((img.width().raw(), img.height().raw()), (100, 50));
 /// assert_eq!(img.as_rgba().len(), 4 * 100 * 50);
 ///
 /// // An image without pixels comes back as it went in.
 /// let img = DecodedImage::new(ImgW::new(0), ImgH::new(0), Vec::new()).unwrap();
 /// let img = downscale_rgba(img, LongSide::new(8));
-/// assert_eq!((img.width().get(), img.height().get()), (0, 0));
+/// assert_eq!((img.width().raw(), img.height().raw()), (0, 0));
 /// assert!(img.as_rgba().is_empty());
 /// ```
 ///
@@ -421,13 +421,13 @@ pub fn cap_texture_side(image: DecodedImage) -> DecodedImage {
 #[must_use]
 pub fn downscale_rgba(image: DecodedImage, long_side: LongSide) -> DecodedImage {
     let (width, height, data) = image.into_parts();
-    let (w, h) = (width.get(), height.get());
+    let (w, h) = (width.raw(), height.raw());
     // An image without pixels has nothing to resample, so it comes back as it
     // went in.
     if w == 0 || h == 0 {
         return DecodedImage::from_exact(width, height, data);
     }
-    let long_side = long_side.get().max(1);
+    let long_side = long_side.raw().max(1);
     if w.max(h) <= long_side {
         return DecodedImage::from_exact(width, height, data);
     }
@@ -500,13 +500,13 @@ pub fn downscale_rgba_ref(
     height: ImgH,
     long_side: LongSide,
 ) -> DecodedImage {
-    let (w, h) = (width.get(), height.get());
+    let (w, h) = (width.raw(), height.raw());
     // An image without pixels has nothing to resample, so it comes back as it
     // went in.
     if w == 0 || h == 0 {
         return DecodedImage::from_exact(width, height, Vec::new());
     }
-    let long_side = long_side.get().max(1);
+    let long_side = long_side.raw().max(1);
     if w.max(h) <= long_side {
         return DecodedImage::from_exact(width, height, rgba.to_vec());
     }
@@ -558,7 +558,7 @@ pub fn upload_rgba(
     // uploads (huge panoramas would fail the GL upload otherwise).
     // The decode path never reaches this branch.
     let owned;
-    let (rgba, width, height) = if width.get().max(height.get()) > MAX_TEXTURE_SIDE {
+    let (rgba, width, height) = if width.raw().max(height.raw()) > MAX_TEXTURE_SIDE {
         owned = downscale_rgba(
             DecodedImage::from_exact(width, height, rgba.to_vec()),
             LongSide::new(MAX_TEXTURE_SIDE),
@@ -571,13 +571,13 @@ pub fn upload_rgba(
     // The cast checks the buffer length, so a short or ragged buffer fails
     // here instead of reading past the end.
     let pixels: &[[u8; 4]] = bytemuck::try_cast_slice(rgba).map_err(|_| UploadError::Buffer)?;
-    if pixels.len() < (width.get() as usize) * (height.get() as usize) {
+    if pixels.len() < (width.raw() as usize) * (height.raw() as usize) {
         return Err(UploadError::Buffer);
     }
     let ffi_image = raylib::ffi::Image {
         data: pixels.as_ptr() as *mut std::os::raw::c_void,
-        width: width.get() as i32,
-        height: height.get() as i32,
+        width: width.raw() as i32,
+        height: height.raw() as i32,
         mipmaps: 1,
         format: PixelFormat::PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 as i32,
     };
@@ -588,8 +588,8 @@ pub fn upload_rgba(
     if timing_enabled() {
         eprintln!(
             "vv: upload {}x{} ({:.1} MB) in {:.1} ms",
-            width.get(),
-            height.get(),
+            width.raw(),
+            height.raw(),
             rgba.len() as f64 / (1024.0 * 1024.0),
             started.elapsed().as_secs_f64() * 1000.0
         );
@@ -757,7 +757,7 @@ mod tests {
             let img = DecodedImage::new(ImgW::new(w), ImgH::new(h), vec![0; 4 * w as usize * h as usize])
                 .expect("sized");
             let out = cap_texture_side(img);
-            let (ow, oh) = (out.width().get(), out.height().get());
+            let (ow, oh) = (out.width().raw(), out.height().raw());
             // A small image comes back untouched.
             proptest::prop_assert!((ow, oh) == (w, h));
             proptest::prop_assert_eq!(out.as_rgba().len(), 4 * ow as usize * oh as usize);

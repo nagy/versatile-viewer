@@ -89,7 +89,7 @@ impl Vector {
     fn declared_per_base(&self) -> f32 {
         let (w, h) = self.declared();
         let (bw, bh) = self.base_size();
-        let base_long = bw.get().max(bh.get());
+        let base_long = bw.raw().max(bh.raw());
         if base_long == 0 {
             return 1.0;
         }
@@ -188,7 +188,7 @@ impl Vector {
     /// The function errors when the pixmap allocation fails.
     pub fn rasterize(&self, long: LongSide) -> Result<DecodedImage, DecodeError> {
         let (w, h) = scale_to(self.declared(), long);
-        let (rw, rh) = (w.get(), h.get());
+        let (rw, rh) = (w.raw(), h.raw());
         let mut pixmap = tiny_skia::Pixmap::new(rw, rh).ok_or(DecodeError::Raster)?;
         let (dw, dh) = self.declared();
         let transform = tiny_skia::Transform::from_scale(rw as f32 / dw, rh as f32 / dh);
@@ -216,7 +216,7 @@ pub(crate) fn base_side(declared_long: f32) -> LongSide {
     };
     let clamped = long
         .round()
-        .clamp(BASE_MIN_SIDE.get() as f32, MAX_TEXTURE_SIDE as f32);
+        .clamp(BASE_MIN_SIDE.raw() as f32, MAX_TEXTURE_SIDE as f32);
     LongSide::new(clamped as u32)
 }
 
@@ -224,7 +224,7 @@ pub(crate) fn base_side(declared_long: f32) -> LongSide {
 /// matches `size`.
 fn scale_to(size: (f32, f32), long: LongSide) -> (ImgW, ImgH) {
     let (w, h) = size;
-    let scale = long.get().max(1) as f32 / w.max(h);
+    let scale = long.raw().max(1) as f32 / w.max(h);
     let limit = MAX_TEXTURE_SIDE as f32;
     let rw = (w * scale).round().clamp(1.0, limit);
     let rh = (h * scale).round().clamp(1.0, limit);

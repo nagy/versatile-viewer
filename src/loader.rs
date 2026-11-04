@@ -226,7 +226,7 @@ fn stream(
     // The code skips it when it would not be smaller than the window.
     if surface.previews() {
         let long = info.w.max(info.h).max(1.0);
-        let scale = (preview_px.get() as f32 / long).min(1.0);
+        let scale = (preview_px.raw() as f32 / long).min(1.0);
         if scale < 1.0
             && let Ok(preview) = surface.render(View::whole(plane, scale))
         {
@@ -321,7 +321,7 @@ fn stream_jxl(
                     // smaller).
                     // The code caps the long side so a 50 MP image does not
                     // allocate ~200 MB of RGBA per preview.
-                    let image = downscale_rgba(image, LongSide::new(preview_px.get()));
+                    let image = downscale_rgba(image, LongSide::new(preview_px.raw()));
                     let blur = blur.map(|config| config.blur(&image));
                     let _ = tx.send(Ok(DecodeMsg::Preview { image, blur }));
                     last_preview = Some(Instant::now());
@@ -391,7 +391,7 @@ mod tests {
         assert_eq!((out.width, out.height), (ImgW::new(64), ImgH::new(16)));
         assert_eq!(
             out.data.len(),
-            (out.width.get() * out.height.get() * 4) as usize
+            (out.width.raw() * out.height.raw() * 4) as usize
         );
         // Below the cap: returned untouched.
         let src = img(32, 16, 7);
@@ -500,7 +500,7 @@ mod tests {
                 // it arrives smaller than the page.
                 DecodeMsg::Preview { image, .. } => {
                     saw_preview = true;
-                    assert!(image.width.get() <= 512 && image.height.get() <= 512);
+                    assert!(image.width.raw() <= 512 && image.height.raw() <= 512);
                 }
             }
         }

@@ -62,7 +62,7 @@ impl Ramp {
     /// assert!(r.tick(false, 0.2, ramp) < 1e-6);
     #[must_use]
     pub fn tick(&mut self, held: bool, dt: f32, ramp: RampTime) -> f32 {
-        let span = ramp.get();
+        let span = ramp.raw();
         let step = if span > 0.0 { dt.max(0.0) / span } else { 1.0 };
         self.level = if held {
             (self.level + step).min(1.0)

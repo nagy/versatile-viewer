@@ -407,8 +407,8 @@ impl Surface for ImageSurface {
         // renders is the capped one.
         let (w, h) = capped(width, height);
         Ok(Size {
-            w: w.get() as f32,
-            h: h.get() as f32,
+            w: w.raw() as f32,
+            h: h.raw() as f32,
         })
     }
 
@@ -544,8 +544,8 @@ impl Surface for VectorSurface {
         }
         let (width, height) = self.vector.base_size();
         Ok(Size {
-            w: width.get() as f32,
-            h: height.get() as f32,
+            w: width.raw() as f32,
+            h: height.raw() as f32,
         })
     }
 
@@ -603,7 +603,7 @@ fn is_native(scale: f32) -> bool {
 /// The decode applies the same cap, so the plane a raster surface reports and
 /// the pixels it renders measure the same picture.
 fn capped(width: ImgW, height: ImgH) -> (ImgW, ImgH) {
-    let (w, h) = (width.get(), height.get());
+    let (w, h) = (width.raw(), height.raw());
     if w.max(h) > crate::MAX_TEXTURE_SIDE {
         let (w, h) = crate::fitted(w, h, crate::MAX_TEXTURE_SIDE);
         (ImgW::new(w), ImgH::new(h))
@@ -631,7 +631,7 @@ fn crop_and_resample(
     img_scale: f32,
     scale: f32,
 ) -> Result<DecodedImage, SurfaceError> {
-    let (iw, ih) = (img.width.get(), img.height.get());
+    let (iw, ih) = (img.width.raw(), img.height.raw());
     if img.data.len() != iw as usize * ih as usize * 4 {
         return Err(SurfaceError::Buffer);
     }
@@ -1070,7 +1070,7 @@ mod tests {
             Ok(DecodedImage::from_exact(
                 w,
                 h,
-                vec![0u8; w.get() as usize * h.get() as usize * 4],
+                vec![0u8; w.raw() as usize * h.raw() as usize * 4],
             ))
         }
 

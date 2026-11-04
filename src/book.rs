@@ -395,7 +395,7 @@ fn intersect(a: Crop, b: Crop) -> Option<Crop> {
 /// The pages of a book never overlap, so the copy overwrites instead of
 /// blending.
 fn blit(dst: &mut [u8], dw: u32, dh: u32, src: &DecodedImage, dx: u32, dy: u32) {
-    let (sw, sh) = (src.width().get(), src.height().get());
+    let (sw, sh) = (src.width().raw(), src.height().raw());
     if dx >= dw || dy >= dh {
         return;
     }
@@ -456,7 +456,7 @@ mod tests {
 
     /// The RGBA pixel at (`x`, `y`) of a render.
     fn pixel(img: &DecodedImage, x: u32, y: u32) -> [u8; 4] {
-        let i = ((y * img.width().get() + x) as usize) * 4;
+        let i = ((y * img.width().raw() + x) as usize) * 4;
         img.as_rgba()[i..i + 4].try_into().expect("four channels")
     }
 
@@ -494,7 +494,7 @@ mod tests {
         let b = book(vec![(100.0, 200.0), (100.0, 200.0), (100.0, 200.0)]);
         let img = b.render_whole(0, 1.0).unwrap();
         assert_eq!(
-            (img.width().get(), img.height().get()),
+            (img.width().raw(), img.height().raw()),
             ((100.0 * SLOTS as f32 + GUTTER) as u32, 400)
         );
         // Row 0: the left slot stays transparent, the cover paints.
@@ -523,7 +523,7 @@ mod tests {
             h: 200.0,
         };
         let img = b.render(View::region(0, seam, 1.0)).unwrap();
-        assert_eq!((img.width().get(), img.height().get()), (30, 200));
+        assert_eq!((img.width().raw(), img.height().raw()), (30, 200));
         assert_eq!(pixel(&img, 0, 100), [20, 0, 0, 255]);
         assert_eq!(pixel(&img, 29, 100), [30, 0, 0, 255]);
         // A window down the right column sees the page of the last row.
@@ -547,7 +547,7 @@ mod tests {
             h: 50.0,
         };
         let img = b.render(View::region(0, region, 1.0)).unwrap();
-        assert_eq!((img.width().get(), img.height().get()), (40, 40));
+        assert_eq!((img.width().raw(), img.height().raw()), (40, 40));
         let far = Crop {
             x: 1000.0,
             y: 1000.0,
@@ -565,8 +565,8 @@ mod tests {
         assert_eq!(b.rows(), 21);
         assert_eq!(b.bounds(0).unwrap().h, 792.0 * 21.0 * b.base());
         let img = b.render_whole(0, 1.0).unwrap();
-        assert_eq!(img.height().get(), MAX_TEXTURE_SIDE);
-        assert!(img.width().get() < img.height().get());
+        assert_eq!(img.height().raw(), MAX_TEXTURE_SIDE);
+        assert!(img.width().raw() < img.height().raw());
         // The patch at a settled zoom converts back to points, so the page
         // backend rasterizes 100 x 100 points of text.
         let region = Crop {
@@ -577,7 +577,7 @@ mod tests {
         };
         let patch = b.render(View::region(0, region, 4.0)).unwrap();
         assert_eq!(
-            patch.width().get(),
+            patch.width().raw(),
             (100.0 * b.base() * 4.0).floor().max(1.0) as u32
         );
     }
@@ -586,7 +586,7 @@ mod tests {
     fn a_huge_scale_clamps_to_the_render_cap() {
         let b = book(vec![(100.0, 200.0), (100.0, 200.0)]);
         let img = b.render_whole(0, 1000.0).unwrap();
-        let pixels = u64::from(img.width().get()) * u64::from(img.height().get());
+        let pixels = u64::from(img.width().raw()) * u64::from(img.height().raw());
         assert!(
             pixels <= MAX_RENDER_PIXELS as u64,
             "pixels {pixels} past the cap"
@@ -678,7 +678,7 @@ mod tests {
             .render(View::region(0, window(spread_pan(0)), scale))
             .unwrap();
         assert_eq!(
-            (cover.width().get(), cover.height().get()),
+            (cover.width().raw(), cover.height().raw()),
             ((100.0 * SLOTS as f32 + GUTTER) as u32, 200)
         );
         assert_eq!(pixel(&cover, 10, 100), [0, 0, 0, 0]);

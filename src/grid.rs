@@ -562,7 +562,7 @@ fn run_job(job: &Job, cache: &Cache) -> Result<DecodeOk, SurfaceError> {
 /// The scale never goes past 1.0, so a small picture is not upscaled into its
 /// thumbnail.
 fn thumb_scale(bounds: crate::surface::Size) -> f32 {
-    (THUMB_LONG_SIDE.get() as f32 / bounds.w.max(bounds.h).max(1.0)).min(1.0)
+    (THUMB_LONG_SIDE.raw() as f32 / bounds.w.max(bounds.h).max(1.0)).min(1.0)
 }
 
 /// Put the thumbnail of a fresh decode into the cache.
@@ -755,7 +755,7 @@ impl Grid {
                 continue; // the entry left meanwhile, so the result is moot
             };
             let e = &mut self.entries[i];
-            if e.width.get() == 0 && res.image.0.get() > 0 {
+            if e.width.raw() == 0 && res.image.0.raw() > 0 {
                 // The header carries the source dimensions, so the image view
                 // fits the picture before the first decode lands.
                 e.width = res.image.0;
@@ -994,13 +994,13 @@ impl Grid {
         let n = self.entries.len();
         let key = (
             n,
-            win_w.get().to_bits(),
-            win_h.get().to_bits(),
+            win_w.raw().to_bits(),
+            win_h.raw().to_bits(),
             self.zoom.to_bits(),
         );
         let mut cache = self.layout_cache.borrow_mut();
         if cache.as_ref().is_none_or(|(k, _)| *k != key) {
-            *cache = Some((key, grid_layout_at(n, win_w.get(), win_h.get(), self.zoom)));
+            *cache = Some((key, grid_layout_at(n, win_w.raw(), win_h.raw(), self.zoom)));
         }
         cache.as_ref().expect("just cached").1
     }
@@ -1058,7 +1058,7 @@ impl Grid {
             return;
         }
         let l = self.layout(win_w, win_h);
-        let (_, win_h) = (win_w.get(), win_h.get());
+        let (_, win_h) = (win_w.raw(), win_h.raw());
         let scroll_max = (l.content_h - win_h).max(0.0);
         let row = self.selected / l.cols;
         let top = MARGIN + row as f32 * (l.cell_h + GAP);
@@ -1103,7 +1103,7 @@ impl Grid {
         win: (WinW, WinH),
         step: u32,
     ) -> Option<GridAction> {
-        let (win_w, win_h) = (win.0.get(), win.1.get());
+        let (win_w, win_h) = (win.0.raw(), win.1.raw());
         if self.entries.is_empty() {
             return None;
         }
@@ -1362,7 +1362,7 @@ impl Grid {
 
     /// Draw the grid: the placeholder text or every visible thumbnail cell.
     pub fn draw(&self, d: &mut RaylibDrawHandle, win: (WinW, WinH)) {
-        let (win_w, win_h) = (win.0.get(), win.1.get());
+        let (win_w, win_h) = (win.0.raw(), win.1.raw());
         if self.entries.is_empty() {
             let msg = "no images found in directory";
             let tw = d.measure_text(msg, 20);

@@ -149,14 +149,14 @@ const PREFETCH_GIVE_UP: Duration = Duration::from_secs(3);
 /// A cursor near the image edge therefore pans only as far as coverage
 /// allows.
 fn aim_fill_pan(st: &ViewState, mouse: Vector2, win_w: f32, win_h: f32) -> Vector2 {
-    let target = (win_w / st.img_w).max(win_h / st.img_h);
+    let target = (win_w / st.img.w).max(win_h / st.img.h);
     let cur = st.view_scale.unwrap_or(target);
     // Mouse position in image coordinates at the current scale.
     // The offset is the window top-left of the unpanned image.
-    let img_x = (mouse.x - (win_w - st.img_w * cur) / 2.0 - st.pan.x) / cur;
-    let img_y = (mouse.y - (win_h - st.img_h * cur) / 2.0 - st.pan.y) / cur;
-    let off_x = (win_w - st.img_w * target) / 2.0;
-    let off_y = (win_h - st.img_h * target) / 2.0;
+    let img_x = (mouse.x - (win_w - st.img.w * cur) / 2.0 - st.pan.x) / cur;
+    let img_y = (mouse.y - (win_h - st.img.h * cur) / 2.0 - st.pan.y) / cur;
+    let off_x = (win_w - st.img.w * target) / 2.0;
+    let off_y = (win_h - st.img.h * target) / 2.0;
     Vector2 {
         x: (win_w / 2.0 - off_x - img_x * target).clamp(-off_x.abs(), off_x.abs()),
         y: (win_h / 2.0 - off_y - img_y * target).clamp(-off_y.abs(), off_y.abs()),
@@ -222,9 +222,10 @@ struct ViewState {
     /// The texture shown in image mode now.
     view_tex: Option<Texture2D>,
     view_loading: bool,
-    /// The full-resolution image dimensions (0 until known).
-    img_w: f32,
-    img_h: f32,
+    /// The full-resolution plane extent, in surface units (0 x 0 until
+    /// known).
+    /// One `Size` names both axes, so no site can set or read them apart.
+    img: Size,
     zoom: ZoomMode,
     /// The on-screen pan offset, eased toward `target_pan` each frame.
     pan: Vector2,
@@ -413,7 +414,7 @@ impl ViewState {
     /// `v` region drag, so no caller re-derives the transform on its own.
     fn frame(&self, win: Vector2) -> Option<region::Frame> {
         Some(region::Frame {
-            img: Vector2::new(self.img_w, self.img_h),
+            img: Vector2::new(self.img.w, self.img.h),
             win,
             pan: self.pan,
             scale: self.view_scale?,
@@ -429,7 +430,7 @@ impl ViewState {
     /// here, so it never assembles the five numbers itself.
     fn frame_at(&self, win: Vector2, pan: Vector2, scale: f32) -> region::Frame {
         region::Frame {
-            img: Vector2::new(self.img_w, self.img_h),
+            img: Vector2::new(self.img.w, self.img.h),
             win,
             pan,
             scale,
@@ -473,7 +474,7 @@ impl ViewState {
             self.top_pending = false;
             return;
         }
-        let top = Vector2::new(0.0, top_pan(self.img_h, scale, win_h));
+        let top = Vector2::new(0.0, Column::new(self.img, scale, win_h).top_pan());
         self.pan = top;
         self.target_pan = top;
         self.open_pan = top;
@@ -507,7 +508,8 @@ impl ViewState {
         if count < 2 || !(first.h.is_finite() && first.h > 0.0) {
             return false;
         }
-        let row = spread_row(self.img_h, self.target_pan.y, scale, win_h, first.h).min(count - 1);
+        let column = Column::new(self.img, scale, win_h);
+        let row = column.row(self.target_pan.y, first.h).min(count - 1);
         let next = row as isize + step;
         if next < 0 || next as usize >= count {
             return false;
@@ -515,7 +517,7 @@ impl ViewState {
         let Some(target) = source.spread_box(next as usize) else {
             return false;
         };
-        self.target_pan = Vector2::new(0.0, spread_pan(self.img_h, target.y, scale, win_h));
+        self.target_pan = Vector2::new(0.0, column.pan_of(target.y));
         self.spread_glide = Some(self.target_pan);
         true
     }
@@ -530,7 +532,7 @@ impl ViewState {
     /// the patch on screen.
     /// A step that misses a spread calls nothing, because it moves nothing.
     fn prefetch_spread(&mut self, win: Vector2) {
-        if self.source.is_none() || self.img_w <= 0.0 || self.view_loading {
+        if self.source.is_none() || self.img.w <= 0.0 || self.view_loading {
             return;
         }
         let Some(scale) = self.view_scale else {
@@ -636,7 +638,7 @@ impl ViewState {
     /// patch that already covers the window replaces the one on screen here and
     /// skips the debounce and the paint.
     fn tick_crop(&mut self, now: Instant, win: Vector2) {
-        if self.source.is_none() || self.crop_pending || self.img_w <= 0.0 || self.view_loading {
+        if self.source.is_none() || self.crop_pending || self.img.w <= 0.0 || self.view_loading {
             return;
         }
         let Some(scale) = self.view_scale else {
@@ -934,7 +936,7 @@ fn show_frame(
     pixelated: bool,
 ) -> Result<(), UploadError> {
     match view_tex {
-        Some(tex) if tex.width() == width.get() as i32 && tex.height() == height.get() as i32 => {
+        Some(tex) if tex.width() == width.raw() as i32 && tex.height() == height.raw() as i32 => {
             tex.update_texture(rgba)?;
         }
         _ => {
@@ -982,15 +984,13 @@ fn apply_view_filter(thread: &RaylibThread, tex: &Texture2D, pixelated: bool) {
 fn draw_turned(
     d: &mut impl RaylibDraw,
     texture: &Texture2D,
-    img_w: f32,
-    img_h: f32,
+    img: Size,
     scale: f32,
     center: Vector2,
     angle: f32,
 ) {
     let src = Rect::sized(texture.width() as f32, texture.height() as f32);
-    let dw = img_w * scale;
-    let dh = img_h * scale;
+    let (dw, dh) = (img.w * scale, img.h * scale);
     let dest = Rect::new(center.x, center.y, dw, dh);
     d.draw_texture_pro(
         texture,
@@ -1002,35 +1002,64 @@ fn draw_turned(
     );
 }
 
-/// The pan that puts the top of a plane on the top edge of the window.
+/// The vertical half of one window mapping: how tall the plane stands on the
+/// screen, and how tall the window is.
 ///
-/// The draw centers the plane and adds the pan, so the top edge sits at
-/// `(win_h - img_h * scale) / 2 + pan.y`.
-/// A positive pan of half the overflow zeroes that, and a plane shorter than
-/// the window stays centered.
-fn top_pan(img_h: f32, scale: f32, win_h: f32) -> f32 {
-    (img_h * scale - win_h).max(0.0) / 2.0
+/// The spread math reads the y axis alone, so it takes these three numbers as
+/// one named value instead of three loose floats that a caller can swap.
+#[derive(Debug, Clone, Copy)]
+struct Column {
+    /// The plane height, in surface units.
+    img_h: f32,
+    /// Output pixels per surface unit.
+    scale: f32,
+    /// The window height, in window pixels.
+    win_h: f32,
 }
 
-/// The pan that puts the top of a spread on the top edge of the window.
-///
-/// `origin_y` is the top of the spread in plane units, so spread 0 answers
-/// [`top_pan`]: a step to the first spread frames it like a fresh open does.
-fn spread_pan(img_h: f32, origin_y: f32, scale: f32, win_h: f32) -> f32 {
-    top_pan(img_h, scale, win_h) - origin_y * scale
-}
-
-/// The spread a pan shows at the top of the window, rounded to the nearest.
-///
-/// The code reads the row from the pan the view aims at, so a step pressed
-/// while an earlier step still glides counts from the spread that step aims
-/// at, never from the pixels on the way.
-fn spread_row(img_h: f32, pan_y: f32, scale: f32, win_h: f32, spread_h: f32) -> usize {
-    if !(spread_h > 0.0 && scale.is_finite() && scale > 0.0) {
-        return 0;
+impl Column {
+    /// The vertical mapping of `img` at `scale` inside a window `win_h` pixels
+    /// tall.
+    const fn new(img: Size, scale: f32, win_h: f32) -> Self {
+        Self {
+            img_h: img.h,
+            scale,
+            win_h,
+        }
     }
-    let top = (top_pan(img_h, scale, win_h) - pan_y) / scale;
-    (top / spread_h).round().max(0.0) as usize
+
+    /// The pan that puts the top of the plane on the top edge of the window.
+    ///
+    /// The draw centers the plane and adds the pan, so the top edge sits at
+    /// `(win_h - img_h * scale) / 2 + pan.y`.
+    /// A positive pan of half the overflow zeroes that, and a plane shorter
+    /// than the window stays centered.
+    fn top_pan(self) -> f32 {
+        (self.img_h * self.scale - self.win_h).max(0.0) / 2.0
+    }
+
+    /// The pan that puts the top of a spread on the top edge of the window.
+    ///
+    /// `origin_y` is the top of the spread in plane units, so spread 0 answers
+    /// [`Self::top_pan`]: a step to the first spread frames it like a fresh
+    /// open does.
+    fn pan_of(self, origin_y: f32) -> f32 {
+        self.top_pan() - origin_y * self.scale
+    }
+
+    /// The spread a pan shows at the top of the window, rounded to the
+    /// nearest.
+    ///
+    /// The code reads the row from the pan the view aims at, so a step pressed
+    /// while an earlier step still glides counts from the spread that step
+    /// aims at, never from the pixels on the way.
+    fn row(self, pan_y: f32, spread_h: f32) -> usize {
+        if !(spread_h > 0.0 && self.scale.is_finite() && self.scale > 0.0) {
+            return 0;
+        }
+        let top = (self.top_pan() - pan_y) / self.scale;
+        (top / spread_h).round().max(0.0) as usize
+    }
 }
 
 /// The snapped destination of a region patch, or `None` when the patch needs
@@ -1095,7 +1124,17 @@ fn draw_patch(d: &mut impl RaylibDraw, patch: &CropState, frame: &region::Frame)
             0.0,
             Color::WHITE,
         ),
-        None => draw_turned(d, &patch.texture, rect.w, rect.h, scale, center, angle),
+        None => draw_turned(
+            d,
+            &patch.texture,
+            Size {
+                w: rect.w,
+                h: rect.h,
+            },
+            scale,
+            center,
+            angle,
+        ),
     }
 }
 
@@ -1189,7 +1228,7 @@ fn patch_covers(st: &ViewState, win_w: f32, win_h: f32) -> bool {
     let Some(scale) = st.view_scale else {
         return false;
     };
-    if st.img_w <= 0.0 || !(scale.is_finite() && scale > 0.0) {
+    if st.img.w <= 0.0 || !(scale.is_finite() && scale > 0.0) {
         return false;
     }
     let Some(frame) = st.frame(Vector2::new(win_w, win_h)) else {
@@ -1276,7 +1315,7 @@ fn show_entry(
     win: (WinW, WinH),
     set_scale_now: bool,
 ) {
-    let (win_w, win_h) = (win.0.get(), win.1.get());
+    let (win_w, win_h) = (win.0.raw(), win.1.raw());
     let (id, tex, w, h, source, queued, thumb, blur, no_full) = {
         let e = &mut grid.entries[idx];
         (
@@ -1304,12 +1343,14 @@ fn show_entry(
         st.view_from_grid = Some(id);
         apply_view_filter(thread, &tex, st.pixelated);
         st.view_tex = Some(tex);
-        st.img_w = w.as_f32();
-        st.img_h = h.as_f32();
+        st.img = Size {
+            w: w.as_f32(),
+            h: h.as_f32(),
+        };
         st.loader = None;
         st.view_loading = false;
         if set_scale_now {
-            st.view_scale = Some((win_w / st.img_w).min(win_h / st.img_h));
+            st.view_scale = Some((win_w / st.img.w).min(win_h / st.img.h));
         }
         attach_blur_bg(&mut st.blur_bg, rl, thread, blur.as_ref(), st.open_id);
     } else {
@@ -1324,15 +1365,17 @@ fn show_entry(
         // Set them now, so the draw loop can show the thumb (or its
         // placeholder) at the final transform (instead of a black frame) while
         // the full-res decode catches up.
-        if w.get() > 0 {
-            st.img_w = w.as_f32();
-            st.img_h = h.as_f32();
+        if w.raw() > 0 {
+            st.img = Size {
+                w: w.as_f32(),
+                h: h.as_f32(),
+            };
             if set_scale_now {
-                st.view_scale = Some((win_w / st.img_w).min(win_h / st.img_h));
+                st.view_scale = Some((win_w / st.img.w).min(win_h / st.img.h));
             }
         } else {
-            st.img_w = 0.0; // dimensions arrive with the header/texture
-            st.img_h = 0.0;
+            // The dimensions arrive with the header or the texture.
+            st.img = Size { w: 0.0, h: 0.0 };
         }
         st.loader = if queued || (thumb && !no_full) {
             // A grid decode for this entry is in flight, or the entry has
@@ -1532,7 +1575,7 @@ fn main() -> Result<()> {
         .as_ref()
         .filter(|_| !book)
         .map_or((1024, 768), |image| {
-            (image.width().get() as i32, image.height().get() as i32)
+            (image.width().raw() as i32, image.height().raw() as i32)
         });
 
     let (mut rl, thread) = raylib::init()
@@ -1589,8 +1632,7 @@ fn main() -> Result<()> {
         view_from_grid: None,
         view_tex: None,
         view_loading: false,
-        img_w: 0.0,
-        img_h: 0.0,
+        img: Size { w: 0.0, h: 0.0 },
         zoom: ZoomMode::FitDown,
         pan: Vector2::ZERO,
         target_pan: Vector2::ZERO,
@@ -1636,8 +1678,10 @@ fn main() -> Result<()> {
             st.pixelated,
         );
         st.adopt_source(single_source);
-        st.img_w = image.width().as_f32();
-        st.img_h = image.height().as_f32();
+        st.img = Size {
+            w: image.width().as_f32(),
+            h: image.height().as_f32(),
+        };
         // A book frames its first spread, a picture frames the whole plane.
         st.open_box = single_box;
         st.reset_view();
@@ -1942,8 +1986,10 @@ fn main() -> Result<()> {
                     Ok(DecodeMsg::Header { width, height }) => {
                         // Dimensions known: fit down at once (the ease
                         // block only runs from the next frame on).
-                        st.img_w = width.as_f32();
-                        st.img_h = height.as_f32();
+                        st.img = Size {
+                            w: width.as_f32(),
+                            h: height.as_f32(),
+                        };
                         st.refit_open();
                     }
                     Ok(DecodeMsg::Preview { image, blur }) => {
@@ -1967,9 +2013,11 @@ fn main() -> Result<()> {
                     }
                     Ok(DecodeMsg::Done { image, blur }) => {
                         // Non-JXL formats only learn dimensions here.
-                        if st.img_w == 0.0 {
-                            st.img_w = image.width().as_f32();
-                            st.img_h = image.height().as_f32();
+                        if st.img.w == 0.0 {
+                            st.img = Size {
+                                w: image.width().as_f32(),
+                                h: image.height().as_f32(),
+                            };
                             st.refit_open();
                         }
                         show_frame(
@@ -2395,23 +2443,23 @@ fn main() -> Result<()> {
             let mut f_open_grid = false;
             let mut f_zoom = false;
             if let Some(m) = f_click
-                && st.img_w > 0.0
+                && st.img.w > 0.0
                 && let Some(scale) = st.view_scale
             {
                 let center = Vector2::new(win_w / 2.0 + st.pan.x, win_h / 2.0 + st.pan.y);
                 // A turned image must hit-test its own outline, so the point
                 // goes back into the unrotated image space first.
                 let m = rotate::unrotate_point(m, center, st.angle);
-                let ox = (win_w - st.img_w * scale) / 2.0 + st.pan.x;
-                let oy = (win_h - st.img_h * scale) / 2.0 + st.pan.y;
+                let ox = (win_w - st.img.w * scale) / 2.0 + st.pan.x;
+                let oy = (win_h - st.img.h * scale) / 2.0 + st.pan.y;
                 let inside = m.x >= ox
-                    && m.x < ox + st.img_w * scale
+                    && m.x < ox + st.img.w * scale
                     && m.y >= oy
-                    && m.y < oy + st.img_h * scale;
+                    && m.y < oy + st.img.h * scale;
                 let filled = ox <= 0.0
                     && oy <= 0.0
-                    && ox + st.img_w * scale >= win_w
-                    && oy + st.img_h * scale >= win_h;
+                    && ox + st.img.w * scale >= win_w
+                    && oy + st.img.h * scale >= win_h;
                 if !inside {
                     f_open_grid = grid.is_some();
                 } else if filled {
@@ -2524,7 +2572,7 @@ fn main() -> Result<()> {
                 // window center, clamped so the window never shows
                 // background.
                 // Zoom-out recentres.
-                if st.zoom == ZoomMode::Fill && st.img_w > 0.0 && st.view_scale.is_some() {
+                if st.zoom == ZoomMode::Fill && st.img.w > 0.0 && st.view_scale.is_some() {
                     st.target_pan = aim_fill_pan(&st, rl.get_mouse_position(), win_w, win_h);
                 } else {
                     st.target_pan = Vector2::ZERO;
@@ -2534,7 +2582,7 @@ fn main() -> Result<()> {
             // Before the header arrives the image dimensions are unknown.
             // The code skips all scale and pan math (it divides by
             // img_w/img_h).
-            if st.img_w > 0.0 {
+            if st.img.w > 0.0 {
                 // Scale for the current mode (fit modes recompute every
                 // frame, so resizing stays correct).
                 // A fit measures the opening box when the surface names one:
@@ -2542,7 +2590,7 @@ fn main() -> Result<()> {
                 // whole and whichever side binds decides.
                 let (fit_w, fit_h) = st
                     .open_box
-                    .map_or((st.img_w, st.img_h), |boxed| (boxed.w, boxed.h));
+                    .map_or((st.img.w, st.img.h), |boxed| (boxed.w, boxed.h));
                 let fit_scale = match st.zoom {
                     ZoomMode::FitDown => (win_w / fit_w).min(win_h / fit_h).min(1.0),
                     ZoomMode::FitAll => (win_w / fit_w).min(win_h / fit_h),
@@ -2811,10 +2859,10 @@ fn main() -> Result<()> {
                     let (ax, ay) = (a.x, a.y);
                     let keyboard_zoom = anchor.is_none();
                     let r = scale / s_old;
-                    let ox = ax - (ax - (win_w - st.img_w * s_old) / 2.0 - st.pan.x) * r;
-                    let oy = ay - (ay - (win_h - st.img_h * s_old) / 2.0 - st.pan.y) * r;
-                    let new_x = ox - (win_w - st.img_w * scale) / 2.0;
-                    let new_y = oy - (win_h - st.img_h * scale) / 2.0;
+                    let ox = ax - (ax - (win_w - st.img.w * s_old) / 2.0 - st.pan.x) * r;
+                    let oy = ay - (ay - (win_h - st.img.h * s_old) / 2.0 - st.pan.y) * r;
+                    let new_x = ox - (win_w - st.img.w * scale) / 2.0;
+                    let new_y = oy - (win_h - st.img.h * scale) / 2.0;
                     // A held key zoom skips the drift: it centers anyway.
                     // So does an anchor that already sits at the window
                     // center: the drift can only move it away from there.
@@ -2930,7 +2978,7 @@ fn main() -> Result<()> {
                 // The cursor stays free, and the rect lives in source units, so
                 // a pan, a zoom and a turn keep the region on the picture while
                 // the drag runs.
-                let img = Vector2::new(st.img_w, st.img_h);
+                let img = Vector2::new(st.img.w, st.img.h);
                 let frame = st.frame(Vector2::new(win_w, win_h));
                 if v_key
                     && region_drag.is_none()
@@ -2975,7 +3023,7 @@ fn main() -> Result<()> {
                         );
                     }
                 }
-            } // st.img_w > 0.0: fit/pan math needs known dimensions
+            } // st.img.w > 0.0: fit/pan math needs known dimensions
         }
 
         // The visible-region patch of a vector file: adopt a parsed source and
@@ -3048,13 +3096,12 @@ fn main() -> Result<()> {
                     draw_turned(
                         &mut d,
                         texture,
-                        st.img_w,
-                        st.img_h,
+                        st.img,
                         st.view_scale.unwrap(),
                         center,
                         st.angle,
                     );
-                } else if st.img_w > 0.0
+                } else if st.img.w > 0.0
                     && let Some(g) = grid.as_ref()
                     && let Some(id) = st.open_id
                     && let Some(i) = g.index_of(id)
@@ -3073,9 +3120,9 @@ fn main() -> Result<()> {
                     // the full-res texture is pixel-aligned.
                     let scale = st
                         .view_scale
-                        .unwrap_or((win_w / st.img_w).min(win_h / st.img_h));
+                        .unwrap_or((win_w / st.img.w).min(win_h / st.img.h));
                     let center = Vector2::new(win_w / 2.0 + st.pan.x, win_h / 2.0 + st.pan.y);
-                    draw_turned(&mut d, tex, st.img_w, st.img_h, scale, center, st.angle);
+                    draw_turned(&mut d, tex, st.img, scale, center, st.angle);
                 }
             }
             // The region patches draw turned and scaled like the image, so
@@ -3181,35 +3228,38 @@ mod tests {
         assert_eq!(patch_dest(center, 0.0, 600.0, 800.0, 600.0, 0.0), None);
     }
 
+    /// A `Column` over a `h` unit plane in a `win_h` pixel window.
+    fn column(h: f32, scale: f32, win_h: f32) -> Column {
+        Column::new(Size { w: h, h }, scale, win_h)
+    }
+
     #[test]
     fn the_top_pan_puts_the_plane_top_on_the_window_top() {
         // The draw centers the plane, so the pan offsets from the middle.
-        let (img_h, scale, win_h) = (4752.0f32, 0.5f32, 768.0f32);
-        let pan = top_pan(img_h, scale, win_h);
-        let top = (win_h - img_h * scale) / 2.0 + pan;
+        let (h, scale, win_h) = (4752.0f32, 0.5f32, 768.0f32);
+        let pan = column(h, scale, win_h).top_pan();
+        let top = (win_h - h * scale) / 2.0 + pan;
         assert_eq!(top, 0.0);
         assert!(pan > 0.0, "a tall plane scrolls down, pan {pan}");
     }
 
     #[test]
     fn a_plane_that_fits_stays_centered() {
-        assert_eq!(top_pan(200.0, 1.0, 768.0), 0.0);
+        assert_eq!(column(200.0, 1.0, 768.0).top_pan(), 0.0);
     }
 
     #[test]
     fn a_spread_step_frames_a_row_like_the_open_frames_the_first() {
         // A book of 40 letter pages, fit into the window.
-        let (img_h, scale, win_h, row_h) = (16632.0f32, 0.9f32, 768.0f32, 792.0f32);
-        assert_eq!(
-            spread_pan(img_h, 0.0, scale, win_h),
-            top_pan(img_h, scale, win_h)
-        );
+        let (h, scale, win_h, row_h) = (16632.0f32, 0.9f32, 768.0f32, 792.0f32);
+        let col = column(h, scale, win_h);
+        assert_eq!(col.pan_of(0.0), col.top_pan());
         for row in [0, 1, 3, 20] {
-            let pan = spread_pan(img_h, row as f32 * row_h, scale, win_h);
+            let pan = col.pan_of(row as f32 * row_h);
             // The top of that spread lands on the top edge of the window.
-            let top = (win_h - img_h * scale) / 2.0 + pan + row as f32 * row_h * scale;
+            let top = (win_h - h * scale) / 2.0 + pan + row as f32 * row_h * scale;
             assert!(top.abs() < 1e-3, "row {row} top {top}");
-            assert_eq!(spread_row(img_h, pan, scale, win_h, row_h), row);
+            assert_eq!(col.row(pan, row_h), row);
         }
     }
 
@@ -3217,23 +3267,15 @@ mod tests {
     fn a_row_reads_from_the_aimed_pan_not_the_pixels() {
         // Half a spread of travel still names the spread the pan aims at, so a
         // step pressed while an earlier step glides never stalls.
-        let (img_h, scale, win_h, row_h) = (4000.0f32, 0.5f32, 768.0f32, 800.0f32);
+        let (h, scale, win_h, row_h) = (4000.0f32, 0.5f32, 768.0f32, 800.0f32);
+        let col = column(h, scale, win_h);
         let row = 2;
-        let pan = spread_pan(img_h, row as f32 * row_h, scale, win_h);
-        assert_eq!(spread_row(img_h, pan, scale, win_h, row_h), row);
+        let pan = col.pan_of(row as f32 * row_h);
+        assert_eq!(col.row(pan, row_h), row);
         // Above the plane top the row stays the first one.
-        assert_eq!(
-            spread_row(
-                img_h,
-                top_pan(img_h, scale, win_h) + 500.0,
-                scale,
-                win_h,
-                row_h
-            ),
-            0
-        );
+        assert_eq!(col.row(col.top_pan() + 500.0, row_h), 0);
         // A book that fits the window has no row to read.
-        assert_eq!(spread_row(200.0, 0.0, 1.0, 768.0, 100.0), 0);
+        assert_eq!(column(200.0, 1.0, 768.0).row(0.0, 100.0), 0);
     }
 
     #[test]

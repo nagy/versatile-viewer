@@ -92,7 +92,7 @@ impl Config {
 fn parse_px(raw: Option<&str>) -> LongSide {
     LongSide::new(
         raw.and_then(|s| s.trim().parse::<u32>().ok())
-            .unwrap_or(DEFAULT_LONG_SIDE.get())
+            .unwrap_or(DEFAULT_LONG_SIDE.raw())
             .clamp(8, 1024),
     )
 }
@@ -125,19 +125,19 @@ fn parse_dim(s: Option<&str>) -> f32 {
 /// // The aspect stays and each pixel holds 4 bytes.
 /// let img = DecodedImage::new(ImgW::new(200), ImgH::new(100), vec![0; 4 * 200 * 100]).unwrap();
 /// let img = small_blur(&img, LongSide::new(128));
-/// assert_eq!((img.width().get(), img.height().get()), (128, 64));
+/// assert_eq!((img.width().raw(), img.height().raw()), (128, 64));
 /// assert_eq!(
 ///     img.as_rgba().len(),
-///     4 * img.width().get() as usize * img.height().get() as usize
+///     4 * img.width().raw() as usize * img.height().raw() as usize
 /// );
 ///
 /// // Portrait: the long side switches to the height.
 /// let img = DecodedImage::new(ImgW::new(100), ImgH::new(200), vec![0; 4 * 100 * 200]).unwrap();
 /// let img = small_blur(&img, LongSide::new(128));
-/// assert_eq!((img.width().get(), img.height().get()), (64, 128));
+/// assert_eq!((img.width().raw(), img.height().raw()), (64, 128));
 /// assert_eq!(
 ///     img.as_rgba().len(),
-///     4 * img.width().get() as usize * img.height().get() as usize
+///     4 * img.width().raw() as usize * img.height().raw() as usize
 /// );
 /// ```
 #[must_use]
@@ -147,7 +147,7 @@ pub fn small_blur(image: &DecodedImage, long_side: LongSide) -> DecodedImage {
     let small = downscale_rgba_ref(image.as_rgba(), image.width(), image.height(), long_side);
     let (width, height) = (small.width(), small.height());
     let pixels: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
-        image::ImageBuffer::from_raw(width.get(), height.get(), small.into_rgba())
+        image::ImageBuffer::from_raw(width.raw(), height.raw(), small.into_rgba())
             .expect("resampled buffer matches dims");
     let blurred = image::imageops::blur(&pixels, BLUR_SIGMA);
     DecodedImage::from_exact(width, height, blurred.into_raw())
@@ -191,7 +191,7 @@ impl BlurBg {
     /// (streaming previews).
     fn upload(&mut self, rl: &mut RaylibHandle, thread: &RaylibThread, data: &DecodedImage) {
         let (width, height, rgba) = (data.width(), data.height(), data.as_rgba());
-        let same = matches!(&self.tex, Some(t) if t.width() == width.get() as i32 && t.height() == height.get() as i32);
+        let same = matches!(&self.tex, Some(t) if t.width() == width.raw() as i32 && t.height() == height.raw() as i32);
         if same {
             if let Some(t) = &mut self.tex
                 && t.update_texture(rgba).is_err()
@@ -319,7 +319,7 @@ impl BlurBg {
 /// The other axis overflows and the code crops it.
 const fn cover_rect(w: u32, h: u32, win_w: WinW, win_h: WinH) -> Rect {
     let (fw, fh) = (w as f32, h as f32);
-    let (win_w, win_h) = (win_w.get(), win_h.get());
+    let (win_w, win_h) = (win_w.raw(), win_h.raw());
     let s = (win_w / fw).max(win_h / fh);
     Rect::new(
         (win_w - fw * s) / 2.0,
@@ -354,10 +354,10 @@ mod tests {
         assert_eq!((out.width(), out.height()), (ImgW::new(256), ImgH::new(64)));
         // Degenerate 1xN input still yields at least 1px on each side.
         let out = small_blur(&img(1, 9, 0), LongSide::new(64));
-        assert!(out.width().get() >= 1 && out.height().get() >= 1);
+        assert!(out.width().raw() >= 1 && out.height().raw() >= 1);
         assert_eq!(
             out.as_rgba().len(),
-            (out.width().get() * out.height().get() * 4) as usize
+            (out.width().raw() * out.height().raw() * 4) as usize
         );
     }
 

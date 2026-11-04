@@ -389,7 +389,7 @@ pub fn key(path: &Path, long_side: LongSide) -> String {
     let mut h = Sha256::new();
     h.update(path.as_os_str().as_bytes());
     h.update([0]);
-    h.update(long_side.get().to_le_bytes());
+    h.update(long_side.raw().to_le_bytes());
     let mut s = String::with_capacity(64);
     for b in h.finalize() {
         use std::fmt::Write as _;
@@ -443,13 +443,13 @@ fn encode_entry(
     }
     // The type already holds the pixel count and the buffer together, so this
     // only rejects an image without pixels: a cached thumb always draws.
-    if thumb.width().get() == 0 || thumb.height().get() == 0 {
+    if thumb.width().raw() == 0 || thumb.height().raw() == 0 {
         return Err(CacheError::Corrupt);
     }
     let codestream = jixel::encode_image_with_alpha(
         thumb.as_rgba(),
-        usize::try_from(thumb.width().get()).map_err(|_| CacheError::Corrupt)?,
-        usize::try_from(thumb.height().get()).map_err(|_| CacheError::Corrupt)?,
+        usize::try_from(thumb.width().raw()).map_err(|_| CacheError::Corrupt)?,
+        usize::try_from(thumb.height().raw()).map_err(|_| CacheError::Corrupt)?,
         &jixel::EncodeConfig::default()
             .with_quality(QUALITY)
             .with_alpha_distance(ALPHA_DISTANCE),
@@ -458,10 +458,10 @@ fn encode_entry(
     for field in [
         u32::from_le_bytes(MAGIC),
         FORMAT,
-        thumb.width().get(),
-        thumb.height().get(),
-        image.0.get(),
-        image.1.get(),
+        thumb.width().raw(),
+        thumb.height().raw(),
+        image.0.raw(),
+        image.1.raw(),
     ] {
         out.extend_from_slice(&field.to_le_bytes());
     }
@@ -756,7 +756,7 @@ mod tests {
         assert!(!hash.is_empty());
         assert!(hash.len() <= crate::placeholder::MAX_BYTES);
         let rendered = hash.render().expect("render");
-        assert!(rendered.width.get() > 0 && rendered.height.get() > 0);
+        assert!(rendered.width.raw() > 0 && rendered.height.raw() > 0);
         // The payload of the same entry is stable, so two reads agree.
         let (again, _) = cache
             .load_placeholder(&src, LongSide::new(512))

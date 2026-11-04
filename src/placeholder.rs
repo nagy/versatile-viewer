@@ -102,8 +102,8 @@ impl Placeholder {
         let small =
             crate::downscale_rgba_ref(&image.data, image.width, image.height, ENCODE_LONG_SIDE);
         let hash = thumbhash::rgba_to_thumb_hash(
-            small.width().get() as usize,
-            small.height.get() as usize,
+            small.width().raw() as usize,
+            small.height.raw() as usize,
             &small.data,
         );
         Self::from_bytes(&hash)
@@ -121,7 +121,7 @@ impl Placeholder {
         if w == 0 || h == 0 || rgba.len() != w * h * 4 {
             return None;
         }
-        let long = RENDER_LONG_SIDE.get() as usize;
+        let long = RENDER_LONG_SIDE.raw() as usize;
         let (w, h) = (w as u32, h as u32);
         let scale = long as f32 / w.max(h) as f32;
         let (nw, nh) = (
@@ -184,10 +184,10 @@ mod tests {
         let p = Placeholder::encode(&src).expect("encode");
         assert!(p.len() <= MAX_BYTES);
         let out = p.render().expect("render");
-        assert_eq!(out.width.get(), RENDER_LONG_SIDE.get());
+        assert_eq!(out.width.raw(), RENDER_LONG_SIDE.raw());
         // The render derives its height from the aspect of the DCT grid, which
         // rounds, so only the ratio matches.
-        let ratio = out.width.get() as f32 / out.height.get() as f32;
+        let ratio = out.width.raw() as f32 / out.height.raw() as f32;
         assert!((ratio - 2.0).abs() < 0.3, "{ratio}");
         // The DCT drops the detail, so only the average colour survives.
         let (a, b) = (average(&src), average(&out));
@@ -202,7 +202,7 @@ mod tests {
             let p = Placeholder::encode(&ramp(w, h)).expect("encode");
             let out = p.render().expect("render");
             let want = w as f32 / h as f32;
-            let got = out.width.get() as f32 / out.height.get() as f32;
+            let got = out.width.raw() as f32 / out.height.raw() as f32;
             assert!((want - got).abs() < 0.25 * want, "{w}x{h}: {got}");
         }
     }
