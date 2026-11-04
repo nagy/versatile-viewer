@@ -284,7 +284,7 @@ fn pixel_dimensions(region: Crop, scale: f32) -> (u16, u16, f32) {
 /// here.
 #[must_use]
 pub fn is_pdf(path: &Path) -> bool {
-    file_magic_at_least(path, 5) == Some(b"%PDF-".to_vec())
+    file_magic_at_least(path, 5).as_deref() == Some(b"%PDF-".as_slice())
 }
 
 /// The first `n` bytes of the file, or None on a missing or short file.
