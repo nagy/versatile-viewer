@@ -129,6 +129,8 @@ The binary name is `vv`.
   Never add a main-thread resize: a large image then freezes the window for seconds.
   Downscale a borrowed buffer with `downscale_rgba_ref`, not `downscale_rgba` on a clone.
   `BlurBg::attach` and `upload` take `&DecodedImage`, so a caller never clones the blur buffer.
+  `blurbg::Config` holds the `VV_BLUR_BG` settings (`px`, `dim`) and `Config::from_env` answers `Option<Config>`, so `None` is the gimmick being off.
+  The grid, the decode job and the loader carry that one `Option`, never a `blur_enabled` flag beside a size, and the environment is read once at the boundary instead of once per call.
   All pixel resize goes through `resample_rgba` (`src/lib.rs`), the `fast_image_resize` SIMD path with Lanczos3.
   Do not call `image::imageops::resize` for a downscale: it is several times slower.
   Keep the `rayon` feature of `fast_image_resize` off, so a resize never spawns nested workers inside a decode job.

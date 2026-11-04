@@ -153,16 +153,16 @@ impl Loader {
         // Detached on purpose: the main thread never joins.
         // The worker ends on cancellation or when the sends start to fail
         // (the receiver dropped).
-        let blur_enabled = blurbg::enabled();
-        let blur_px = blurbg::blur_px();
+        // The gimmick settings are parsed once per load, so a worker never
+        // reads the environment.
+        let blur = blurbg::Config::from_env();
         std::thread::spawn(move || {
             match stream(
                 surface.as_ref(),
                 plane,
                 &worker_cancel,
                 &tx,
-                blur_enabled,
-                blur_px,
+                blur,
                 preview_px,
             ) {
                 Ok(Some(msg)) => {
@@ -198,14 +198,12 @@ impl Drop for Loader {
 /// `Ok(None)` means the worker stopped and sends nothing.
 /// Any other progress (`Header`, `Preview`) goes out through `tx`
 /// directly.
-#[allow(clippy::too_many_arguments)]
 fn stream(
     surface: &dyn Surface,
     plane: usize,
     cancel: &AtomicBool,
     tx: &Sender<Result<DecodeMsg, LoadError>>,
-    blur_enabled: bool,
-    blur_px: LongSide,
+    blur: Option<blurbg::Config>,
     preview_px: PreviewPx,
 ) -> Result<Option<DecodeMsg>, LoadError> {
     if plane == 0
@@ -213,14 +211,7 @@ fn stream(
         && let Some(mut source) = surface.progressive()?
     {
         // JPEG XL: the byte stream carries progressive previews.
-        return stream_jxl(
-            source.as_mut(),
-            cancel,
-            tx,
-            blur_enabled,
-            blur_px,
-            preview_px,
-        );
+        return stream_jxl(source.as_mut(), cancel, tx, blur, preview_px);
     }
 
     // Dimensions first, so the view fits the plane before the render lands.
@@ -239,7 +230,7 @@ fn stream(
         if scale < 1.0
             && let Ok(preview) = surface.render(View::whole(plane, scale))
         {
-            let blur = blur_enabled.then(|| blurbg::small_blur(&preview, blur_px));
+            let blur = blur.map(|config| config.blur(&preview));
             let _ = tx.send(Ok(DecodeMsg::Preview {
                 image: preview,
                 blur,
@@ -248,7 +239,7 @@ fn stream(
     }
 
     let image = surface.render(View::whole(plane, 1.0))?;
-    let blur = blur_enabled.then(|| blurbg::small_blur(&image, blur_px));
+    let blur = blur.map(|config| config.blur(&image));
     Ok(Some(DecodeMsg::Done { image, blur }))
 }
 
@@ -261,8 +252,7 @@ fn stream_jxl(
     source: &mut dyn ChunkSource,
     cancel: &AtomicBool,
     tx: &Sender<Result<DecodeMsg, LoadError>>,
-    blur_enabled: bool,
-    blur_px: LongSide,
+    blur: Option<blurbg::Config>,
     preview_px: PreviewPx,
 ) -> Result<Option<DecodeMsg>, LoadError> {
     let slow = std::env::var_os("VV_SLOW_STREAM").is_some();
@@ -332,7 +322,7 @@ fn stream_jxl(
                     // The code caps the long side so a 50 MP image does not
                     // allocate ~200 MB of RGBA per preview.
                     let image = downscale_rgba(image, LongSide::new(preview_px.get()));
-                    let blur = blur_enabled.then(|| blurbg::small_blur(&image, blur_px));
+                    let blur = blur.map(|config| config.blur(&image));
                     let _ = tx.send(Ok(DecodeMsg::Preview { image, blur }));
                     last_preview = Some(Instant::now());
                 }
@@ -357,7 +347,7 @@ fn stream_jxl(
     let image = fb_to_rgba(&render.image_all_channels())?;
     // Cap here, on the worker: the main thread uploads the buffer as is.
     let image = cap_texture_side(image);
-    let blur = blur_enabled.then(|| blurbg::small_blur(&image, blur_px));
+    let blur = blur.map(|config| config.blur(&image));
     Ok(Some(DecodeMsg::Done { image, blur }))
 }
 

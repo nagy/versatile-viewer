@@ -36,22 +36,62 @@ const DEFAULT_DIM: f32 = 0.6;
 /// Crossfade duration for grid-view background changes, in seconds.
 const FADE_SECS: f64 = 0.4;
 
-/// Return true when the gimmick is enabled.
-/// This is a strict opt-in: exactly `VV_BLUR_BG=1`.
-#[must_use]
-pub fn enabled() -> bool {
-    std::env::var_os("VV_BLUR_BG").is_some_and(|v| v == "1")
+/// The `VV_BLUR_BG` gimmick settings, parsed once at the process boundary.
+///
+/// `None` means the gimmick is off, so a caller carries one `Option` instead of
+/// a flag beside a size that means nothing while the flag is false.
+/// The decode workers read the long side, and the GPU side reads the
+/// brightness.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Config {
+    /// The long side of the tiny blurred copy, in pixels.
+    px: LongSide,
+    /// The brightness the background keeps, as a 0..=1 multiplier.
+    dim: f32,
+}
+
+impl Config {
+    /// Read the settings from the environment, or `None` when the gimmick is
+    /// off.
+    ///
+    /// The environment is read here and nowhere else, so a worker never
+    /// re-parses it.
+    #[must_use]
+    pub fn from_env() -> Option<Self> {
+        // A strict opt-in: exactly `VV_BLUR_BG=1`.
+        std::env::var_os("VV_BLUR_BG")
+            .is_some_and(|v| v == "1")
+            .then(|| Self {
+                px: parse_px(std::env::var("VV_BLUR_PX").ok().as_deref()),
+                dim: parse_dim(std::env::var("VV_BG_DIM").ok().as_deref()),
+            })
+    }
+
+    /// The long side of the tiny blurred copy, in pixels.
+    #[must_use]
+    pub const fn px(self) -> LongSide {
+        self.px
+    }
+
+    /// The brightness the background keeps, as a 0..=1 multiplier.
+    #[must_use]
+    pub const fn dim(self) -> f32 {
+        self.dim
+    }
+
+    /// The tiny blurred copy of `image`, at the configured long side.
+    #[must_use]
+    pub fn blur(self, image: &DecodedImage) -> DecodedImage {
+        small_blur(image, self.px)
+    }
 }
 
 /// Long side of the background texture, from `VV_BLUR_PX`.
 /// The value is clamped to 8..=1024.
 /// The default 128 is already far below any window size.
-#[must_use]
-pub fn blur_px() -> LongSide {
+fn parse_px(raw: Option<&str>) -> LongSide {
     LongSide::new(
-        std::env::var("VV_BLUR_PX")
-            .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok())
+        raw.and_then(|s| s.trim().parse::<u32>().ok())
             .unwrap_or(DEFAULT_LONG_SIDE.get())
             .clamp(8, 1024),
     )
@@ -154,11 +194,9 @@ impl BlurBg {
     /// None when the gimmick is off.
     #[must_use]
     pub fn from_env() -> Option<BlurBg> {
-        if !enabled() {
-            return None;
-        }
+        let config = Config::from_env()?;
         Some(BlurBg {
-            dim: parse_dim(std::env::var("VV_BG_DIM").ok().as_deref()),
+            dim: config.dim(),
             tex: None,
             current: None,
             old: None,
@@ -362,20 +400,13 @@ mod tests {
 
     #[test]
     fn blur_px_defaults_and_clamps() {
-        // No var set: the 128px default (parse of None-like input).
-        let p = |s: Option<&str>| -> LongSide {
-            LongSide::new(
-                s.and_then(|s| s.trim().parse::<u32>().ok())
-                    .unwrap_or(DEFAULT_LONG_SIDE.get())
-                    .clamp(8, 1024),
-            )
-        };
-        assert_eq!(p(None), LongSide::new(128));
-        assert_eq!(p(Some("128")), LongSide::new(128));
-        assert_eq!(p(Some(" 32 ")), LongSide::new(32));
-        assert_eq!(p(Some("4")), LongSide::new(8)); // clamped up
-        assert_eq!(p(Some("99999")), LongSide::new(1024)); // clamped down
-        assert_eq!(p(Some("junk")), LongSide::new(128));
+        // No var set: the 128px default.
+        assert_eq!(parse_px(None), LongSide::new(128));
+        assert_eq!(parse_px(Some("128")), LongSide::new(128));
+        assert_eq!(parse_px(Some(" 32 ")), LongSide::new(32));
+        assert_eq!(parse_px(Some("4")), LongSide::new(8)); // clamped up
+        assert_eq!(parse_px(Some("99999")), LongSide::new(1024)); // clamped down
+        assert_eq!(parse_px(Some("junk")), LongSide::new(128));
     }
 
     #[test]

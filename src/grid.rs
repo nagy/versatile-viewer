@@ -229,9 +229,10 @@ struct Job {
     /// A thumb-only job decodes outside that set, and the grid view has no set
     /// at all.
     want_full: bool,
-    /// The `VV_BLUR_BG` gimmick settings, read once by the grid.
-    blur_enabled: bool,
-    blur_px: LongSide,
+    /// The `VV_BLUR_BG` gimmick settings, parsed once by the grid.
+    /// A job blurs only when the gimmick is on, so one `Option` answers both
+    /// the flag and the size.
+    blur: Option<blurbg::Config>,
 }
 
 /// The three Vim visual selection styles.
@@ -447,10 +448,9 @@ pub struct Grid {
     /// The field uses interior mutability because `draw` takes &self.
     layout_cache: RefCell<Option<(LayoutKey, Layout)>>,
     /// The `VV_BLUR_BG` gimmick settings, read once.
-    /// Decode workers compute the tiny blurred copy only when enabled, at
-    /// this texture long side.
-    blur_enabled: bool,
-    blur_px: LongSide,
+    /// Decode workers compute the tiny blurred copy only when the gimmick is
+    /// on, at this size.
+    blur: Option<blurbg::Config>,
     /// The thumbnail cache, shared with every decode worker.
     cache: Arc<Cache>,
 }
@@ -469,9 +469,7 @@ fn run_job(job: &Job, cache: &Cache) -> Result<DecodeOk, SurfaceError> {
         // The cached thumb already measures [`THUMB_LONG_SIDE`], so the code
         // uploads it as is and the GPU scales it in the cell.
         // A resample here would copy the buffer for nothing.
-        let blur = job
-            .blur_enabled
-            .then(|| blurbg::small_blur(&hit.thumb, job.blur_px));
+        let blur = job.blur.map(|config| config.blur(&hit.thumb));
         return Ok(DecodeOk {
             thumb: hit.thumb,
             image: hit.image,
@@ -500,9 +498,7 @@ fn run_job(job: &Job, cache: &Cache) -> Result<DecodeOk, SurfaceError> {
         // decodes in full and downscales inside the surface render, on the
         // worker.
         let thumb = surface.render(View::whole(plane, thumb_scale(bounds)))?;
-        let blur = job
-            .blur_enabled
-            .then(|| blurbg::small_blur(&thumb, job.blur_px));
+        let blur = job.blur.map(|config| config.blur(&thumb));
         store_thumb(cache, path, &thumb, image.0, image.1);
         return Ok(DecodeOk {
             thumb,
@@ -513,9 +509,7 @@ fn run_job(job: &Job, cache: &Cache) -> Result<DecodeOk, SurfaceError> {
         });
     }
     let full = surface.render(View::whole(plane, 1.0))?;
-    let blur = job
-        .blur_enabled
-        .then(|| blurbg::small_blur(&full, job.blur_px));
+    let blur = job.blur.map(|config| config.blur(&full));
     // Borrow the decoded buffer for the thumb: a clone of a large image costs
     // hundreds of megabytes.
     let thumb = crate::downscale_rgba_ref(&full.data, full.width, full.height, THUMB_LONG_SIDE);
@@ -682,8 +676,7 @@ impl Grid {
             rep_dir: Default::default(),
             zoom: 1.0,
             scroll: 0.0,
-            blur_enabled: blurbg::enabled(),
-            blur_px: blurbg::blur_px(),
+            blur: blurbg::Config::from_env(),
             cache,
         }
     }
@@ -961,8 +954,7 @@ impl Grid {
                 // Only a keep-set entry needs the full texture. A cold entry
                 // outside it decodes for its thumbnail only.
                 want_full: keep.contains(&e.id),
-                blur_enabled: self.blur_enabled,
-                blur_px: self.blur_px,
+                blur: self.blur,
             };
             let tx = self.result_tx.clone();
             let cache = Arc::clone(&self.cache);
@@ -1584,8 +1576,7 @@ mod tests {
             id: 0,
             source: EntrySource::new(png.clone()),
             want_full: false,
-            blur_enabled: false,
-            blur_px: LongSide::new(64),
+            blur: None,
         };
         let miss = run_job(&job, &cache).expect("decode");
         assert!(miss.full.is_none(), "a thumb-only job keeps no full image");
@@ -1635,8 +1626,7 @@ mod tests {
             id: 0,
             source: EntrySource::new(svg),
             want_full: false,
-            blur_enabled: false,
-            blur_px: LongSide::new(64),
+            blur: None,
         };
         let miss = run_job(&job, &cache).expect("decode");
         assert!(miss.full.is_none());

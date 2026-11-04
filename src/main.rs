@@ -1527,9 +1527,9 @@ fn main() -> Result<()> {
     // Blur-background source for a single-plane launch: computed while the
     // RGBA buffer still exists (before the window and GL context exist).
     // The code uploads it once the window is open.
-    let single_blur = if single_plane && blurbg::enabled() {
-        let image = single_decoded.as_ref().expect("single image decoded");
-        Some(blurbg::small_blur(image, blurbg::blur_px()))
+    let single_blur = if single_plane {
+        blurbg::Config::from_env()
+            .map(|config| config.blur(single_decoded.as_ref().expect("single image decoded")))
     } else {
         None
     };
