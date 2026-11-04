@@ -92,8 +92,10 @@ The binary name is `vv`.
   A raster plane measures the capped size it renders, so `bounds` and the pixels of a scale-1.0 render agree.
   The trait decisions live in `docs/adr/0001-surface-one-region-based-render-trait.md`.
 - The image view repaints the region its window shows, from the open surface, when `Surface::can_refine` says a sharper picture is possible.
-  `src/region.rs` holds the pure geometry and policy: `crop`, `to_screen`, `to_image`, `Frame`, `Crop`, `worth_painting`, `covers`, `MARGIN`, `SCALE_SLACK`, `QUIET`.
+  `src/region.rs` holds the pure geometry and policy: `Frame` (`to_screen`, `to_image`, `crop`), `Crop`, `Patch`, `worth_painting`, `covers`, `MARGIN`, `SCALE_SLACK`, `QUIET`.
   `Frame` bundles one window mapping (`img`, `win`, `pan`, `scale`, `angle`), and `ViewState::frame` (`main.rs`) builds it, so a caller never re-derives the transform and never mixes window units with source units.
+  The mapping and the crop are methods of `Frame`, so no free function takes the five numbers loose and no call site can swap the scale for the angle; `ViewState::frame_at` answers the same frame for a pan the view aims at (a glide target) rather than the one on screen.
+  A `Patch` is a `Crop` beside the scale its pixels were painted at, so `worth_painting` and `covers` compare two values instead of a rect and two loose scales; `CropState`, `LoadPlan`-driven prefetch state and the crop messages carry one.
   A patch covers the window plus `MARGIN` (0.25 of each side), in source pixels, so the paint area follows the window and a deep zoom costs no more pixels than a shallow one.
   `Surface::render` paints that rect at the view scale, so the patch lands 1:1 on screen; a `VectorSurface` paints only those pixels, and a `PdfSurface` rasterizes only them.
   The region rect lives in surface units: base raster pixels for a vector file (`Vector::declared_per_base` converts to the tree's declared units), points for a PDF page.
@@ -273,7 +275,7 @@ A source that paints no paper carries it in its pixels, so no clear color ever h
   Shift at the press edge keeps both sides equal (`Kind::Span`), and the side shrinks to the room the plane leaves past the anchor.
   ESC drops a region first and stays in the image view, and only an ESC with nothing to drop returns to the grid.
   A fresh open, a step to another image and a return to the grid all drop the region.
-  The rect lives in source units, so `region::to_screen` maps its corners through the same transform the picture uses, and a pan, a zoom and a turn all keep it on the picture.
+  The rect lives in source units, so `region::Frame::to_screen` maps its corners through the same transform the picture uses, and a pan, a zoom and a turn all keep it on the picture.
   The free pointer converts back through `region::Frame::to_image`, and `selection_rect` (`main.rs`) owns that conversion for the frame draw and for the release, so the border, the veil and the committed rect never read the pointer in different units.
   `region_sel::around` answers the four bands of the plane outside the rect, `draw_selection` (`main.rs`) paints them with one `DIM_VEIL` and draws the bright `SELECTION_BORDER` around the rect.
   raylib culls a back face, so `region_sel::veil_triangles` reverses each band (`p0, p3, p2` then `p0, p2, p1`): a band in the other order draws nothing.

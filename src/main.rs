@@ -310,7 +310,7 @@ struct ViewState {
     /// The rect and scale of the prefetch a worker paints now.
     /// The view waits for it instead of starting an ordinary paint on the same
     /// region, and it drops the entry when the worker never answers.
-    prefetch_want: Option<(region::Crop, f32)>,
+    prefetch_want: Option<region::Patch>,
     /// When the in-flight prefetch started, so [`PREFETCH_GIVE_UP`] bounds the
     /// wait.
     prefetch_at: Instant,
@@ -327,10 +327,9 @@ struct ViewState {
     /// Bumped on every open, every n/p step and every return to the grid, so
     /// the result of a worker for an earlier image drops instead of landing.
     crop_gen: u64,
-    /// The region the window needed when the debounce last saw it move.
-    crop_seen: Option<region::Crop>,
-    /// The scale the debounce last saw.
-    crop_seen_scale: f32,
+    /// The region and scale the window needed when the debounce last saw it
+    /// move.
+    crop_seen: Option<region::Patch>,
     /// When the view last moved.
     crop_quiet_at: Instant,
     /// The region workers talk back over this pair.
@@ -346,10 +345,9 @@ struct ViewState {
 struct CropState {
     /// The pixels of the patch.
     texture: Texture2D,
-    /// The source rect the patch covers, in base raster pixels.
-    rect: region::Crop,
-    /// The raster scale, in texture pixels per source pixel.
-    scale: f32,
+    /// The source rect the patch covers and the scale it holds, so a paint
+    /// rule reads one value instead of a rect beside a loose scale.
+    patch: region::Patch,
 }
 
 /// A message from a region worker to the image view.
@@ -362,11 +360,11 @@ enum CropMsg {
         generation: u64,
         source: Option<Arc<dyn Surface>>,
     },
-    /// A finished patch of `rect` at `scale` pixels per source pixel.
+    /// A finished patch of `patch.rect` at `patch.scale` pixels per source
+    /// pixel.
     Crop {
         generation: u64,
-        rect: region::Crop,
-        scale: f32,
+        patch: region::Patch,
         image: DecodedImage,
     },
     /// A finished patch of a spread step, painted before the step landed.
@@ -374,8 +372,7 @@ enum CropMsg {
     Prefetch {
         generation: u64,
         id: u64,
-        rect: region::Crop,
-        scale: f32,
+        patch: region::Patch,
         image: DecodedImage,
     },
     /// The prefetch of aim `id` failed.
@@ -423,6 +420,21 @@ impl ViewState {
             angle: self.angle,
         })
         .filter(region::Frame::drawable)
+    }
+
+    /// The window mapping of the open plane at `pan` and `scale`.
+    ///
+    /// [`Self::frame`] answers the same mapping for the pan and the scale on
+    /// screen; a caller that aims elsewhere (the target pan of a glide) asks
+    /// here, so it never assembles the five numbers itself.
+    fn frame_at(&self, win: Vector2, pan: Vector2, scale: f32) -> region::Frame {
+        region::Frame {
+            img: Vector2::new(self.img_w, self.img_h),
+            win,
+            pan,
+            scale,
+            angle: self.angle,
+        }
     }
 
     /// Frame the opening box again once the image dimensions land.
@@ -530,27 +542,26 @@ impl ViewState {
         let Some(source) = self.source.clone() else {
             return;
         };
-        let img = Vector2::new(self.img_w, self.img_h);
         // The same rect an ordinary paint would cover, so the landing frame
         // adopts it without a second paint.
-        let paint = region::crop(img, win, self.target_pan, scale, self.angle, region::MARGIN);
-        if paint.is_empty() {
+        let aim = self.frame_at(win, self.target_pan, scale);
+        let patch = region::Patch::new(aim.crop(region::MARGIN), scale);
+        if patch.rect.is_empty() {
             return;
         }
         self.prefetch = None;
-        self.prefetch_want = Some((paint, scale));
+        self.prefetch_want = Some(patch);
         self.prefetch_at = Instant::now();
         self.prefetch_id = self.prefetch_id.wrapping_add(1);
         let (generation, id, tx) = (self.crop_gen, self.prefetch_id, self.crop_tx.clone());
         let plane = self.source_plane;
         rayon::spawn(move || {
-            match source.render(View::region(plane, paint, scale)) {
+            match source.render(View::region(plane, patch.rect, scale)) {
                 Ok(image) => {
                     let _ = tx.send(CropMsg::Prefetch {
                         generation,
                         id,
-                        rect: paint,
-                        scale,
+                        patch,
                         image,
                     });
                 }
@@ -571,7 +582,6 @@ impl ViewState {
         self.crop = None;
         self.crop_pending = false;
         self.crop_seen = None;
-        self.crop_seen_scale = 0.0;
         self.crop_quiet_at = Instant::now();
         self.crop_gen = self.crop_gen.wrapping_add(1);
         self.close_prefetch();
@@ -635,20 +645,19 @@ impl ViewState {
         if !(scale.is_finite() && scale > 0.0) {
             return;
         }
-        let img = Vector2::new(self.img_w, self.img_h);
-        let needed = region::crop(img, win, self.pan, scale, self.angle, 0.0);
+        let frame = self.frame_at(win, self.pan, scale);
+        let needed = region::Patch::new(frame.crop(0.0), scale);
         // A prefetched patch that holds the window is the patch on screen now.
         // The check runs before the debounce, so the landing frame shows the
         // sharp spread at once instead of waiting out [`region::QUIET`].
         if self
             .prefetch
             .as_ref()
-            .is_some_and(|patch| region::covers(&needed, &patch.rect, scale, patch.scale))
+            .is_some_and(|patch| region::covers(&needed, &patch.patch))
         {
             self.crop = self.prefetch.take();
             self.prefetch_want = None;
             self.crop_seen = Some(needed);
-            self.crop_seen_scale = scale;
             self.crop_quiet_at = now;
             return;
         }
@@ -661,16 +670,11 @@ impl ViewState {
         }
         // The debounce: any movement of the seen region restarts the timer, so
         // a drag, a pan or an ease never queues a paint per frame.
-        let moved = self.crop_seen.is_none_or(|seen| {
-            (seen.x - needed.x).abs() > 0.5
-                || (seen.y - needed.y).abs() > 0.5
-                || (seen.w - needed.w).abs() > 0.5
-                || (seen.h - needed.h).abs() > 0.5
-                || (self.crop_seen_scale - scale).abs() > scale * 0.002
-        });
+        let moved = self
+            .crop_seen
+            .is_none_or(|seen| !same_patch(&seen, &needed));
         if moved {
             self.crop_seen = Some(needed);
-            self.crop_seen_scale = scale;
             self.crop_quiet_at = now;
             return;
         }
@@ -680,21 +684,15 @@ impl ViewState {
         // A prefetch of this very region is on its way, so the paint that would
         // duplicate it waits instead.
         // A worker that never answers stops the wait at [`PREFETCH_GIVE_UP`].
-        if let Some((rect, patch_scale)) = self.prefetch_want
-            && region::covers(&needed, &rect, scale, patch_scale)
+        if let Some(want) = self.prefetch_want
+            && region::covers(&needed, &want)
         {
             if now.duration_since(self.prefetch_at) < PREFETCH_GIVE_UP {
                 return;
             }
             self.prefetch_want = None;
         }
-        let painted = self.crop.as_ref().map(|c| (c.rect, c.scale));
-        if !region::worth_painting(
-            &needed,
-            painted.as_ref().map(|(rect, _)| rect),
-            scale,
-            painted.map_or(0.0, |(_, painted_scale)| painted_scale),
-        ) {
+        if !region::worth_painting(&needed, self.crop.as_ref().map(|crop| &crop.patch)) {
             return;
         }
         let Some(source) = self.source.clone() else {
@@ -702,8 +700,8 @@ impl ViewState {
         };
         // Paint a margin around what the window shows, so a small pan between
         // two paints stays covered, and a filter keeps its outer context.
-        let paint = region::crop(img, win, self.pan, scale, self.angle, region::MARGIN);
-        if paint.is_empty() {
+        let paint = region::Patch::new(frame.crop(region::MARGIN), scale);
+        if paint.rect.is_empty() {
             return;
         }
         self.crop_pending = true;
@@ -713,12 +711,11 @@ impl ViewState {
         let (generation, tx) = (self.crop_gen, self.crop_tx.clone());
         let plane = self.source_plane;
         rayon::spawn(
-            move || match source.render(View::region(plane, paint, scale)) {
+            move || match source.render(View::region(plane, paint.rect, scale)) {
                 Ok(image) => {
                     let _ = tx.send(CropMsg::Crop {
                         generation,
-                        rect: paint,
-                        scale,
+                        patch: paint,
                         image,
                     });
                 }
@@ -748,8 +745,7 @@ impl ViewState {
                 }
                 CropMsg::Crop {
                     generation,
-                    rect,
-                    scale,
+                    patch,
                     image,
                 } => {
                     if generation != self.crop_gen {
@@ -759,11 +755,7 @@ impl ViewState {
                     let texture = upload_rgba(rl, thread, &image.data, image.width, image.height)?;
                     apply_view_filter(thread, &texture, self.pixelated);
                     // The old patch drops here, so one patch lives at a time.
-                    self.crop = Some(CropState {
-                        texture,
-                        rect,
-                        scale,
-                    });
+                    self.crop = Some(CropState { texture, patch });
                 }
                 CropMsg::Failed { generation } => {
                     if generation == self.crop_gen {
@@ -776,8 +768,7 @@ impl ViewState {
                 CropMsg::Prefetch {
                     generation,
                     id,
-                    rect,
-                    scale,
+                    patch,
                     image,
                 } => {
                     // A result of an earlier image or of an aim the view left
@@ -788,11 +779,7 @@ impl ViewState {
                     self.prefetch_want = None;
                     let texture = upload_rgba(rl, thread, &image.data, image.width, image.height)?;
                     apply_view_filter(thread, &texture, self.pixelated);
-                    self.prefetch = Some(CropState {
-                        texture,
-                        rect,
-                        scale,
-                    });
+                    self.prefetch = Some(CropState { texture, patch });
                 }
                 CropMsg::PrefetchFailed { generation, id } => {
                     if generation == self.crop_gen && id == self.prefetch_id {
@@ -1090,18 +1077,11 @@ fn patch_dest(center: Vector2, dw: f32, dh: f32, tw: f32, th: f32, angle: f32) -
 /// the paint (see [`patch_dest`]).
 /// A turned patch keeps the free draw of [`draw_turned`], so it holds the
 /// transform of the whole image.
-fn draw_patch(
-    d: &mut impl RaylibDraw,
-    patch: &CropState,
-    img: Vector2,
-    win: Vector2,
-    pan: Vector2,
-    scale: f32,
-    angle: f32,
-) {
-    let rect = patch.rect;
+fn draw_patch(d: &mut impl RaylibDraw, patch: &CropState, frame: &region::Frame) {
+    let rect = patch.patch.rect;
+    let (scale, angle) = (frame.scale, frame.angle);
     let middle = Vector2::new(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
-    let center = region::to_screen(middle, img, win, pan, scale, angle);
+    let center = frame.to_screen(middle);
     let tw = patch.texture.width() as f32;
     let th = patch.texture.height() as f32;
     match patch_dest(center, rect.w * scale, rect.h * scale, tw, th, angle) {
@@ -1181,6 +1161,19 @@ fn draw_selection(d: &mut impl RaylibDraw, frame: region::Frame, selection: regi
     }
 }
 
+/// Whether two patches name the same rect, to within half a pixel, and the
+/// same scale, to within a fifth of a percent.
+///
+/// The debounce reads this, so a pan, an ease or a zoom step that stays below
+/// those bounds never restarts the quiet timer.
+fn same_patch(a: &region::Patch, b: &region::Patch) -> bool {
+    (a.rect.x - b.rect.x).abs() <= 0.5
+        && (a.rect.y - b.rect.y).abs() <= 0.5
+        && (a.rect.w - b.rect.w).abs() <= 0.5
+        && (a.rect.h - b.rect.h).abs() <= 0.5
+        && (a.scale - b.scale).abs() <= b.scale * 0.002
+}
+
 /// Whether the region patch covers the whole window at the current transform.
 ///
 /// The draw skips the whole-image texture then, because the patch already
@@ -1197,10 +1190,10 @@ fn patch_covers(st: &ViewState, win_w: f32, win_h: f32) -> bool {
     if st.img_w <= 0.0 || !(scale.is_finite() && scale > 0.0) {
         return false;
     }
-    let img = Vector2::new(st.img_w, st.img_h);
-    let win = Vector2::new(win_w, win_h);
-    let needed = region::crop(img, win, st.pan, scale, st.angle, 0.0);
-    crop.rect.contains(&needed)
+    let Some(frame) = st.frame(Vector2::new(win_w, win_h)) else {
+        return false;
+    };
+    frame.crop(0.0).contains(&crop.patch.rect)
 }
 
 /// Keep the pivot of a turned image on its window spot.
@@ -1622,7 +1615,7 @@ fn main() -> Result<()> {
         crop_pending: false,
         crop_gen: 0,
         crop_seen: None,
-        crop_seen_scale: 0.0,
+
         crop_quiet_at: Instant::now(),
         crop_tx,
         crop_rx,
@@ -3090,13 +3083,9 @@ fn main() -> Result<()> {
             // image loses its blur where the patch already reached.
             // A patch that still matches the view scale lands on whole
             // window pixels (see `draw_patch`), so its text stays sharp.
-            if st.img_w > 0.0
-                && let Some(scale) = st.view_scale
-            {
-                let img = Vector2::new(st.img_w, st.img_h);
-                let win = Vector2::new(win_w, win_h);
+            if let Some(frame) = st.frame(Vector2::new(win_w, win_h)) {
                 for patch in st.crop.iter().chain(st.prefetch.iter()) {
-                    draw_patch(&mut d, patch, img, win, st.pan, scale, st.angle);
+                    draw_patch(&mut d, patch, &frame);
                 }
             }
             // A region selection dims the picture outside it and marks the
