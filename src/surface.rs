@@ -361,12 +361,19 @@ pub fn open_surface(path: &Path) -> Result<Box<dyn Surface>, SurfaceError> {
     }
     // The sniff doubles as a validity check; render() reports the decode
     // error otherwise.
-    sign::format(path)?;
+    // It answers the decoder as well, so the raster backend never sniffs the
+    // same file a second time.
+    let kind = sign::detect(path)?;
     #[cfg(feature = "svg")]
-    if crate::svg::sniff(path) {
+    if kind == sign::Kind::Vector {
         return Ok(Box::new(VectorSurface::open(path)?));
     }
-    Ok(Box::new(ImageSurface::new(path)))
+    let Some(format) = kind.raster() else {
+        // A build without the `svg` feature cannot parse a vector document,
+        // and its sniff never claims one.
+        return Err(SurfaceError::Sign(SignError::Unknown));
+    };
+    Ok(Box::new(ImageSurface::new(path, format)))
 }
 
 /// Open a file and, when its source holds more than one plane, show it as a
@@ -395,21 +402,23 @@ pub fn open_book_surface(path: &Path) -> Result<Box<dyn Surface>, SurfaceError> 
 #[derive(Debug)]
 pub struct ImageSurface {
     path: PathBuf,
-    jxl: bool,
+    /// The decoder that [`open_surface`] sniffed for this file, so a header
+    /// read or a progressive open never sniffs the bytes again.
+    format: sign::Format,
 }
 
 impl ImageSurface {
-    fn new(path: &Path) -> Self {
+    fn new(path: &Path, format: sign::Format) -> Self {
         ImageSurface {
             path: path.to_path_buf(),
-            jxl: sign::is_jxl(path),
+            format,
         }
     }
 
     /// The decoded raster, capped to the uploadable
     /// [`crate::MAX_TEXTURE_SIDE`].
     fn decode(&self) -> Result<DecodedImage, SurfaceError> {
-        Ok(crate::decode_raster(&self.path)?)
+        Ok(crate::decode_raster(&self.path, self.format)?)
     }
 }
 
@@ -422,7 +431,7 @@ impl Surface for ImageSurface {
         if plane != 0 {
             return Err(SurfaceError::Plane(plane));
         }
-        let (width, height) = sign::dimensions(&self.path, self.jxl)?;
+        let (width, height) = sign::dimensions(&self.path, self.format)?;
         // A raster that no GPU upload takes decodes capped, so the plane it
         // renders is the capped one.
         let (w, h) = capped(width, height);
@@ -480,7 +489,7 @@ impl Surface for ImageSurface {
 
     fn progressive(&self) -> Result<Option<Box<dyn ChunkSource>>, SurfaceError> {
         // Only a JPEG XL source decodes progressively.
-        if !self.jxl {
+        if self.format != sign::Format::Jxl {
             return Ok(None);
         }
         let file = std::fs::File::open(&self.path)?;
@@ -862,11 +871,11 @@ mod tests {
         let dir = temp_dir();
         let container = dir.path().join("container.jxl");
         std::fs::write(&container, [0x00, 0x00, 0x00, 0x0c, b'J', b'X', b'L', b' ']).unwrap();
-        let surface = ImageSurface::new(&container);
+        let surface = ImageSurface::new(&container, sign::Format::Jxl);
         assert!(surface.progressive().unwrap().is_some());
 
         let png = write_png(dir.path(), "img.png", 1, 1);
-        let surface = ImageSurface::new(&png);
+        let surface = ImageSurface::new(&png, sign::Format::Common);
         assert!(surface.progressive().unwrap().is_none());
     }
 
@@ -877,7 +886,7 @@ mod tests {
         let dir = temp_dir();
         let container = dir.path().join("bytes.jxl");
         std::fs::write(&container, [0xffu8, 0x0a, 1, 2, 3, 4, 5]).unwrap();
-        let mut source = ImageSurface::new(&container)
+        let mut source = ImageSurface::new(&container, sign::Format::Jxl)
             .progressive()
             .unwrap()
             .expect("a JXL source streams");

@@ -220,16 +220,18 @@ pub(crate) fn decode_common(path: &Path) -> Result<DecodedImage, DecodeError> {
     }))
 }
 
-/// Decode a non-vector file with the JXL or the common-format decoder.
+/// Decode a non-vector file with the decoder that [`sign::detect`] named.
 ///
 /// The function applies [`cap_texture_side`], so the result is uploadable as
 /// is.
 /// It runs on a decode worker, never on the main thread.
-pub(crate) fn decode_raster(path: &Path) -> Result<DecodedImage, DecodeError> {
-    if sign::is_jxl(path) {
-        decode_jxl(path)
-    } else {
-        decode_common(path)
+pub(crate) fn decode_raster(
+    path: &Path,
+    format: crate::sign::Format,
+) -> Result<DecodedImage, DecodeError> {
+    match format {
+        crate::sign::Format::Jxl => decode_jxl(path),
+        crate::sign::Format::Common => decode_common(path),
     }
 }
 
@@ -617,7 +619,7 @@ mod tests {
         let dir = dir.path();
         let path = dir.join("img.png");
         image::DynamicImage::new_rgb8(3, 2).save(&path).unwrap();
-        let decoded = decode_raster(&path).unwrap();
+        let decoded = decode_raster(&path, sign::Format::Common).unwrap();
         assert_eq!(decoded.width, ImgW::new(3));
         assert_eq!(decoded.height, ImgH::new(2));
         assert_eq!(decoded.data.len(), 3 * 2 * 4);
@@ -626,14 +628,15 @@ mod tests {
     #[test]
     fn decode_raster_reads_webp() {
         // Lossless encode via image-webp, then decode back through
-        // decode_raster (format sniffed from bytes, not extension).
+        // decode_raster with the format that the sniff named.
         let dir = TempDir::new().unwrap();
         let dir = dir.path();
         let path = dir.join("img.webp");
         image::DynamicImage::new_rgb8(5, 4)
             .save_with_format(&path, image::ImageFormat::WebP)
             .unwrap();
-        let decoded = decode_raster(&path).unwrap();
+        let format = sign::detect(&path).unwrap().raster().unwrap();
+        let decoded = decode_raster(&path, format).unwrap();
         assert_eq!(decoded.width, ImgW::new(5));
         assert_eq!(decoded.height, ImgH::new(4));
         assert_eq!(decoded.data.len(), 5 * 4 * 4);
@@ -657,7 +660,8 @@ mod tests {
             image::DynamicImage::new_rgb8(4, 2)
                 .save_with_format(&path, format)
                 .unwrap_or_else(|e| panic!("encode {ext}: {e}"));
-            let decoded = decode_raster(&path).unwrap_or_else(|e| panic!("decode {ext}: {e}"));
+            let decoded = decode_raster(&path, sign::Format::Common)
+                .unwrap_or_else(|e| panic!("decode {ext}: {e}"));
             assert_eq!(
                 (decoded.width, decoded.height),
                 (ImgW::new(4), ImgH::new(2)),
@@ -673,7 +677,7 @@ mod tests {
         let dir = dir.path();
         let path = dir.join("x.png");
         std::fs::write(&path, b"garbage").unwrap();
-        assert!(decode_raster(&path).is_err());
+        assert!(decode_raster(&path, sign::Format::Common).is_err());
     }
 
     proptest::proptest! {

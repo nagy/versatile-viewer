@@ -1,9 +1,11 @@
 //! Content sniffing: decide the decoder by the bytes, not the file name.
 //!
-//! [`is_jxl`] steers JPEG XL codestreams (and the `.jxl` extension) away from
-//! the `image` crate.
-//! [`format`] validates that the content is a decodable image.
-//! [`dimensions`] reads the natural size without decoding the pixels.
+//! [`detect`] reads the magic once and answers a [`Kind`]: a raster file with
+//! its [`Format`], or an SVG document.
+//! The caller therefore routes on one decision and never re-sniffs the same
+//! file.
+//! [`dimensions`] reads the natural size of a raster file without decoding the
+//! pixels.
 
 use std::path::Path;
 
@@ -32,20 +34,88 @@ pub enum SignError {
     ),
 }
 
-/// Decide the decoder by file content, not by the file name.
-///
-/// The code sniffs the 2-byte magic first (JXL codestream against the
-/// common formats).
-/// The .jxl extension only acts as a tiebreaker for unknown magic.
-/// JXL container files start with a box header, not the codestream magic.
-pub(crate) fn is_jxl(path: &Path) -> bool {
-    match file_magic(path) {
-        Some([0xff, 0x0a]) => true, // raw JXL codestream
-        Some(m) if is_common_magic(m) => false,
-        _ => path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("jxl")),
+/// What the content of a file calls for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// A raster file, which the named [`Format`] decodes.
+    Raster(Format),
+    /// An SVG or SVGZ document, which the vector backend parses and paints.
+    Vector,
+}
+
+impl Kind {
+    /// The raster decoder, or `None` for a vector document.
+    #[must_use]
+    pub const fn raster(self) -> Option<Format> {
+        match self {
+            Self::Raster(format) => Some(format),
+            Self::Vector => None,
+        }
     }
+}
+
+/// The decoder that reads a raster file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    /// A JPEG XL codestream, which jxl-oxide decodes.
+    Jxl,
+    /// A format of the `image` crate (PNG, JPEG, WebP, ...).
+    Common,
+}
+
+/// The two-byte magic of a raw JPEG XL codestream.
+const JXL_MAGIC: [u8; 2] = [0xff, 0x0a];
+
+/// The two-byte magic of `path`.
+///
+/// A file shorter than two bytes matches no format, so it answers
+/// [`SignError::Unknown`] instead of a read error.
+fn head_magic(path: &Path) -> Result<[u8; 2], SignError> {
+    use std::io::Read;
+    let mut magic = [0u8; 2];
+    match std::fs::File::open(path)?.read_exact(&mut magic) {
+        Ok(()) => Ok(magic),
+        Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => Err(SignError::Unknown),
+        Err(err) => Err(SignError::Open(err)),
+    }
+}
+
+/// Sniff `path` once and name what its content calls for.
+///
+/// The function reads the 2-byte magic first and keeps it for both raster
+/// rules, so no caller re-sniffs the same file to answer a second question.
+/// A vector document goes to the SVG sniff before any raster rule, because it
+/// paints from its own tree.
+/// A JPEG XL codestream passes on its magic, and the `.jxl` extension acts as
+/// the tiebreaker for an unknown magic (a container starts with a box header,
+/// not the codestream magic).
+/// Every other file passes only when the `image` crate parses its header, so
+/// the conclusion comes from the bytes and the extension only picked the
+/// decoder to try.
+///
+/// # Errors
+///
+/// The function errors when the file cannot be read, or when the content
+/// matches no decoder.
+pub fn detect(path: &Path) -> Result<Kind, SignError> {
+    let magic = head_magic(path)?;
+    if crate::svg::sniff(path) {
+        return Ok(Kind::Vector);
+    }
+    if magic == JXL_MAGIC || (!is_common_magic(magic) && has_jxl_extension(path)) {
+        return Ok(Kind::Raster(Format::Jxl));
+    }
+    image::ImageReader::open(path)?
+        .with_guessed_format()?
+        .into_dimensions()
+        .map_err(|_| SignError::Unknown)?;
+    Ok(Kind::Raster(Format::Common))
+}
+
+/// Whether the name of `path` ends in `.jxl`, in any letter case.
+fn has_jxl_extension(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("jxl"))
 }
 
 /// The first two bytes of the file.
@@ -81,50 +151,27 @@ pub(crate) const fn is_common_magic(m: [u8; 2]) -> bool {
     )
 }
 
-/// Sniff `path` and confirm a decoder can read its content.
-///
-/// A vector file passes on its head bytes, because the SVG parser reads the
-/// content and not the `image` crate.
-/// The function parses the raster header, so the conclusion comes from the
-/// bytes.
-/// `with_guessed_format` alone also honors the file extension, which would
-/// accept a `.png` name over garbage content.
-/// JPEG XL codestreams pass without an `image` crate check.
-///
-/// # Errors
-///
-/// The function errors when the file cannot be read, the JPEG XL header is
-/// invalid, or the content matches no `image` crate format.
-pub(crate) fn format(path: &Path) -> Result<(), SignError> {
-    if crate::svg::sniff(path) {
-        return Ok(());
-    }
-    if is_jxl(path) {
-        return Ok(());
-    }
-    let reader = image::ImageReader::open(path)?.with_guessed_format()?;
-    // `into_dimensions` parses the header, so the conclusion comes from the
-    // bytes (the extension only picked the decoder to try).
-    reader.into_dimensions().map_err(|_| SignError::Unknown)?;
-    Ok(())
-}
-
 /// The natural dimensions of `path`, without decoding the pixels.
-/// `jxl` selects the JPEG XL header reader.
+///
+/// `format` selects the header reader, so the caller passes the decoder that
+/// [`detect`] named for the same file.
 ///
 /// # Errors
 ///
 /// The function errors when the file cannot be read or the header is
 /// invalid.
-pub(crate) fn dimensions(path: &Path, jxl: bool) -> Result<(ImgW, ImgH), SignError> {
-    if jxl {
-        let image = jxl_oxide::JxlImage::builder().open(path)?;
-        Ok((ImgW::new(image.width()), ImgH::new(image.height())))
-    } else {
-        let (width, height) = image::ImageReader::open(path)?
-            .with_guessed_format()?
-            .into_dimensions()?;
-        Ok((ImgW::new(width), ImgH::new(height)))
+pub fn dimensions(path: &Path, format: Format) -> Result<(ImgW, ImgH), SignError> {
+    match format {
+        Format::Jxl => {
+            let image = jxl_oxide::JxlImage::builder().open(path)?;
+            Ok((ImgW::new(image.width()), ImgH::new(image.height())))
+        }
+        Format::Common => {
+            let (width, height) = image::ImageReader::open(path)?
+                .with_guessed_format()?
+                .into_dimensions()?;
+            Ok((ImgW::new(width), ImgH::new(height)))
+        }
     }
 }
 
@@ -133,16 +180,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn is_jxl_detects_codestream_magic() {
+    fn detect_names_the_jxl_codestream() {
         let tmp = tempfile::TempDir::new().unwrap();
         let bare = tmp.path().join("bare");
         // A raw codestream starts with 0xFF 0x0A, so it is JXL even without
         // an extension.
         std::fs::write(&bare, [0xffu8, 0x0a, 0x01, 0x02]).unwrap();
-        assert!(is_jxl(&bare));
-        // PNG magic is not a codestream, even without an extension.
-        std::fs::write(&bare, [0x89u8, b'P', 0x4e, 0x47]).unwrap();
-        assert!(!is_jxl(&bare));
+        assert_eq!(detect(&bare).unwrap(), Kind::Raster(Format::Jxl));
+        // PNG magic reads as the `image` crate format, not a codestream.
+        let png = tmp.path().join("bare-png");
+        image::DynamicImage::new_rgb8(2, 2)
+            .save_with_format(&png, image::ImageFormat::Png)
+            .unwrap();
+        assert!(png.extension().is_none());
+        assert_eq!(detect(&png).unwrap(), Kind::Raster(Format::Common));
     }
 
     #[test]
@@ -152,7 +203,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("container.jxl");
         std::fs::write(&path, [0x00u8, 0x00, 0x00, 0x0c, b'J', b'X', b'L', b' ']).unwrap();
-        assert!(is_jxl(&path));
+        assert_eq!(detect(&path).unwrap(), Kind::Raster(Format::Jxl));
     }
 
     #[test]
@@ -161,16 +212,24 @@ mod tests {
         let path = tmp.path().join("img.png");
         image::DynamicImage::new_rgb8(7, 5).save(&path).unwrap();
         assert_eq!(
-            dimensions(&path, false).unwrap(),
+            dimensions(&path, Format::Common).unwrap(),
             (ImgW::new(7), ImgH::new(5))
         );
     }
 
     #[test]
-    fn format_rejects_garbage() {
+    fn detect_rejects_garbage() {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("x.png");
         std::fs::write(&path, b"garbage").unwrap();
-        assert!(format(&path).is_err());
+        assert!(detect(&path).is_err());
+    }
+
+    #[test]
+    fn detect_rejects_a_file_shorter_than_the_magic() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("empty.png");
+        std::fs::write(&path, []).unwrap();
+        assert!(matches!(detect(&path), Err(SignError::Unknown)));
     }
 }

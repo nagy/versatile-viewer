@@ -80,7 +80,10 @@ The binary name is `vv`.
   A backend writes `render_whole`; `render` is a provided method that renders the whole plane and crops the region out of it.
   A backend with a region anchor (the vector tree, the PDF rasterizer) overrides `render` to pay only for the pixels the caller asked for, and returns `SurfaceError::Unsupported` rather than the whole plane for a region it cannot serve.
   A `View` names a plane, an optional `Region` and a scale (output pixels per surface unit), so the grid asks for a thumbnail, the loader for the whole plane and the image view for the patch it shows.
-  `src/sign.rs` owns the content sniffing (`is_jxl`, `file_magic`, `is_common_magic`, `format`, `dimensions`), and both the surface layer and `svg.rs` use it.
+  `src/sign.rs` owns the content sniffing (`detect`, `Kind`, `Format`, `file_magic`, `is_common_magic`, `dimensions`), and both the surface layer and `svg.rs` use it.
+  `detect` reads the magic once and answers a `Kind`: `Kind::Vector` for an SVG document, or `Kind::Raster(Format)` with the decoder that reads the file.
+  The raster backend keeps that `Format`, so its header read and its progressive open never sniff the same bytes again.
+  A `bool` never selects a decoder.
   `Surface::progressive` returns a `Box<dyn ChunkSource>` and not a path, so an in-memory or network source can stream, and the default `Ok(None)` means one step.
   `Surface::can_refine` says whether a settled zoom can yield a sharper picture of the same plane: a vector tree or a document page answers true, a raster image false.
   `Surface::spread_count` and `Surface::spread_box` name the spread column of a book (0 and `None` for every other source), so the image view steps a spread with the book's own geometry.
