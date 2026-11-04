@@ -854,13 +854,14 @@ impl Ramps {
         // The zoom rate is an e-fold rate, so the scale factor is the
         // exponential of the ramped rate over this frame.
         // That keeps the zoom speed even in perceived terms at any scale.
+        // A frame with no zoom key held answers `None`, so no caller reads a
+        // sentinel factor of 1.0 and has to ask a second flag what it means.
         Motion {
             pan: Vector2 {
                 x: pan_speed * (l - r),
                 y: pan_speed * (u - d),
             },
-            zoom_factor: (ZOOM_RATE * speed * dt * (zi - zo)).exp(),
-            zoom_moving: zi > 0.0 || zo > 0.0,
+            zoom: (zi > 0.0 || zo > 0.0).then(|| (ZOOM_RATE * speed * dt * (zi - zo)).exp()),
         }
     }
 }
@@ -870,11 +871,8 @@ impl Ramps {
 struct Motion {
     /// The pan delta for this frame, in window pixels.
     pan: Vector2,
-    /// The free-zoom factor for this frame.
-    /// 1.0 when no zoom key moves.
-    zoom_factor: f32,
-    /// True while a +/- ramp gives speed.
-    zoom_moving: bool,
+    /// The free-zoom factor for this frame, or `None` when no zoom key ramps.
+    zoom: Option<f32>,
 }
 
 /// The held keys that drive the continuous image-view motions.
@@ -2662,10 +2660,10 @@ fn main() -> Result<()> {
                 // The on-screen scale takes the ramped factor directly: an
                 // exponential ease on top would lag a target that moves every
                 // frame, and that lag reads as stepping.
-                let held_zoom = motion.zoom_moving;
-                if held_zoom {
+                let zoom_step = motion.zoom;
+                if let Some(factor) = zoom_step {
                     let base = st.zoom.free_or(fit_scale);
-                    st.zoom = ZoomMode::Free((base * motion.zoom_factor).clamp(0.01, 100.0));
+                    st.zoom = ZoomMode::Free((base * factor).clamp(0.01, 100.0));
                     // Keyboard zoom centers on the picture, not the cursor.
                     // None falls back to the window center anchor.
                     st.zoom_anchor = None;
@@ -2684,7 +2682,7 @@ fn main() -> Result<()> {
                 st.view_scale = Some(match st.view_scale {
                     None => target_scale,
                     Some(_) if resized => target_scale,
-                    Some(_) if held_zoom => target_scale,
+                    Some(_) if zoom_step.is_some() => target_scale,
                     Some(s) => {
                         let s = s + (target_scale - s) * alpha;
                         if (target_scale - s).abs() < target_scale * 0.001 {
@@ -2814,7 +2812,7 @@ fn main() -> Result<()> {
                     // So does an anchor that already sits at the window
                     // center: the drift can only move it away from there.
                     let centered = a == center;
-                    let d = if held_zoom || centered {
+                    let d = if zoom_step.is_some() || centered {
                         Vector2::ZERO
                     } else {
                         // The drift shares the exponential time constant of
