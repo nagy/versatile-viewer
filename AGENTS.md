@@ -403,6 +403,8 @@ A source that paints no paper carries it in its pixels, so no clear color ever h
   A lost focus already drops every held key, the pointer grab and every drag latch.
 - vv claims no XEmbed support: winit sets an atom it names `_XEMBED` to `[0, 1]`, not the spec's `_XEMBED_INFO`, and it speaks no XEMBED message.
   A host that expects the protocol focuses the pane itself.
+- `examples/embed_host.rs` is the demo host: a frame window, a container child inset under a bar, `vv --wid <container> <path>`, a frame resize that the container follows, a click on the bar that toggles focus onto the pane's own window, and a reap of the child on exit.
+  It shows the two duties a host owes, and it uses only `x11rb`.
 
 ## MCP
 
