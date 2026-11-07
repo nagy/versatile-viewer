@@ -190,7 +190,17 @@ impl Gpu {
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
             .ok_or(GpuError::Swapchain)?;
         config.format = format;
-        config.present_mode = settings.present.mode();
+        // A mode the surface does not list cannot be configured, so an
+        // unsupported `VV_PRESENT` falls back to the one every surface has.
+        let wanted = settings.present.mode();
+        config.present_mode = if caps.present_modes.contains(&wanted) {
+            wanted
+        } else {
+            if settings.trace {
+                eprintln!("vv: present {wanted:?} unsupported, using Fifo");
+            }
+            wgpu::PresentMode::Fifo
+        };
         config.desired_maximum_frame_latency = settings.latency.max(1);
         surface.configure(&device, &config);
         let present = config.present_mode;
