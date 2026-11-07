@@ -170,12 +170,6 @@ impl Input {
         self.captured = held;
     }
 
-    /// Does a drag hold the pointer now?
-    #[must_use]
-    pub fn is_captured(&self) -> bool {
-        self.captured
-    }
-
     /// Take one wheel report.
     pub fn wheel(&mut self, delta: MouseScrollDelta) {
         match delta {
