@@ -103,6 +103,7 @@ pages, so it opens as the same book. See `docs/adr/0001-*.md` and
 ```sh
 nix run . -- <image-path-or-directory>   # single image or directory grid
 nix run . -- --mcp <image-path-or-directory>   # the same, plus MCP on stdio
+nix run . -- --wid 0x3a00007 <image-path-or-directory>   # inside a host window
 ```
 
 Requires the X11 libraries and a Vulkan driver; the Nix build bakes the
@@ -130,6 +131,47 @@ fields, and `server/discover` replaces the handshake.
 At present the server is a husk. It advertises the tools capability with an
 empty tool list, and no resources or prompts. Every diagnostic goes to stderr,
 because stdout carries protocol frames only.
+
+## Embedding
+
+`vv --wid <id> <path>` shows the picture inside a window of a host
+application, the way `mpv --wid=<XID>` shows a video. The id reads as decimal
+or as `0x` hexadecimal, and it may come before or after the path. It composes
+with `--mcp`.
+
+```sh
+vv --wid 0x3a00007 ~/pictures          # a directory: opens its first entry
+vv --wid 0x3a00007 --mcp ~/pictures    # and serves MCP at the same time
+```
+
+The viewer creates its child window with the id as the parent, so it never
+becomes a top-level window: no window manager frames it and the host decides
+where it sits. An embedded pane shows the image view only. There is no grid, no
+window title and no `ESC` or `Enter` to another view, a directory launch opens
+its first entry, `n`/`p` still step through it, and `q` exits. A failed open
+exits with the decode error, because there is no grid to fall back to.
+
+The host owes the pane two things.
+
+- **Size.** Create a container window as a child of your own window, size the
+  container, and hand its id over. The pane reads the container geometry about
+  twenty times a second and resizes itself, so never resize the child window
+  yourself.
+- **Focus.** Call `XSetInputFocus` on the child of the container (the pane's own
+  window) when the user clicks the pane or selects the buffer that holds it.
+  Keys follow focus, and the pane never focuses itself, so without this it shows
+  a picture and ignores every key. A lost focus already drops every held key,
+  the pointer grab and every drag.
+
+The pane claims no XEmbed support: it sets no `_XEMBED_INFO` and sends no XEMBED
+message, so a host that speaks the protocol must focus the pane itself.
+
+`cargo run --example embed_host -- <path>` is a working host to try this
+against. It creates a frame and a container under a bar, prints both window
+ids, resizes the container with the frame, and takes or gives the keyboard on a
+click on the bar. `cargo run --example embed_host -- --child-size 640x480 <path>`
+scripts a resize. `xwininfo -tree -name "vv embed host"` shows the three levels
+(frame, container, pane).
 
 ## Keys
 

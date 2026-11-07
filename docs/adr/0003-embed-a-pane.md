@@ -76,7 +76,7 @@ creates its own wgpu surface on that child, and `Gpu` needs no change: its
 window carries the X11 handle.
 
 The pane follows the parent size itself, like `mpv`: `src/pane.rs` opens one
-`x11rb` connection, reads the parent geometry about ten times a second, and
+`x11rb` connection, reads the parent geometry about twenty times a second, and
 resizes the child through `Window::request_inner_size`. The host therefore sizes
 the container only, which is what the Emacs presenter does. `x11rb` is pure
 Rust (MIT OR Apache-2.0) and already in `Cargo.lock` through winit, so the
@@ -88,10 +88,11 @@ it or selects its buffer, and the X server then delivers keys to vv. A lost
 focus already drops every held key, the pointer grab and every drag latch, so a
 host that moves focus mid-drag cannot strand a capture.
 
-`examples/embed_host.rs` is a minimal host: it creates a parent window, spawns
-`vv --wid <parent> <path>`, resizes the parent, focuses the child on a click and
-reaps the child on exit. It shows the two duties a host owes and gives the path
-a demo that needs no Emacs.
+`examples/embed_host.rs` is a minimal host: it creates a frame window and a
+container child under a bar, spawns `vv --wid <container> <path>`, resizes the
+container with the frame, focuses the pane on a click on the bar and reaps the
+child on exit. It shows the two duties a host owes and gives the path a demo
+that needs no Emacs.
 
 ### Stage 2: one `Viewer` value
 

@@ -410,7 +410,7 @@ A source that paints no paper carries it in its pixels, so no clear color ever h
 
 - `vv --mcp <path>` also serves the Model Context Protocol on stdio, from `src/mcp.rs`.
   The `--mcp` flag accepts either argument order.
-  The viewer window stays interactive.
+  The viewer window stays interactive, and an embedded pane stays interactive the same way, so `--wid` and `--mcp` compose.
 - The server pins revision `2026-07-28` and serves that revision only.
   The revision is stateless: no `initialize` handshake, no session, and the client context rides in the per-request `io.modelcontextprotocol/*` `_meta` fields.
   An older client fails fast on `UnsupportedProtocolVersion`.

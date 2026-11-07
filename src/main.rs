@@ -33,6 +33,9 @@
 //!
 //! `vv --mcp <path>` also serves the Model Context Protocol on stdio.
 //! The viewer window stays interactive; the server owns stdin and stdout.
+//!
+//! `vv --wid <id> <path>` draws the image view inside a host window instead of
+//! a top-level window of its own (see `Pane`).
 
 use std::{
     borrow::Cow,
