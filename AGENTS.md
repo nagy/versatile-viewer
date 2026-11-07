@@ -9,7 +9,8 @@ The binary name is `vv`.
 ## Constraints
 
 - License: AGPL-3.0-or-later.
-- Use raylib as the renderer.
+- Render with `wgpu` through a `winit` window (see "Render" below).
+  Every decoder stays pure Rust, so nothing compiles C any more: the flake carries no CMake, no clang and no bindgen.
 - Decode JPEG XL with `jxl-oxide` (pure Rust, no libjxl).
 - Decode JPEG XL with `jxl-oxide` (pure Rust, no libjxl).
 - Decode common formats with the `image` crate.
@@ -140,7 +141,7 @@ The binary name is `vv`.
   All pixel resize goes through `resample_rgba` (`src/lib.rs`), the `fast_image_resize` SIMD path with Lanczos3.
   Do not call `image::imageops::resize` for a downscale: it is several times slower.
   Keep the `rayon` feature of `fast_image_resize` off, so a resize never spawns nested workers inside a decode job.
-  `VV_TIMING=1` prints upload cost and slow frames.
+  `VV_TIMING=1` prints the adapter and the swapchain of the start, the upload cost and the slow frames.
 - The streaming JXL loader reads fixed-size chunks from the surface's `ChunkSource` (`src/surface.rs`) and feeds them to jxl-oxide.
   The file-backed stream memory-maps the file (`memmap2`), so a chunk copy costs no read syscall.
   A file rewritten under the map faults with SIGBUS instead of reading short data.
@@ -244,6 +245,49 @@ The binary name is `vv`.
   `Drag` holds the press anchor for the length of the hold.
   A hold that releases on its anchor cell stays a plain click.
 
+## Render
+
+- The renderer is `wgpu`, the window is `winit`, and one instanced-quad pipeline draws everything.
+  `src/gpu.rs` owns the instance, adapter, device, queue and swapchain.
+  `src/render.rs` owns the pipeline, the batch and the draw calls.
+  `src/texture.rs` owns one uploaded picture and its two filter groups.
+  `src/draw.rs` owns `Vec2`, `Color` and `Quad`, the CPU-side geometry.
+  `src/input.rs` owns the held keys, the frame edges and the pointer.
+  The decisions behind one pipeline are `docs/adr/0002-wgpu-renders-the-view.md`.
+- The backend is Vulkan only (`Backends::VULKAN`, features `vulkan` and `wgsl`), and the instance flags stay empty, so no DX12, Metal or GL instance exists and no library opens for one.
+  Issue 94691ce measured the Vulkan loader alone at 28.9 ms of a 59.1 ms first frame, so the backend set is the one startup knob that matters.
+- The swapchain takes a non-sRGB format (`Bgra8Unorm` when the adapter offers it) and every texture is `Rgba8Unorm`, so the decoder's bytes reach the screen unchanged: the pixel math the raylib path had.
+  Alpha stays straight (`SRC_ALPHA` over `ONE_MINUS_SRC_ALPHA`), so the decoders write what they decode and `svg.rs` keeps its un-premultiply pass.
+  Do not mix: one color space, one alpha convention, from the decoder to the swapchain.
+- The present mode defaults to `Fifo`, which never tears and paces the loop to the refresh rate; `VV_PRESENT=fifo|relaxed|mailbox|immediate` picks another one.
+  `desired_maximum_frame_latency` stays 1 (`gpu::DEFAULT_LATENCY`), the classic double buffer.
+- An instance is four window-space corners, a source rect and a tint (`render::Inst`).
+  The corners arrive already turned, so the shader carries no trigonometry and a turned quad costs one `sin_cos` on the CPU.
+  A triangle is a quad whose last corner repeats the first, so the second triangle has no area and the call needs no second primitive.
+  A solid fill samples the one-by-one white texture, so a rectangle, a veil band, a border and a picture are the same draw.
+  `cull_mode: None` retires the veil-triangle reversal.
+- The batch merges consecutive instances that share a bind group, so a frame costs one draw call per texture run and one buffer upload.
+  The instance buffer starts at `START_INSTANCES` (1024) and grows by a power of two.
+- A texture carries one bind group per filter, and the two samplers are shared.
+  The filter is a draw-time choice (`Renderer::texture_pro` draws linear, `Renderer::texture` takes one), so `a` flips one flag instead of walking every texture.
+- Every decode worker uploads its own texture through `texture::Uploader`, because `wgpu::Queue` is `Send + Sync`.
+  The grid, the streaming loader and the region painter upload on their worker and send a handle.
+  `texture::Ready` is the one frame type: `Texture` in production, `Pixels` for a caller with no device, which is what a test builds.
+  Never move a pixel copy back to the main thread: that is the funnel this port deleted.
+- `MAX_TEXTURE_SIDE` (8192) stays the decode policy, and `Uploader` clamps every upload to `Gpu::max_texture_side()`, so a smaller adapter takes a smaller texture and the decoded size never depends on the host.
+- A captured drag grabs the pointer (`CursorGrabMode::Locked`, falling back to `Confined`, which is all X11 allows) and reads the raw device deltas of `DeviceEvent::MouseMotion`.
+  The pan multiplies them by its own factor, so the drag speed is a host property and not a constant.
+  `WindowEvent::CursorMoved` keeps the pointer position for every free-cursor action, and it is ignored while a drag holds the grab.
+  The release warps the pointer back to the grab point.
+- A lost focus forgets every held key and button and drops the grab, because the releases never arrive.
+- A frame is one method (`App::body` in `main.rs`).
+  `Ui` carries the window, the input state and the clock of that frame, and `Renderer` takes the draw calls, so no wgpu type reaches the view code.
+  The launch lists the directory and decodes a single file before the event loop, because the title carries the image count and a picture sizes its own window.
+  `App::resumed` creates the window, the GPU stack and the renderer, uploads the launch frame and starts the grid passes.
+  A stale or lost swapchain reconfigures and skips the frame; it never kills the window.
+- The viewer carries no text layer.
+  The grid draws nothing for an empty directory, because the title carries the count, and a failed cell shows an exclamation of two rectangles.
+
 ## Build
 
 - `nix build .#versatile-viewer-doc` makes the rustdoc HTML.
@@ -279,7 +323,7 @@ A source that paints no paper carries it in its pixels, so no clear color ever h
   The release snaps the angle with `snap_deg` when it lands within `SNAP_DEGREES` (2) of a quarter turn, and that release is the only place that snaps.
   A drag therefore turns freely and never jumps mid-drag.
   The scale and the pan stay as they are, so a turned image shows its corners past the window edge.
-  The draw passes the image center as the `DrawTexturePro` dest position and `Rect::center_origin` as the origin, because raylib turns the quad around the dest position.
+  The draw passes the image center as the dest position and `Rect::center_origin` as the origin, because `Renderer::texture_pro` turns the quad around the dest position.
   A dest corner plus a half-size origin throws the image into the top-left corner.
   `f` hit-tests a turned image through `unrotate_point`.
   Do not rotate pixels on the main thread: the turn is a draw transform.
@@ -296,7 +340,7 @@ A source that paints no paper carries it in its pixels, so no clear color ever h
   The rect lives in source units, so `region::Frame::to_screen` maps its corners through the same transform the picture uses, and a pan, a zoom and a turn all keep it on the picture.
   The free pointer converts back through `region::Frame::to_image`, and `selection_rect` (`main.rs`) owns that conversion for the frame draw and for the release, so the border, the veil and the committed rect never read the pointer in different units.
   `region_sel::around` answers the four bands of the plane outside the rect, `draw_selection` (`main.rs`) paints them with one `DIM_VEIL` and draws the bright `SELECTION_BORDER` around the rect.
-  raylib culls a back face, so `region_sel::veil_triangles` reverses each band (`p0, p3, p2` then `p0, p2, p1`): a band in the other order draws nothing.
+  The pipeline culls nothing (`cull_mode: None`), so a band draws in either winding and `region_sel::veil_triangles` is retired: `draw_selection` fills the four quads of `region_sel::around` directly.
   `DIM_VEIL` keeps the share of brightness that the grid's `DIM_TINT` keeps, because both read `DIM_LEVEL`, so the two views dim alike.
   The bands draw after the whole-image texture and the region patches, so the dim holds over whatever the view paints below it.
 - Shift at the `r` press edge turns the image around the mouse point (`ViewState::pivot`) instead of the image center.
@@ -307,7 +351,7 @@ A source that paints no paper carries it in its pixels, so no clear color ever h
   A Shift+R hold therefore also doubles the pan and zoom speed, like every other Shift chord.
 - Mouse side buttons step next / previous in image view, like `n` / `p` (`read_nav_mouse` in `main.rs`).
   A book holds every spread in one plane, so a step always moves to another file.
-- Env vars `VV_DEBUG`, `VV_TIMING`, `VV_SLOW_STREAM`, `VV_BLUR_BG`, `VV_BG_DIM`, `VV_BLUR_PX`, `VV_CACHE`: see the README table.
+- Env vars `VV_DEBUG`, `VV_TIMING`, `VV_SLOW_STREAM`, `VV_BLUR_BG`, `VV_BG_DIM`, `VV_BLUR_PX`, `VV_CACHE`, `VV_PRESENT`: see the README table.
 - Window title uses en-dash separators: `<file> – <dir> – versatile-viewer`.
   The grid title is `(<n> image(s)) – <dir> – versatile-viewer`.
   Canonicalize the paths.
@@ -319,8 +363,8 @@ A source that paints no paper carries it in its pixels, so no clear color ever h
   A document launched directly (two planes or more) opens its whole book at once, over a one-cell grid that waits behind ESC, and its title stays the image title.
   A book keeps the default window size, because its canvas can stand wider than a screen and taller than a texture.
   ESC returns to the grid.
-- X11 WM_CLASS is `vv` (res_name + res_class) — `src/wmclass.rs`.
-  Wayland is a no-op.
+- X11 WM_CLASS is `vv` (res_name and res_class), which the window name sets (`.with_name("vv", "vv")`).
+  The build carries the `x11` feature of winit only, so one display path ships.
 
 ## MCP
 
@@ -333,7 +377,7 @@ A source that paints no paper carries it in its pixels, so no clear color ever h
 - The server is a husk: tools capability advertised, empty tool list, no resources, no prompts.
   Deprecated `logging` is not advertised.
 - stdout carries protocol frames only.
-  Every diagnostic goes to stderr, and `main.rs` redirects the raylib trace log to stderr before the server starts.
+  Every diagnostic goes to stderr, and no library writes to stdout beside the transport.
   The module never writes to stdout outside the transport.
 - The server runs a tokio current-thread runtime on a background thread.
   A start or run failure prints to stderr and never stops the viewer.

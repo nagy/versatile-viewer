@@ -105,9 +105,11 @@ nix run . -- <image-path-or-directory>   # single image or directory grid
 nix run . -- --mcp <image-path-or-directory>   # the same, plus MCP on stdio
 ```
 
-Requires the usual X11/GL runtime libraries; the Nix build bakes them in
-via rpath, so the result is self-contained. Outside Nix:
-`cargo build --release` against a system raylib works too.
+Requires the X11 libraries and a Vulkan driver; the Nix build bakes the
+loader and the X11 libraries in via rpath, and the driver comes from the
+host (`/run/opengl-driver` on NixOS). Outside Nix, `cargo build --release`
+plus a `libvulkan.so.1` and the X11 libraries is enough: every decoder and
+the renderer are pure Rust, so no C toolchain is needed.
 
 ## MCP
 
@@ -194,6 +196,7 @@ spread, and the step ends on the first and the last spread. `Page-down` and
 |`VV_BG_DIM=0..1`  |brightness of the blurred background (default 0.6)                     |
 |`VV_BLUR_PX=<n>`  |long side of the blur texture, 8..=1024 (default 128; fewer = blurrier)|
 |`VV_CACHE=0`      |do not read or write the thumbnail cache under `$XDG_CACHE_HOME`      |
+|`VV_PRESENT=`     |swapchain present mode: `fifo` (default), `relaxed`, `mailbox`, `immediate`|
 
 ## Development
 
