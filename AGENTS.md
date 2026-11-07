@@ -296,12 +296,11 @@ The binary name is `vv`.
 - winit 0.30.13 emits one `DeviceEvent::MouseMotion` per XI2 raw motion event, with the device's raw axis values as the delta (see `xinput2_raw_mouse_motion` in its X11 backend), so no per-event guard belongs here.
   A virtual X server (XTEST) reports the absolute pointer position as those raw values instead, sometimes twice, which looks like a double-speed drag; that is an injection artifact of the test harness and not a real event pair, so do not add a delta sanity clamp for it.
 - A lost focus forgets every held key and button and drops the grab, because the releases never arrive.
-- A frame is one method (`App::body` in `main.rs`).
-  `Ui` carries the window, the input state and the clock of that frame, and `Renderer` takes the draw calls, so no wgpu type reaches the view code.
-  Its accessors name what the view reads (`width`, `height`, `pointer`, `travel`, `wheel`, `key_down`, `key_pressed`, `grab_pointer`, `release_pointer`, `place_pointer`), so no raylib name survives the port.
-  The launch lists the directory and decodes a single file before the event loop, because the title carries the image count and a picture sizes its own window.
-  `App::resumed` creates the window, the GPU stack and the renderer, uploads the launch frame and starts the grid passes.
+- A frame is one method (`Viewer::frame` in `src/viewer.rs`), and the host wraps it: `App::frame` takes the swapchain image, hands the texture view to `Viewer::render` and presents.
+  The launch lists the directory and decodes a single file before a window exists, because the title carries the image count and a picture sizes its own window.
+  `App::resumed` creates the window, the GPU stack and the `Viewer`.
   A stale or lost swapchain reconfigures and skips the frame; it never kills the window.
+  A lost device stops the loop with the driver's reason, and the acquire, the present and `OCCLUDED_PAUSE` stay in `main.rs` because they belong to the surface the host owns.
   A frame whose acquire answers no image (the window is hidden or occluded) is the one frame the loop cannot pace itself with, because Fifo has nothing to present, so `main.rs` sleeps `OCCLUDED_PAUSE` (50 ms) before it asks for the next one: twenty wakeups a second, and no core burned on a picture nobody sees.
 - The viewer carries no text layer.
   The grid draws nothing for an empty directory, because the title carries the count, and a failed cell shows an exclamation of two rectangles.

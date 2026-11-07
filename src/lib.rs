@@ -61,7 +61,7 @@
 //! [`pane`] names the X11 window a host hands over with `--wid`, so the viewer
 //! draws inside a host window without becoming a top-level one.
 //! [`view`] holds the image view: what it shows, how it frames it, the patch
-//! that refines a settled zoom, and the `Ui` of one frame.
+//! that refines a settled zoom, driven by [`viewer`].
 //! [`viewer`] is the one value a host builds on its own device: it holds the
 //! pipeline, the views, the loaders and the clock, so a host owns the window
 //! and the viewer owns the picture.
