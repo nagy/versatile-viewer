@@ -1,5 +1,5 @@
-// Pixel and coordinate math lives in f32 (raylib units) and indices in
-// usize and u32.
+// Pixel and coordinate math lives in f32 (window and source units) and
+// indices in usize and u32.
 // The casts between them belong to that boundary.
 // Every value here (window pixels, texture dimensions) stays far below
 // the f32 exact-integer range.
@@ -975,10 +975,10 @@ struct NavKeys {
 }
 
 /// The mouse side-button nav state for this frame.
-/// The X11 thumb buttons arrive as raylib `MOUSE_BUTTON_SIDE` (X button 8, back)
-/// and `MOUSE_BUTTON_EXTRA` (X button 9, forward).
-/// The code accepts raylib's own BACK and FORWARD codes too, so a backend that
-/// maps them directly behaves the same.
+/// X11 reports the thumb buttons as buttons 8 (back) and 9 (forward), and winit
+/// maps them to `MouseButton::Back` and `MouseButton::Forward`.
+/// The raw numbers stay accepted too, so a backend that hands them over
+/// unmapped behaves the same.
 #[derive(Debug, Clone, Copy, Default)]
 struct NavMouse {
     /// The next-image button state.
@@ -1000,8 +1000,8 @@ struct NavButton {
 ///
 /// A held side button repeats through the auto-repeat path, exactly like `n` and
 /// `p`.
-/// X11 reports buttons 8 and 9 as `Back` and `Forward`, which is what the raylib
-/// backend mapped its side and extra codes onto.
+/// X11 reports buttons 8 and 9, and winit's `Back` and `Forward` are the same
+/// two buttons, so both spellings reach the same step.
 fn read_nav_mouse(input: &Input) -> NavMouse {
     const NEXT: [MouseButton; 2] = [MouseButton::Forward, MouseButton::Other(9)];
     const PREV: [MouseButton; 2] = [MouseButton::Back, MouseButton::Other(8)];

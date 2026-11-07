@@ -625,3 +625,57 @@ fn a_fractional_destination_blends_the_texels() {
         "a half-pixel offset blends the texels, got {blended}"
     );
 }
+
+/// A decode worker uploads its own frame, and the main thread only draws it.
+///
+/// This is the funnel the port deleted: the streaming loader holds an
+/// [`versatile_viewer::texture::Uploader`], so `DecodeMsg::Done` carries a
+/// texture and no pixel copy runs on the frame thread.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_loader_worker_uploads_its_own_frame() {
+    use versatile_viewer::{dim::PreviewPx, loader::Loader, texture::Ready};
+
+    let mut canvas = canvas!(32, 32);
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("page.pdf");
+    std::fs::write(&path, one_page_pdf([200, 200, 0])).expect("write the pdf");
+    let surface = open_surface(&path).expect("the page opens");
+    let uploader = Some(canvas.renderer.uploader());
+    let loader = Loader::start(surface, PreviewPx::new(32), &uploader);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let frame = loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the loader answers in time"
+        );
+        match loader.try_recv() {
+            Some(Ok(versatile_viewer::loader::DecodeMsg::Done { frame, .. })) => break frame,
+            Some(Ok(_)) => {}
+            Some(Err(err)) => panic!("the decode failed: {err}"),
+            None => std::thread::sleep(std::time::Duration::from_millis(10)),
+        }
+    };
+    assert!(
+        matches!(frame, Ready::Texture(_)),
+        "a worker with a device uploads its frame"
+    );
+    assert_eq!(frame.dims(), (64, 64), "the page renders at its own size");
+    // The texture the worker made draws like any other.
+    let texture = frame.into_texture().expect("an uploaded frame");
+    canvas.begin(Color::BLACK);
+    canvas.renderer.texture_pro(
+        &texture,
+        Rect::sized(64.0, 64.0),
+        Rect::new(0.0, 0.0, 32.0, 32.0),
+        Turn::NONE,
+        Color::WHITE,
+        Filter::Linear,
+    );
+    let pixels = canvas.print();
+    let [r, g, b, _] = pixels.at(16, 16);
+    assert!(
+        r > 150 && g > 150 && b < 80,
+        "the worker's pixels reach the frame"
+    );
+}

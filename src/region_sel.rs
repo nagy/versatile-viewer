@@ -150,8 +150,8 @@ pub fn corners(rect: Crop) -> [Vec2; 4] {
 /// Both rects keep the axes of the plane, so every quad is a trapezoid: the
 /// band of `outer` past one side of `inner`.
 /// Each quad comes out as `[top-left, top-right, bottom-right, bottom-left]`
-/// of the band, so the draw has to reverse it for raylib's back-face culling
-/// (see `draw_selection` in `main.rs`).
+/// of the band, which is the perimeter order `draw::Quad` takes, and the
+/// pipeline culls nothing (see `draw_selection` in `main.rs`).
 /// An empty `inner` leaves the bands with the area of the whole `outer`, and a
 /// side that `inner` touches leaves its band with no area, so one function
 /// covers every veil.

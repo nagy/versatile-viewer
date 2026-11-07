@@ -53,8 +53,6 @@
 //!
 //! Every diagnostic goes to stderr, because stdout carries only protocol
 //! frames.
-//! `main.rs` also redirects the raylib trace log to stderr for the same
-//! reason.
 //!
 //! Client configuration (stdio transport):
 //!

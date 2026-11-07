@@ -132,7 +132,7 @@ The binary name is `vv`.
 - Dispatch decode on sniffed content.
   Do not dispatch decode on the file name.
 - Decode and every pixel resize stay off the main thread.
-  The raster backend caps its buffer with `cap_texture_side` (`src/lib.rs`), and `ImageSurface::bounds` reports that capped pair, so `upload_rgba` on the main thread uploads a buffer that already fits `MAX_TEXTURE_SIDE`.
+  The raster backend caps its buffer with `cap_texture_side` (`src/lib.rs`), and `ImageSurface::bounds` reports that capped pair, so the upload on the decode worker takes a buffer that already fits `MAX_TEXTURE_SIDE`.
   Never add a main-thread resize: a large image then freezes the window for seconds.
   Downscale a borrowed buffer with `downscale_rgba_ref`, not `downscale_rgba` on a clone.
   `BlurBg::attach` and `upload` take `&DecodedImage`, so a caller never clones the blur buffer.
@@ -149,17 +149,15 @@ The binary name is `vv`.
 - Tests: `proptest` covers the pure helpers (layout, visual selection, selection step, the resize fit, the ramp).
   Property tests are dev-only and never gate a release build.
 - Public error types derive `derive_more::{Display, Error, From}` (feature `from` on).
-  Each module owns its error enum: `src/error.rs` (`DecodeError`, `UploadError`), `src/sign.rs` (`SignError`), `src/surface.rs` (`SurfaceError`), `src/pdf.rs` (`PdfError`), `src/grid.rs` (`GridError`), `src/loader.rs` (`LoadError`), `src/mcp.rs` (`SpawnError`), `src/thumbcache.rs` (`CacheError`).
+  Each module owns its error enum: `src/error.rs` (`DecodeError`), `src/sign.rs` (`SignError`), `src/surface.rs` (`SurfaceError`), `src/pdf.rs` (`PdfError`), `src/grid.rs` (`GridError`), `src/loader.rs` (`LoadError`), `src/mcp.rs` (`SpawnError`), `src/thumbcache.rs` (`CacheError`).
   `src/typst.rs` has no error enum of its own: its compile diagnostics and export failures become `SurfaceError::Render`.
   `src/mermaid.rs` follows the same rule: a rejected source, a missing diagram and a panicking renderer become `SurfaceError::Render`, and a non-UTF-8 or oversized file becomes `SurfaceError::Unsupported`.
   `main.rs` keeps `anyhow`.
 - Wrap raw pixel and window primitives in the `src/dim.rs` newtypes (`ImgW`, `ImgH`, `WinW`, `WinH`, `LongSide`, `PreviewPx`, `Delay`, `Rate`, `RampTime`, `Rect`).
   The newtype accessor is `raw()`, never `get()`: `ImgW::new(4).raw() == 4`.
-  `ImgW::as_i32` and `ImgH::as_i32` cross into a raylib texture dimension with `i32::try_from`, so a width past `i32::MAX` clamps instead of wrapping into a negative size; the draw and upload code never casts a dimension by hand.
+  `raw()` names a wgpu texture extent and `as_f32()` crosses into the window mapping, so the draw and upload code never casts a dimension by hand.
   Public API boundaries take the newtype, not the bare primitive.
-  `Rect` is a `#[repr(C)]` axis-aligned rectangle with raylib `Rectangle` field names.
-  It converts with `From`, so a raylib call that takes `impl Into<Rectangle>` takes a `Rect` value directly.
-  Do not build a bare `Rectangle` in the draw code.
+  `Rect` is an axis-aligned rectangle in window pixels, with `x`, `y`, `width`, `height` and the `right`/`bottom` edge helpers, and `draw::Quad` is the only thing that turns one into corners.
 - `DecodedImage` (`src/lib.rs`) keeps its fields private: `DecodedImage::new(width, height, data)` is the only checked entrance, and it answers `DecodeError::Buffer` unless `data` holds exactly `width * height * 4` bytes.
   Read the pixels with `as_rgba`, the extents with `width` and `height`, and consume it with `into_rgba` or `into_parts`.
   A crate path that just computed both the buffer and its size uses `DecodedImage::from_exact`, which debug-asserts the pair, so a wrong buffer still trips a test build.
@@ -219,7 +217,7 @@ The binary name is `vv`.
   The header carries the source dimensions, so `GridEntry::width`/`height` measure the image and not the thumb, on a hit and on a miss.
   The header also carries the placeholder of the thumb: a ThumbHash payload of at most `placeholder::MAX_BYTES` (32) bytes, from the `thumbhash` crate (MIT, no dependencies, `src/placeholder.rs`).
   A launch runs a placeholder pass beside the decodes: one cheap rayon job per entry reads the header only (`Cache::load_placeholder`, about 200 bytes, no codestream) and renders the DCT at 32 px on the worker.
-  The main thread uploads at most `PLACEHOLDER_UPLOADS_PER_FRAME` (16) placeholder textures per frame, a cell draws its placeholder until the decoded thumb lands, and the thumb upload drops it.
+  The worker uploads the placeholder texture itself, so the main thread copies no pixels and needs no per-frame upload budget, and a cell draws its placeholder until the decoded thumb lands.
   The image view falls back to the placeholder, and the same header lands the source dimensions, so it fits the picture before the first decode.
   `FORMAT` 3 adds the placeholder payload, so a version 2 entry stays unread and re-decodes.
   A cold launch has no entry, so it keeps the grey cell: the placeholder never invents pixels.

@@ -1,5 +1,5 @@
-// Pixel and coordinate math lives in f32 (raylib units) and indices in
-// usize and u32.
+// Pixel and coordinate math lives in f32 (window and source units) and
+// indices in usize and u32.
 // The casts between them belong to that boundary.
 // Every value here (window pixels, texture dimensions) stays far below
 // the f32 exact-integer range.
@@ -349,10 +349,13 @@ pub(crate) fn measure_vector(path: &Path) -> Option<(ImgW, ImgH)> {
     svg::measure(path).ok()
 }
 
-/// The longest texture side the code uploads.
-/// Desktop GL hardware ranges from 4096 to 16384.
-/// This is the safe middle value.
-/// raylib does not expose the real limit.
+/// The longest texture side the decode produces.
+///
+/// This is the policy, and `texture::Uploader` clamps every upload to the
+/// adapter's own `max_texture_dimension_2d` when that is smaller, so the
+/// decoded size stays the same on every host and a small adapter still takes
+/// the picture.
+/// Desktop adapters range from 4096 to 16384.
 /// The code downscales anything larger here instead of failing the load.
 pub const MAX_TEXTURE_SIDE: u32 = 8192;
 
