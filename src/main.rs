@@ -2028,7 +2028,11 @@ impl App {
     // (drain, input, motion, draw) carries the invariants.
     #[allow(clippy::too_many_lines)]
     fn frame(&mut self) -> Result<()> {
-        let window = self.window.as_ref().expect("started").clone();
+        // A redraw can arrive before the GPU stack is up, or while a failed
+        // start is on its way out: neither has a frame to draw.
+        let (Some(window), Some(_)) = (self.window.clone(), self.renderer.as_ref()) else {
+            return Ok(());
+        };
         let now = Instant::now();
         let time = now.duration_since(self.started_at).as_secs_f64();
         let dt = now.duration_since(self.last_frame).as_secs_f32();
@@ -2037,7 +2041,9 @@ impl App {
         // The frame body borrows the frame's input and GPU immutably while it
         // mutates the views, so the two move out of the app for the length of
         // the call and back in afterwards.
-        let gpu = self.gpu.take().expect("started");
+        let Some(gpu) = self.gpu.take() else {
+            return Ok(());
+        };
         let input = std::mem::take(&mut self.input);
         let ui = Ui {
             input: &input,
@@ -2047,7 +2053,10 @@ impl App {
             time,
             dt,
         };
-        let mut r = self.renderer.take().expect("started");
+        let Some(mut r) = self.renderer.take() else {
+            self.gpu = Some(gpu);
+            return Ok(());
+        };
         let result = self.body(&ui, &mut r);
         self.renderer = Some(r);
         self.gpu = Some(gpu);
@@ -2090,6 +2099,7 @@ impl ApplicationHandler for App {
         let gpu = match Gpu::new(&window, settings) {
             Ok(gpu) => gpu,
             Err(err) => {
+                eprintln!("vv: {err}");
                 self.fatal = Some(anyhow::anyhow!("{err}"));
                 event_loop.exit();
                 return;
@@ -2115,6 +2125,7 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::RedrawRequested if !self.started => {}
             WindowEvent::RedrawRequested => match self.frame() {
                 Ok(()) => {
                     if self.quit {
