@@ -156,6 +156,13 @@ the winit handler, the window, `Gpu` and the event mapping.
 - An embedded open failure exits the process. A caller who wants a fallback
   drives the pane through stage 2, where `Viewer::open` answers a `Result` and
   the host decides what to show.
+- The stage-2 check is a test, not a demo binary:
+  `tests/gpu_offscreen.rs::a_viewer_paints_into_a_host_texture` builds a device
+  with no surface, opens a launch, renders frames and reads the host texture
+  back. It is `#[ignore]`d for the same reason the other offscreen paints are:
+  the gate has no adapter. A demo that blits the texture into an X11 window was
+  not written, because no display on the development host could show whether it
+  works.
 - The offscreen paints are now the regression net for the viewer, and the
   golden-frame comparison the port could not do is possible from here: render a
   fixed source at a fixed size and compare a hash.

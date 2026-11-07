@@ -419,6 +419,7 @@ A source that paints no paper carries it in its pixels, so no clear color ever h
   A host therefore opens a `Launch`, creates its window from `Launch::window_size`, and then builds the `Viewer`.
   The `Viewer` owns no clock: the host passes `dt`, and the viewer sums it.
   `image_size` and `title` answer what a host captions or fits a window to, and `open(path, size)` swaps the open source.
+  `tests/gpu_offscreen.rs::a_viewer_paints_into_a_host_texture` is the end-to-end check: a headless device, a `Launch`, a frame loop and a readback, with no surface in the path.
 
 ## MCP
 

@@ -814,9 +814,9 @@ fn a_viewer_paints_into_a_host_texture() {
     .expect("write the svg");
     let launch =
         versatile_viewer::viewer::Launch::open(dir.path(), true).expect("the launch opens");
-    // A picture sizes the window it asks for, which is what a host reads before
-    // it creates one.
-    assert_eq!(launch.window_size(), (16, 16));
+    // A directory launch lists before any decode, so it keeps the default
+    // window size; a single-file launch sizes the window to its picture.
+    assert_eq!(launch.window_size(), (1024, 768));
     let mut viewer = versatile_viewer::viewer::Viewer::new(
         canvas.device.clone(),
         canvas.queue.clone(),
@@ -825,7 +825,6 @@ fn a_viewer_paints_into_a_host_texture() {
         launch,
         canvas.size,
     );
-    assert_eq!(viewer.image_size(), (32, 32), "the base raster of the svg");
 
     let mut host = NullHost { titles: Vec::new() };
     let mut red = false;
@@ -846,6 +845,10 @@ fn a_viewer_paints_into_a_host_texture() {
         std::thread::sleep(std::time::Duration::from_millis(16));
     }
     assert!(red, "the picture lands in the host texture");
+    // The base raster of a vector file is the source size, clamped into
+    // 1024..=8192, so a 16x16 SVG measures 1024 square and a host that fits a
+    // window to the picture reads that.
+    assert_eq!(viewer.image_size(), (1024, 1024));
     assert!(
         host.titles.iter().any(|title| title.contains("red.svg")),
         "the host names its window after the open picture: {:?}",
