@@ -2241,10 +2241,10 @@ impl App {
         self.last_win = Some((win_w, win_h));
 
         // Dynamic window title: follow the open image in image view.
-        // Back to the launch title in self.grid mode.
+        // Back to the launch title in the grid mode.
         if self.st.open_id != self.title_open_id {
             self.title_open_id = self.st.open_id;
-            // A self.grid title is the launch title already, so the borrow costs
+            // A the grid title is the launch title already, so the borrow costs
             // no allocation.
             let title = self
                 .st
@@ -2261,7 +2261,7 @@ impl App {
             ui.set_window_title(&title);
         }
 
-        // Prefetch priority: in self.grid mode the neighbors of the selected
+        // Prefetch priority: in the grid mode the neighbors of the selected
         // entry (left, right, up, down).
         // In image mode the previous and next entries.
         // While the image view still waits for its own decode, only the
@@ -2322,7 +2322,7 @@ impl App {
         // Texture uploads need the main thread.
         if self.st.mode == Mode::Image {
             let mut open_failed = false;
-            // Waiting on a self.grid decode (no streaming loader for this open).
+            // Waiting on a the grid decode (no streaming loader for this open).
             // When its texture lands, the code takes it over as the view.
             if self.st.view_tex.is_none() && self.st.loader.is_none() && self.st.open_id.is_some() {
                 let id = self.st.open_id.expect("checked above");
@@ -2431,12 +2431,12 @@ impl App {
         }
 
         // True while a Shift key is down.
-        // Shift + h/j/k/l moves at double speed in both views: the self.grid
+        // Shift + h/j/k/l moves at double speed in both views: the the grid
         // selection step and the image pan and free zoom.
         // The flag lives outside the mode branches because both read it.
         let shift = ui.is_key_down(KeyCode::ShiftLeft) || ui.is_key_down(KeyCode::ShiftRight);
         // Shift + h/j/k/l moves at double speed in both views.
-        // The self.grid passes the step count to its input handler, and the image
+        // The the grid passes the step count to its input handler, and the image
         // view scales its pan and zoom ramps.
         let shift_mult = if shift {
             versatile_viewer::SHIFT_SPEED_MULTIPLIER
@@ -2448,7 +2448,7 @@ impl App {
         if self.st.mode == Mode::Grid {
             // Grid navigation: h/j/k/l and the arrows move the selection,
             // Enter opens the selected image, q quits (ESC is inert here,
-            // because the self.grid is the home view).
+            // because the the grid is the home view).
             match self.grid.as_mut().unwrap().handle_input(
                 ui.input(),
                 (WinW::new(win_w), WinH::new(win_h)),
@@ -2474,19 +2474,19 @@ impl App {
         } else {
             // Image mode.
             // Drain the raw key and char queues every frame (same rationale
-            // as self.grid.rs handle_input).
+            // as grid.rs handle_input).
             // is_key_pressed misses a press+release pair that lands inside
             // one frame, and this is easy here while frames stall on texture
             // uploads or decode.
-            // Leftover queue entries otherwise leak into self.grid mode and act
+            // Leftover queue entries otherwise leak into the grid mode and act
             // there (for example a missed Enter that reopens the
             // just-viewed image at once).
             // State queries (is_key_down panning, is_key_pressed W/E/=/-) are
             // unaffected: the queue is separate from the key snapshot.
-            // Enter and ESC return to the self.grid when one exists (nsxiv-like:
-            // Enter toggles between the self.grid and the open image).
+            // Enter and ESC return to the the grid when one exists (nsxiv-like:
+            // Enter toggles between the the grid and the open image).
             // q quits, and ESC never quits the program (inert in single-file
-            // launches, where there is no self.grid to return to).
+            // launches, where there is no the grid to return to).
             // Space and Backspace switch to the next or previous image
             // (nsxiv-style nav, with n or Space for next and p or
             // Backspace for previous, while the arrows and h/j/k/l stay
@@ -2525,7 +2525,7 @@ impl App {
             for k in ui.pressed_keys() {
                 match k {
                     // ESC drops a region selection first and keeps the image
-                    // view, so a second ESC returns to the self.grid.
+                    // view, so a second ESC returns to the the grid.
                     KeyCode::Escape => escape = true,
                     KeyCode::Enter | KeyCode::NumpadEnter => {
                         enter = true;
@@ -2757,7 +2757,7 @@ impl App {
             }
             // ESC drops the region selection first: it clears a kept region
             // and cancels a drag in flight.
-            // Only an ESC with nothing to drop returns to the self.grid, so the
+            // Only an ESC with nothing to drop returns to the the grid, so the
             // region never costs a surprise exit.
             if escape {
                 let kept = self.st.selection.take();
@@ -2804,7 +2804,7 @@ impl App {
             }
             // `f` tap action: it needs known geometry, and the hit test uses
             // the drawn image rect (offset + pan at the on-screen scale).
-            // A cursor over the background returns to the self.grid (ESC-like).
+            // A cursor over the background returns to the the grid (ESC-like).
             // A cursor over an image that covers the whole window zooms out
             // (recentred, like the zoom-out half of t).
             // Otherwise it zooms into fill view aimed at the cursor (like the
@@ -2847,7 +2847,7 @@ impl App {
             }
             if return_to_grid {
                 // Leaving image view mid-drag: give the pointer back before
-                // the self.grid click handling needs a visible cursor.
+                // the the grid click handling needs a visible cursor.
                 if self.pointer_captured {
                     ui.enable_cursor();
                     ui.set_mouse_position(self.grab_pos);
@@ -2861,8 +2861,8 @@ impl App {
                 self.region_drag = None;
                 self.st.selection = None;
                 self.st.mode = Mode::Grid;
-                // Hand the shown texture back to its self.grid entry and make
-                // that entry the self.grid selection (nsxiv-like).
+                // Hand the shown texture back to its the grid entry and make
+                // that entry the the grid selection (nsxiv-like).
                 put_back_view(
                     &mut self.grid,
                     &mut self.st.view_from_grid,
@@ -2881,7 +2881,7 @@ impl App {
                 self.st.close_crop();
             }
 
-            // Prev/next while viewing (only with a self.grid to navigate).
+            // Prev/next while viewing (only with a the grid to navigate).
             // A ready texture swaps in the same frame.
             // A decode in flight is waited on (auto-swap when it lands).
             // Otherwise the streaming loader takes over.
@@ -3440,8 +3440,8 @@ impl App {
                 .tick_crop(Instant::now(), Vec2::new(win_w, win_h), &r.uploader());
         }
 
-        // VV_BLUR_BG in self.grid mode: the background follows the selected
-        // entry with a slow crossfade (starts as soon as the self.grid workers
+        // VV_BLUR_BG in the grid mode: the background follows the selected
+        // entry with a slow crossfade (starts as soon as the the grid workers
         // decode the blurred copy of the entry).
         if self.st.mode == Mode::Grid
             && let (Some(bg), Some(g)) = (self.st.blur_bg.as_mut(), self.grid.as_ref())
@@ -3472,7 +3472,7 @@ impl App {
         if self.st.mode == Mode::Grid {
             // VV_BLUR_BG gimmick: the blurred background follows the
             // selection (crossfading, and a no-op when the gimmick is off).
-            // The code draws it before the self.grid, so the fades run under the
+            // The code draws it before the the grid, so the fades run under the
             // thumbnails.
             if let Some(bg) = &mut self.st.blur_bg {
                 bg.draw(r, WinW::new(win_w), WinH::new(win_h));
