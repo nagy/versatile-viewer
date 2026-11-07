@@ -302,7 +302,7 @@ The binary name is `vv`.
 ## Build
 
 - `nix build .#versatile-viewer-doc` makes the rustdoc HTML.
-- `nix flake check` gates clippy (`--all-targets -- --deny warnings`), tests, doctests, and treefmt.
+- `nix flake check` gates clippy (`--all-targets -- --deny warnings`), tests, doctests, treefmt, the package build, and `checks.minimal` (`cargo test --no-default-features`, which compiles the `_off` stubs of the thumbnail cache, the SVG backend and the Mermaid backend).
 ## Run
 
 Run `nix run . -- <image-path-or-directory>`.

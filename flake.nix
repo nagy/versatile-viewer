@@ -134,6 +134,22 @@
             meta.description = "Versatile-viewer doctests";
           };
 
+          # The build without the default features: no thumbnail cache, no SVG,
+          # no Mermaid. `src/thumbcache_off.rs`, `src/svg_off.rs` and
+          # `src/mermaid_off.rs` answer from stubs in that build, and nothing
+          # else in the flake compiles them.
+          minimal = craneLib.cargoTest {
+            inherit
+              src
+              cargoArtifacts
+              nativeBuildInputs
+              env
+              ;
+            buildInputs = libInputs;
+            cargoExtraArgs = "--no-default-features";
+            meta.description = "Versatile-viewer tests without the default features";
+          };
+
           # Lint gate: warnings are errors and every target is included.
           # This uses the same clippy and cargo from nixpkgs as the devshell.
           # `nix flake check` and a plain `cargo clippy` then agree.
@@ -170,6 +186,10 @@
           };
 
           checks.clippy = clippy;
+
+          # The build with no default feature, so the `_off` stubs stay
+          # compiled and tested.
+          checks.minimal = minimal;
 
           # The package itself, so `nix flake check` catches a broken rpath or a
           # missing runtime library and not only the test run.

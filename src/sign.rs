@@ -120,6 +120,10 @@ fn has_jxl_extension(path: &Path) -> bool {
 
 /// The first two bytes of the file.
 /// The function returns None for a missing or short file.
+/// Only the SVG sniffer asks for two bytes: every other reader takes the longer
+/// magic of [`file_magic_at_least`], so a build without the `svg` feature has
+/// no caller.
+#[cfg(feature = "svg")]
 pub(crate) fn file_magic(path: &Path) -> Option<[u8; 2]> {
     use std::io::Read;
     let mut magic = [0u8; 2];
