@@ -84,6 +84,14 @@ The main thread therefore lost the upload funnel, the
   gone and the drag speed is a host property, as issue `94691ce` recorded.
 - `src/wmclass.rs` is gone: the window name sets `WM_CLASS`.
 - The grid keeps no text layer, and its failed cell shows two rectangles.
+- `Renderer::render_into` paints the batch into any texture view, and `flush`
+  passes the swapchain image. A host with no window passes a texture of its own,
+  so `tests/gpu_offscreen.rs` checks the pipeline, the decoders and the draw
+  placement without a display. Those paints are `#[ignore]`d, because the gate
+  has no adapter.
+- A lost device (`Device::set_device_lost_callback`) stops the viewer with the
+  driver's message. It cannot draw again: a recovery path means a new `Gpu`, a
+  new `Renderer` and every texture again, which is the work of a fresh open.
 - An embedding API (a `Viewer` value with `new`, `handle_event` and `render`) is
   still ahead. This port keeps `main.rs`, because the winit loop already owns
   the frame; the split is a refactor of that method and not of the renderer.
