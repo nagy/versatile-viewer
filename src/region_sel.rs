@@ -428,7 +428,6 @@ mod tests {
         let area: f32 = around(outer, inner).iter().map(quad_area).sum();
         assert_eq!(area, 0.0);
     }
-
 }
 
 #[cfg(test)]

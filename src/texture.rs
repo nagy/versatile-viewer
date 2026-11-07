@@ -289,7 +289,6 @@ impl Texture {
             Filter::Nearest => &self.nearest,
         }
     }
-
 }
 
 /// One rendered picture on its way to the window: pixels, or the texture they

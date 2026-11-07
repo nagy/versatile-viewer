@@ -26,6 +26,14 @@
 //! [`Input::cursor`] takes the window positions of `CursorMoved`, which carry
 //! the acceleration and the desktop scale.
 //!
+//! A drag that holds the pointer ([`Input::capture`]) swaps the two roles: the
+//! platform position stands still, because a grab keeps the pointer in place,
+//! and the raw travel becomes the pointer's motion.
+//! That is the virtual pointer a disabled cursor always provided, and it is why
+//! a drag never stops at a screen edge.
+//! A free pointer reads the platform position alone, so the raw travel of the
+//! same movement never shifts the hover point by a few pixels.
+//!
 //! # Typed text
 //!
 //! A `+` or `-` on a non-US layout names its physical key only through the
@@ -68,6 +76,8 @@ pub struct Input {
     typed: Vec<Typed>,
     /// The pointer position, in window pixels.
     cursor: Vec2,
+    /// A drag holds the pointer, so the raw travel moves the pointer.
+    captured: bool,
     /// The raw device travel since the last frame.
     delta: Vec2,
     /// The wheel travel since the last frame, in notches.
@@ -121,24 +131,49 @@ impl Input {
     }
 
     /// Take one pointer position, in window pixels.
+    ///
+    /// A capture ignores it: the grab keeps the pointer in place, so the
+    /// platform reports the spot it never leaves while the raw travel moves the
+    /// logical pointer.
     pub fn cursor(&mut self, position: Vec2) {
-        self.cursor = position;
+        if !self.captured {
+            self.cursor = position;
+        }
     }
 
     /// Move the pointer by the raw device travel of one event.
     ///
-    /// A captured drag reads this: the pointer itself barely moves, because the
-    /// grab keeps it in place.
+    /// The travel is recorded every time, because a capture starts and ends
+    /// inside a frame and a fold of this frame's travel must not depend on
+    /// where in the frame the grab switched.
+    /// The pointer itself follows only while [`Self::capture`] holds it.
     pub fn motion(&mut self, delta: Vec2) {
         self.delta += delta;
-        self.cursor += delta;
+        if self.captured {
+            self.cursor += delta;
+        }
     }
 
     /// Put the pointer at a position without reading it as travel.
     ///
-    /// The capture recenters the pointer, and that warp is not a move.
+    /// A warp moves the real pointer, so the logical one follows even during a
+    /// capture, and the warp itself is not a move.
     pub fn set_cursor(&mut self, position: Vec2) {
         self.cursor = position;
+    }
+
+    /// Say whether a drag holds the pointer.
+    ///
+    /// A grab makes the raw travel the pointer's motion; a release hands the
+    /// pointer back to the platform.
+    pub fn capture(&mut self, held: bool) {
+        self.captured = held;
+    }
+
+    /// Does a drag hold the pointer now?
+    #[must_use]
+    pub fn is_captured(&self) -> bool {
+        self.captured
     }
 
     /// Take one wheel report.
@@ -303,14 +338,16 @@ mod tests {
         assert!(!input.is_button_down(MouseButton::Left));
     }
 
-    /// The raw travel moves the pointer, and the wheel counts notches.
+    /// The raw travel accumulates, and the wheel counts notches.
     #[test]
-    fn the_pointer_and_the_wheel_accumulate() {
+    fn the_travel_and_the_wheel_accumulate() {
         let mut input = Input::default();
         input.cursor(Vec2::new(10.0, 10.0));
         input.motion(Vec2::new(3.0, -2.0));
         input.motion(Vec2::new(1.0, 1.0));
-        assert_eq!(input.cursor_position(), Vec2::new(14.0, 9.0));
+        // A free pointer is where the platform put it, whatever the device
+        // travel since.
+        assert_eq!(input.cursor_position(), Vec2::new(10.0, 10.0));
         assert_eq!(input.delta(), Vec2::new(4.0, -1.0));
         input.wheel(MouseScrollDelta::LineDelta(0.0, 1.0));
         input.wheel(MouseScrollDelta::PixelDelta(
@@ -320,7 +357,32 @@ mod tests {
         input.begin_frame();
         assert_eq!(input.delta(), Vec2::ZERO);
         assert_eq!(input.wheel_move(), 0.0);
-        assert_eq!(input.cursor_position(), Vec2::new(14.0, 9.0));
+        assert_eq!(input.cursor_position(), Vec2::new(10.0, 10.0));
+    }
+
+    /// A capture turns the raw travel into the pointer's motion, and the
+    /// platform position stops counting.
+    #[test]
+    fn a_captured_pointer_follows_the_travel() {
+        let mut input = Input::default();
+        input.cursor(Vec2::new(100.0, 100.0));
+        input.capture(true);
+        input.motion(Vec2::new(20.0, -5.0));
+        assert_eq!(input.cursor_position(), Vec2::new(120.0, 95.0));
+        // The grab keeps the real pointer in place, so a platform report must
+        // not drag the virtual pointer back.
+        input.cursor(Vec2::new(100.0, 100.0));
+        assert_eq!(input.cursor_position(), Vec2::new(120.0, 95.0));
+        // A warp is the truth even while the drag runs.
+        input.set_cursor(Vec2::new(7.0, 8.0));
+        assert_eq!(input.cursor_position(), Vec2::new(7.0, 8.0));
+        // The release hands the pointer back to the platform.
+        input.capture(false);
+        input.cursor(Vec2::new(10.0, 20.0));
+        assert_eq!(input.cursor_position(), Vec2::new(10.0, 20.0));
+        input.motion(Vec2::new(1.0, 1.0));
+        assert_eq!(input.cursor_position(), Vec2::new(10.0, 20.0));
+        assert_eq!(input.delta(), Vec2::new(21.0, -4.0), "every event counts");
     }
 
     /// A typed character keeps the key that produced it, for the zoom keys.

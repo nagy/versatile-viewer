@@ -1442,12 +1442,7 @@ fn show_entry(
             // nothing: the loader renders the book now.
             None
         } else {
-            let preview_px = PreviewPx::new(
-                ui.width()
-                    .max(ui.height())
-                    .try_into()
-                    .unwrap_or(512),
-            );
+            let preview_px = PreviewPx::new(ui.width().max(ui.height()).try_into().unwrap_or(512));
             // The image view opens a document as a book, so plane 0 holds
             // every spread.
             // The opening box comes from the surface before the loader takes
@@ -1554,7 +1549,7 @@ fn start_mcp() -> Result<()> {
 /// because the batch needs a mutable borrow for the whole frame while the input
 /// is read at the same time.
 struct Ui<'a> {
-    input: &'a Input,
+    input: &'a mut Input,
     window: &'a Window,
     gpu: &'a Gpu,
     size: (u32, u32),
@@ -1587,8 +1582,9 @@ impl Ui<'_> {
 
     /// The pointer position, in window pixels.
     ///
-    /// A captured drag moves this value by the raw device travel, so the view
-    /// keeps reading one pointer while the real cursor stays grabbed.
+    /// A drag that holds the pointer moves this value by the raw device travel
+    /// (see [`Input::motion`]), so the view keeps reading one pointer while the
+    /// real cursor stays grabbed.
     fn pointer(&self) -> Vec2 {
         self.input.cursor_position()
     }
@@ -1646,26 +1642,33 @@ impl Ui<'_> {
     /// Grab the pointer and hide it, so a drag has unbounded travel.
     ///
     /// `Locked` is the mode with no pointer motion at all, and X11 refuses it,
-    /// so `Confined` is the fallback. The raw device deltas arrive either way.
-    fn grab_pointer(&self) {
+    /// so `Confined` is the fallback. The raw device deltas arrive either way,
+    /// and [`Input::capture`] makes them the pointer's motion.
+    fn grab_pointer(&mut self) {
         for mode in [CursorGrabMode::Locked, CursorGrabMode::Confined] {
             if self.window.set_cursor_grab(mode).is_ok() {
                 break;
             }
         }
         self.window.set_cursor_visible(false);
+        self.input.capture(true);
     }
 
     /// Give the pointer back and show it again.
-    fn release_pointer(&self) {
+    fn release_pointer(&mut self) {
         let _ = self.window.set_cursor_grab(CursorGrabMode::None);
         self.window.set_cursor_visible(true);
+        self.input.capture(false);
     }
 
     /// Put the pointer at a window point.
-    fn place_pointer(&self, at: Vec2) {
+    ///
+    /// The logical pointer follows at once, so the next frame reads the spot
+    /// the warp sent it to instead of the travel that ran before it.
+    fn place_pointer(&mut self, at: Vec2) {
         let position = winit::dpi::PhysicalPosition::new(at.x.round(), at.y.round());
         let _ = self.window.set_cursor_position(position);
+        self.input.set_cursor(at);
     }
 
     /// Start a frame: set the viewport and empty the batch.
@@ -1847,6 +1850,11 @@ struct App {
     /// The previous frame's window size, for the resize detection.
     last_win: Option<(f32, f32)>,
     /// True while an image-view drag holds the pointer.
+    ///
+    /// This is the view's latch; [`Input::capture`] carries the same fact to
+    /// the input layer, so the raw travel moves the pointer. The two move
+    /// together, and only through [`Ui::grab_pointer`], [`Ui::release_pointer`]
+    /// or the lost-focus arm.
     pointer_captured: bool,
     /// The window point where the current drag grabbed the pointer.
     grab_pos: Vec2,
@@ -2003,7 +2011,7 @@ impl App {
         // (ESC still returns to the grid view).
         if !self.single_plane && self.grid.as_ref().is_some_and(|g| g.entries.len() == 1) {
             let ui = Ui {
-                input: &self.input,
+                input: &mut self.input,
                 window,
                 gpu,
                 size: self.size,
@@ -2045,9 +2053,9 @@ impl App {
         let Some(gpu) = self.gpu.take() else {
             return Ok(());
         };
-        let input = std::mem::take(&mut self.input);
-        let ui = Ui {
-            input: &input,
+        let mut input = std::mem::take(&mut self.input);
+        let mut ui = Ui {
+            input: &mut input,
             window: &window,
             gpu: &gpu,
             size: self.size,
@@ -2058,7 +2066,7 @@ impl App {
             self.gpu = Some(gpu);
             return Ok(());
         };
-        let result = self.body(&ui, &mut r);
+        let result = self.body(&mut ui, &mut r);
         self.renderer = Some(r);
         self.gpu = Some(gpu);
         self.input = input;
@@ -2161,18 +2169,17 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. } => self.key(&event),
             WindowEvent::MouseWheel { delta, .. } => self.input.wheel(delta),
             WindowEvent::CursorMoved { position, .. } => {
-                // A captured drag reads the raw device travel, so the real
-                // pointer does not steer it.
-                if !self.pointer_captured {
-                    self.input
-                        .cursor(Vec2::new(position.x as f32, position.y as f32));
-                }
+                // A captured drag reads the raw device travel instead, which the
+                // input layer applies on its own.
+                self.input
+                    .cursor(Vec2::new(position.x as f32, position.y as f32));
             }
             WindowEvent::MouseInput { state, button, .. } => self.input.button(button, state),
             WindowEvent::Focused(false) => {
                 // A lost focus never delivers the releases, so a captured drag
                 // must not outlive it.
                 self.input.forget_held();
+                self.input.capture(false);
                 self.pointer_captured = false;
                 self.f_capture = false;
                 self.f_zoom_capture = false;
@@ -2203,7 +2210,7 @@ impl App {
     /// `ui` carries the window and the input of this frame, and `r` the batch
     /// the draw calls fill.
     #[allow(clippy::too_many_lines)]
-    fn body(&mut self, ui: &Ui, r: &mut Renderer) -> Result<()> {
+    fn body(&mut self, ui: &mut Ui, r: &mut Renderer) -> Result<()> {
         // VV_TIMING: the frame started now.
         // The code reports it at the end of the frame when it ran long.
         let frame_started = self.timing.then(std::time::Instant::now);
@@ -2967,8 +2974,7 @@ impl App {
                     && self.st.img.w > 0.0
                     && self.st.view_scale.is_some()
                 {
-                    self.st.target_pan =
-                        aim_fill_pan(&self.st, ui.pointer(), win_w, win_h);
+                    self.st.target_pan = aim_fill_pan(&self.st, ui.pointer(), win_w, win_h);
                 } else {
                     self.st.target_pan = Vec2::ZERO;
                 }
@@ -3009,8 +3015,7 @@ impl App {
                 // the Shift speed).
                 // `j` and `k` also pan, so a held Ctrl turns them into zoom
                 // keys instead of pan keys.
-                let ctrl =
-                    ui.key_down(KeyCode::ControlLeft) || ui.key_down(KeyCode::ControlRight);
+                let ctrl = ui.key_down(KeyCode::ControlLeft) || ui.key_down(KeyCode::ControlRight);
                 let ctrl_zoom_in = ctrl && ui.key_down(KeyCode::KeyJ);
                 let ctrl_zoom_out = ctrl && ui.key_down(KeyCode::KeyK);
                 // Shift+J/K step a spread when the open surface names a
@@ -3042,10 +3047,7 @@ impl App {
                     zoom_in: ui.key_down(KeyCode::Equal)
                         || ui.key_down(KeyCode::NumpadAdd)
                         || ctrl_zoom_in
-                        || self
-                            .zoom_keys
-                            .zoom_in_key()
-                            .is_some_and(|k| ui.key_down(k)),
+                        || self.zoom_keys.zoom_in_key().is_some_and(|k| ui.key_down(k)),
                     zoom_out: ui.key_down(KeyCode::Minus)
                         || ui.key_down(KeyCode::NumpadSubtract)
                         || ctrl_zoom_out

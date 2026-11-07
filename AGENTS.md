@@ -280,9 +280,13 @@ The binary name is `vv`.
   Those paints are `#[ignore]`d, because the gate has no display and no adapter: a host with Vulkan runs them by hand (`MESA` store path, `VK_DRIVER_FILES`, `cargo test --test gpu_offscreen -- --ignored`), and they cover the clear, a fill, a source rect, straight alpha, a turn, the texel grid of a 1:1 patch, and the SVG, PDF, Typst, Mermaid and book planes end to end.
   The gate still compiles them, so the seam never rots.
 - A captured drag grabs the pointer (`CursorGrabMode::Locked`, falling back to `Confined`, which is all X11 allows) and reads the raw device deltas of `DeviceEvent::MouseMotion`.
-  The pan multiplies them by its own factor, so the drag speed is a host property and not a constant.
-  `WindowEvent::CursorMoved` keeps the pointer position for every free-cursor action, and it is ignored while a drag holds the grab.
-  The release warps the pointer back to the grab point.
+  `Input::capture` owns the swap: while a drag holds the pointer, the raw travel moves the logical pointer and `WindowEvent::CursorMoved` is ignored, because the grab keeps the real pointer in place.
+  A free pointer is the opposite: the platform position is the truth and the raw travel only accumulates for a drag that starts inside the same frame.
+  That rule lives in `src/input.rs`, so a hover point never drifts by the travel since the last `CursorMoved`.
+  The pan multiplies the travel by its own factor, so the drag speed is a host property and not a constant.
+  The release warps the pointer back to the grab point, and the warp sets the logical pointer too, so the next frame reads the spot it sent the pointer to.
+- winit 0.30.13 emits one `DeviceEvent::MouseMotion` per XI2 raw motion event, with the device's raw axis values as the delta (see `xinput2_raw_mouse_motion` in its X11 backend), so no per-event guard belongs here.
+  A virtual X server (XTEST) reports the absolute pointer position as those raw values instead, sometimes twice, which looks like a double-speed drag; that is an injection artifact of the test harness and not a real event pair, so do not add a delta sanity clamp for it.
 - A lost focus forgets every held key and button and drops the grab, because the releases never arrive.
 - A frame is one method (`App::body` in `main.rs`).
   `Ui` carries the window, the input state and the clock of that frame, and `Renderer` takes the draw calls, so no wgpu type reaches the view code.

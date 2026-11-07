@@ -76,14 +76,13 @@ impl Canvas {
             ..Default::default()
         }))
         .ok()?;
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("vv offscreen"),
-                required_features: wgpu::Features::empty(),
-                required_limits: adapter.limits(),
-                ..Default::default()
-            }))
-            .ok()?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("vv offscreen"),
+            required_features: wgpu::Features::empty(),
+            required_limits: adapter.limits(),
+            ..Default::default()
+        }))
+        .ok()?;
         let renderer = Renderer::new(
             &device,
             &queue,
@@ -124,8 +123,7 @@ impl Canvas {
         let view = self
             .target
             .create_view(&wgpu::TextureViewDescriptor::default());
-        self.renderer
-            .render_into(&self.device, &self.queue, &view);
+        self.renderer.render_into(&self.device, &self.queue, &view);
         let (width, height) = self.size;
         let unpadded = width * 4;
         let padded = unpadded.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
@@ -173,7 +171,10 @@ impl Canvas {
                 timeout: None,
             })
             .expect("the device polls");
-        receiver.recv().expect("the map callback runs").expect("mapped");
+        receiver
+            .recv()
+            .expect("the map callback runs")
+            .expect("mapped");
         let data = buffer
             .slice(..)
             .get_mapped_range()
@@ -202,7 +203,10 @@ struct Pixels {
 impl Pixels {
     /// The pixel at `(x, y)`.
     fn at(&self, x: usize, y: usize) -> [u8; 4] {
-        assert!(x < self.width && y < self.height, "({x},{y}) is off the frame");
+        assert!(
+            x < self.width && y < self.height,
+            "({x},{y}) is off the frame"
+        );
         let start = y * self.padded + x * 4;
         [
             self.data[start],
@@ -255,7 +259,10 @@ fn a_solid_rect_lands_on_its_pixels() {
     let rect = Rect::new(4.0, 6.0, 8.0, 4.0);
     canvas.renderer.fill_rect(rect, Color::WHITE);
     let pixels = canvas.print();
-    assert!(pixels.rect_is(rect, [255, 255, 255, 255]), "the rect is white");
+    assert!(
+        pixels.rect_is(rect, [255, 255, 255, 255]),
+        "the rect is white"
+    );
     // One pixel past each edge stays background.
     assert_eq!(pixels.at(12, 7), [0x06, 0x23, 0x29, 0xff]);
     assert_eq!(pixels.at(5, 10), [0x06, 0x23, 0x29, 0xff]);
@@ -268,9 +275,10 @@ fn a_half_alpha_fill_blends_with_the_clear() {
     let mut canvas = canvas!(4, 4);
     // White at half alpha over black: every channel reads about half.
     canvas.begin(Color::BLACK);
-    canvas
-        .renderer
-        .fill_rect(Rect::new(0.0, 0.0, 4.0, 4.0), Color::new(255, 255, 255, 128));
+    canvas.renderer.fill_rect(
+        Rect::new(0.0, 0.0, 4.0, 4.0),
+        Color::new(255, 255, 255, 128),
+    );
     let pixels = canvas.print();
     let [r, g, b, a] = pixels.at(2, 2);
     // The color channels keep their share, and the target stays opaque
@@ -356,7 +364,11 @@ fn a_turned_quad_reaches_its_own_corners() {
     let pixels = canvas.print();
     // The 20 by 10 rect becomes 10 by 20 around its center, so the turn
     // covers x in 15..25 and y in 10..30.
-    assert_eq!(pixels.at(20, 12), [255, 255, 255, 255], "the top of the turn");
+    assert_eq!(
+        pixels.at(20, 12),
+        [255, 255, 255, 255],
+        "the top of the turn"
+    );
     assert_eq!(pixels.at(20, 28), [255, 255, 255, 255], "the bottom");
     assert_eq!(pixels.at(16, 20), [255, 255, 255, 255], "the left");
     assert_eq!(pixels.at(24, 20), [255, 255, 255, 255], "the right");
@@ -413,7 +425,11 @@ fn an_svg_paints_its_rect() {
     .expect("write the svg");
     let dest = paint_surface(&mut canvas, &path);
     let pixels = canvas.print();
-    assert_eq!(pixels.at(16, 16), [255, 0, 0, 255], "the SVG fills the frame");
+    assert_eq!(
+        pixels.at(16, 16),
+        [255, 0, 0, 255],
+        "the SVG fills the frame"
+    );
     assert_eq!(
         pixels.at(dest.x as usize, dest.y as usize),
         [0xff, 0, 0, 255],
@@ -430,7 +446,8 @@ fn a_typst_page_paints_a_red_box() {
     let path = dir.path().join("page.typ");
     std::fs::write(
         &path,
-        "#set page(width: 32pt, height: 32pt, margin: 0pt, fill: rgb(\"#0000ff\"))\n#rect(width: 100%, height: 100%, fill: rgb(\"#ff0000\"))\n",
+        "#set page(width: 32pt, height: 32pt, margin: 0pt, fill: rgb(\"#0000ff\"))\n#rect(width: \
+         100%, height: 100%, fill: rgb(\"#ff0000\"))\n",
     )
     .expect("write the typst source");
     let dest = paint_surface(&mut canvas, &path);
@@ -456,7 +473,11 @@ fn a_mermaid_diagram_paints_on_white_paper() {
     // boxes and labels leave dark ink on it.
     let (x0, y0) = (dest.x as usize, dest.y as usize);
     let (x1, y1) = (dest.right() as usize, dest.bottom() as usize);
-    assert_eq!(pixels.at(x0 + 1, y0 + 1), [255, 255, 255, 255], "white paper");
+    assert_eq!(
+        pixels.at(x0 + 1, y0 + 1),
+        [255, 255, 255, 255],
+        "white paper"
+    );
     let inked = (y0..y1).any(|y| (x0..x1).any(|x| pixels.at(x, y)[0] < 200));
     assert!(inked, "the boxes and labels leave ink on the paper");
 }
@@ -470,7 +491,8 @@ fn a_book_plane_keeps_its_gutter_transparent() {
     // Three pages, so the book holds a cover row and one spread.
     std::fs::write(
         &path,
-        "#set page(width: 64pt, height: 64pt, margin: 0pt, fill: rgb(\"#ffffff\"))\none\n#pagebreak()\ntwo\n#pagebreak()\nthree\n",
+        "#set page(width: 64pt, height: 64pt, margin: 0pt, fill: \
+         rgb(\"#ffffff\"))\none\n#pagebreak()\ntwo\n#pagebreak()\nthree\n",
     )
     .expect("write the typst source");
     let surface = versatile_viewer::surface::open_book_surface(&path).expect("a book");
@@ -508,8 +530,8 @@ fn one_page_pdf(color: [u8; 3]) -> Vec<u8> {
     let objects = [
         "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n".to_string(),
         "2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n".to_string(),
-        "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 64 64] /Contents 4 0 R \
-         /Resources << >> >> endobj\n"
+        "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 64 64] /Contents 4 0 R /Resources << \
+         >> >> endobj\n"
             .to_string(),
         format!(
             "4 0 obj << /Length {} >> stream\n{}endstream\nendobj\n",
