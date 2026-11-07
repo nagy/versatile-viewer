@@ -407,14 +407,7 @@ impl Renderer {
         tint: Color,
         filter: Filter,
     ) {
-        let rect = Rect::new(
-            dest.x - turn.origin.x,
-            dest.y - turn.origin.y,
-            dest.width,
-            dest.height,
-        );
-        let quad = Quad::turned(rect, Vec2::new(dest.x, dest.y), turn.angle);
-        self.texture(texture, src, quad, tint, filter);
+        self.texture(texture, src, Quad::pro(dest, turn), tint, filter);
     }
 
     /// Draw a texture over a quad with one filter.

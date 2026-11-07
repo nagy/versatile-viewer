@@ -331,6 +331,23 @@ impl Quad {
         ])
     }
 
+    /// The quad of a destination rect and its turn.
+    ///
+    /// This is the mapping the draw had before the port: the rect is pulled
+    /// back by the origin, so the point the origin names lands on the dest
+    /// position, and the rect turns around that point.
+    /// A zero angle and a half-size origin therefore draw the plain rect.
+    #[must_use]
+    pub fn pro(dest: Rect, turn: Turn) -> Self {
+        let rect = Rect::new(
+            dest.x - turn.origin.x,
+            dest.y - turn.origin.y,
+            dest.width,
+            dest.height,
+        );
+        Self::turned(rect, Vec2::new(dest.x, dest.y), turn.angle)
+    }
+
     /// The quad of a rectangle turned `degrees` clockwise around `pivot`.
     ///
     /// Raylib turned the quad around its destination position and pulled the
@@ -393,6 +410,20 @@ mod tests {
         assert_eq!(a.dot(b), 13.0);
         assert_eq!(a.distance(a), 0.0);
         assert_eq!(a.lerp(b, 0.5), Vec2::new(0.5, 4.0));
+    }
+
+    /// A dest rect and its origin land where the draw puts them.
+    #[test]
+    fn a_turned_dest_keeps_its_origin_on_the_position() {
+        let dest = Rect::new(100.0, 50.0, 40.0, 20.0);
+        let plain = Quad::pro(dest, Turn::new(Vec2::new(20.0, 10.0), 0.0));
+        assert_eq!(plain.p[0], Vec2::new(80.0, 40.0));
+        assert_eq!(plain.p[2], Vec2::new(120.0, 60.0));
+        // A quarter turn keeps the origin at the dest position and moves the
+        // corners a quarter around it.
+        let turned = Quad::pro(dest, Turn::new(Vec2::new(20.0, 10.0), 90.0));
+        assert!(turned.p[0].is_within(Vec2::new(110.0, 30.0), 1e-5));
+        assert!(turned.p[2].is_within(Vec2::new(90.0, 70.0), 1e-5));
     }
 
     /// A quarter turn maps the axes onto each other in a y-down space.
