@@ -534,8 +534,9 @@ pub fn downscale_rgba_ref(
 
 /// True when `VV_TIMING` is set.
 ///
-/// The code then prints the main-thread costs to stderr: every texture
-/// upload with its pixel size and its duration, and every slow frame.
+/// The code then prints the GPU stack at startup (adapter, format, present
+/// mode, texture limit) and every slow frame to stderr.
+/// An upload runs on a decode worker, so this flag stays off that path.
 /// Input tracing stays under `VV_DEBUG`.
 #[must_use]
 pub fn timing_enabled() -> bool {

@@ -22,7 +22,8 @@
 //! Usage: `vv [--mcp] <image-path-or-directory>`
 //!
 //! `VV_DEBUG`=1 traces input events.
-//! `VV_TIMING`=1 traces main-thread texture uploads and slow frames.
+//! `VV_PRESENT` picks the swapchain present mode.
+//! `VV_TIMING`=1 prints the GPU stack and every slow frame.
 //! `VV_SLOW_STREAM`=1 slows the JXL stream.
 //! `VV_BLUR_BG`=1 draws a blurred copy of the viewed image as the image-view
 //! background, scaled to cover the window and upscaled by the GPU.
