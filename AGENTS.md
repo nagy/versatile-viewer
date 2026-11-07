@@ -286,6 +286,7 @@ The binary name is `vv`.
 - A lost focus forgets every held key and button and drops the grab, because the releases never arrive.
 - A frame is one method (`App::body` in `main.rs`).
   `Ui` carries the window, the input state and the clock of that frame, and `Renderer` takes the draw calls, so no wgpu type reaches the view code.
+  Its accessors name what the view reads (`width`, `height`, `pointer`, `travel`, `wheel`, `key_down`, `key_pressed`, `grab_pointer`, `release_pointer`, `place_pointer`), so no raylib name survives the port.
   The launch lists the directory and decodes a single file before the event loop, because the title carries the image count and a picture sizes its own window.
   `App::resumed` creates the window, the GPU stack and the renderer, uploads the launch frame and starts the grid passes.
   A stale or lost swapchain reconfigures and skips the frame; it never kills the window.

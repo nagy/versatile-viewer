@@ -1443,8 +1443,8 @@ fn show_entry(
             None
         } else {
             let preview_px = PreviewPx::new(
-                ui.get_screen_width()
-                    .max(ui.get_screen_height())
+                ui.width()
+                    .max(ui.height())
                     .try_into()
                     .unwrap_or(512),
             );
@@ -1546,8 +1546,9 @@ fn start_mcp() -> Result<()> {
 /// One frame's window, input and clock, as the view code reads them.
 ///
 /// The type bundles the platform facts that the raylib handle used to carry, so
-/// the frame body reads one name: the pointer, the held keys, the frame time,
-/// the window size and the three window calls (cursor, grab, title).
+/// the frame body reads one name: the pointer, its travel, the held keys, the
+/// frame time, the window size and the three window calls (place the pointer,
+/// grab it, name the title).
 ///
 /// The drawing does not live here: the frame body holds the [`Renderer`] apart,
 /// because the batch needs a mutable borrow for the whole frame while the input
@@ -1565,22 +1566,22 @@ struct Ui<'a> {
 
 impl Ui<'_> {
     /// The window width, in physical pixels.
-    fn get_screen_width(&self) -> i32 {
+    fn width(&self) -> i32 {
         i32::try_from(self.size.0).unwrap_or(i32::MAX)
     }
 
     /// The window height, in physical pixels.
-    fn get_screen_height(&self) -> i32 {
+    fn height(&self) -> i32 {
         i32::try_from(self.size.1).unwrap_or(i32::MAX)
     }
 
     /// The seconds since the viewer started.
-    fn get_time(&self) -> f64 {
+    fn elapsed(&self) -> f64 {
         self.time
     }
 
     /// The seconds the previous frame took.
-    fn get_frame_time(&self) -> f32 {
+    fn frame_time(&self) -> f32 {
         self.dt
     }
 
@@ -1588,27 +1589,27 @@ impl Ui<'_> {
     ///
     /// A captured drag moves this value by the raw device travel, so the view
     /// keeps reading one pointer while the real cursor stays grabbed.
-    fn get_mouse_position(&self) -> Vec2 {
+    fn pointer(&self) -> Vec2 {
         self.input.cursor_position()
     }
 
     /// The raw device travel since the previous frame.
-    fn get_mouse_delta(&self) -> Vec2 {
+    fn travel(&self) -> Vec2 {
         self.input.delta()
     }
 
     /// The wheel travel since the previous frame, in notches.
-    fn get_mouse_wheel_move(&self) -> f32 {
+    fn wheel(&self) -> f32 {
         self.input.wheel_move()
     }
 
     /// Is the key held now?
-    fn is_key_down(&self, key: KeyCode) -> bool {
+    fn key_down(&self, key: KeyCode) -> bool {
         self.input.is_key_down(key)
     }
 
     /// Did the key go down this frame, without a repeat?
-    fn is_key_pressed(&self, key: KeyCode) -> bool {
+    fn key_pressed(&self, key: KeyCode) -> bool {
         self.input.is_key_pressed(key)
     }
 
@@ -1628,17 +1629,17 @@ impl Ui<'_> {
     }
 
     /// Did the mouse button go down this frame?
-    fn is_mouse_button_pressed(&self, button: MouseButton) -> bool {
+    fn button_pressed(&self, button: MouseButton) -> bool {
         self.input.is_button_pressed(button)
     }
 
     /// Did the mouse button come up this frame?
-    fn is_mouse_button_released(&self, button: MouseButton) -> bool {
+    fn button_released(&self, button: MouseButton) -> bool {
         self.input.is_button_released(button)
     }
 
     /// Set the window title.
-    fn set_window_title(&self, title: &str) {
+    fn set_title(&self, title: &str) {
         self.window.set_title(title);
     }
 
@@ -1646,7 +1647,7 @@ impl Ui<'_> {
     ///
     /// `Locked` is the mode with no pointer motion at all, and X11 refuses it,
     /// so `Confined` is the fallback. The raw device deltas arrive either way.
-    fn disable_cursor(&self) {
+    fn grab_pointer(&self) {
         for mode in [CursorGrabMode::Locked, CursorGrabMode::Confined] {
             if self.window.set_cursor_grab(mode).is_ok() {
                 break;
@@ -1656,13 +1657,13 @@ impl Ui<'_> {
     }
 
     /// Give the pointer back and show it again.
-    fn enable_cursor(&self) {
+    fn release_pointer(&self) {
         let _ = self.window.set_cursor_grab(CursorGrabMode::None);
         self.window.set_cursor_visible(true);
     }
 
     /// Put the pointer at a window point.
-    fn set_mouse_position(&self, at: Vec2) {
+    fn place_pointer(&self, at: Vec2) {
         let position = winit::dpi::PhysicalPosition::new(at.x.round(), at.y.round());
         let _ = self.window.set_cursor_position(position);
     }
@@ -1673,7 +1674,7 @@ impl Ui<'_> {
     }
 
     /// Clear the window to `color`.
-    fn clear_background(r: &mut Renderer, color: Color) {
+    fn clear(r: &mut Renderer, color: Color) {
         r.set_clear(color);
     }
 
@@ -1811,7 +1812,7 @@ struct App {
     size: (u32, u32),
     /// When the previous frame started, for the frame time.
     last_frame: Instant,
-    /// When the first frame started, for `Ui::get_time`.
+    /// When the first frame started, for `Ui::elapsed`.
     started_at: Instant,
     /// The frame time of the previous frame, in seconds.
     dt: f32,
@@ -2214,19 +2215,19 @@ impl App {
             // A frame longer than a key tap can hide the whole press. The input
             // layer records every event, so the trace above still shows it, and
             // this line names the frame that swallowed it.
-            let ft = ui.get_frame_time();
+            let ft = ui.frame_time();
             if ft > 0.1 {
                 eprintln!("vv: slow frame {ft:.0} ms");
             }
         }
-        let win_w = ui.get_screen_width() as f32;
-        let win_h = ui.get_screen_height() as f32;
+        let win_w = ui.width() as f32;
+        let win_h = ui.height() as f32;
         // Post-drag restore: verify the warp landed where the code sent it.
         // If a competing re-warp (GLFW, WM, XWayland) moved it, snap again.
         // The code gives up after a few tries so a user moving the mouse is
         // never pinned.
         if let Some(target) = self.pending_restore {
-            let cur = ui.get_mouse_position();
+            let cur = ui.pointer();
             let settled = (cur.x - target.x).abs() < 1.0 && (cur.y - target.y).abs() < 1.0;
             if self.debug && !settled {
                 eprintln!(
@@ -2237,7 +2238,7 @@ impl App {
             if settled || self.restore_tries >= 3 {
                 self.pending_restore = None;
             } else {
-                ui.set_mouse_position(target);
+                ui.place_pointer(target);
                 self.restore_tries += 1;
             }
         }
@@ -2269,7 +2270,7 @@ impl App {
                         .map(|e| Cow::Owned(image_title(e.source.path())))
                 })
                 .unwrap_or(Cow::Borrowed(self.launch_title.as_str()));
-            ui.set_window_title(&title);
+            ui.set_title(&title);
         }
 
         // Prefetch priority: in the grid mode the neighbors of the selected
@@ -2445,7 +2446,7 @@ impl App {
         // Shift + h/j/k/l moves at double speed in both views: the the grid
         // selection step and the image pan and free zoom.
         // The flag lives outside the mode branches because both read it.
-        let shift = ui.is_key_down(KeyCode::ShiftLeft) || ui.is_key_down(KeyCode::ShiftRight);
+        let shift = ui.key_down(KeyCode::ShiftLeft) || ui.key_down(KeyCode::ShiftRight);
         // Shift + h/j/k/l moves at double speed in both views.
         // The the grid passes the step count to its input handler, and the image
         // view scales its pan and zoom ramps.
@@ -2486,13 +2487,13 @@ impl App {
             // Image mode.
             // Drain the raw key and char queues every frame (same rationale
             // as grid.rs handle_input).
-            // is_key_pressed misses a press+release pair that lands inside
+            // key_pressed misses a press+release pair that lands inside
             // one frame, and this is easy here while frames stall on texture
             // uploads or decode.
             // Leftover queue entries otherwise leak into the grid mode and act
             // there (for example a missed Enter that reopens the
             // just-viewed image at once).
-            // State queries (is_key_down panning, is_key_pressed W/E/=/-) are
+            // State queries (key_down panning, key_pressed W/E/=/-) are
             // unaffected: the queue is separate from the key snapshot.
             // Enter and ESC return to the the grid when one exists (nsxiv-like:
             // Enter toggles between the the grid and the open image).
@@ -2596,9 +2597,9 @@ impl App {
             // pointer the same way.
             let mut f_click: Option<Vec2> = None;
             if (f_key || r_key) && !self.pointer_captured && !self.f_capture && !self.r_capture {
-                self.grab_pos = ui.get_mouse_position();
+                self.grab_pos = ui.pointer();
                 self.drag_virtual = self.grab_pos;
-                ui.disable_cursor();
+                ui.grab_pointer();
                 self.pointer_captured = true;
                 if r_key {
                     // `r` turns the image. The hold adds to the angle the image
@@ -2631,7 +2632,7 @@ impl App {
             if self.f_capture && shift != self.f_zoom_capture {
                 self.f_zoom_capture = shift;
                 // Forget the distance the tap test and the pan measured.
-                self.grab_pos = ui.get_mouse_position();
+                self.grab_pos = ui.pointer();
                 self.drag_virtual = self.grab_pos;
                 // A zoom from here on anchors on the view center: the image
                 // point the window shows at its middle.
@@ -2650,24 +2651,24 @@ impl App {
                     eprintln!("vv: f hold switch, zoom {}", self.f_zoom_capture);
                 }
             }
-            // `!is_key_down` also covers a press+release landing inside one
+            // `!key_down` also covers a press+release landing inside one
             // frame (the pressed queue records the press, but there is no
             // release edge to observe).
             // Without this the capture sticks.
             // The `r` release keeps the angle, so the image stays turned.
             if (self.f_capture || self.r_capture)
-                && !ui.is_key_down(KeyCode::KeyF)
-                && !ui.is_key_down(KeyCode::KeyR)
+                && !ui.key_down(KeyCode::KeyF)
+                && !ui.key_down(KeyCode::KeyR)
             {
                 // Fold in this frame's motion before the lock is released
                 // (the drag block below no longer runs once capture ends).
-                let delta = ui.get_mouse_delta();
+                let delta = ui.travel();
                 self.drag_virtual.x += delta.x;
                 self.drag_virtual.y += delta.y;
                 let f_dragged = (self.drag_virtual - self.grab_pos).length() > TAP_SLACK;
                 if self.pointer_captured {
-                    ui.enable_cursor();
-                    ui.set_mouse_position(self.grab_pos);
+                    ui.release_pointer();
+                    ui.place_pointer(self.grab_pos);
                     self.pending_restore = Some(self.grab_pos);
                     self.restore_tries = 0;
                     self.pointer_captured = false;
@@ -2710,18 +2711,18 @@ impl App {
             // after its delay.
             // The mouse side buttons ride the same nav path: forward is next
             // and back is previous, exactly like n and p.
-            let now = ui.get_time();
+            let now = ui.elapsed();
             let (delay, rate) = versatile_viewer::keyrepeat::settings();
             let mouse_nav = read_nav_mouse(ui.input());
             let next_edge = nav_next_edge || mouse_nav.next.edge;
             let prev_edge = nav_prev_edge || mouse_nav.prev.edge;
             // A held Shift moves the Space hold to the previous direction,
             // so a hold repeats the way its press edge stepped.
-            let space_held = ui.is_key_down(KeyCode::Space);
+            let space_held = ui.key_down(KeyCode::Space);
             let next_held =
-                ui.is_key_down(KeyCode::KeyN) || (space_held && !shift) || mouse_nav.next.held;
-            let prev_held = ui.is_key_down(KeyCode::KeyP)
-                || ui.is_key_down(KeyCode::Backspace)
+                ui.key_down(KeyCode::KeyN) || (space_held && !shift) || mouse_nav.next.held;
+            let prev_held = ui.key_down(KeyCode::KeyP)
+                || ui.key_down(KeyCode::Backspace)
                 || (space_held && shift)
                 || mouse_nav.prev.held;
             let mut nav = if self
@@ -2795,10 +2796,10 @@ impl App {
                 None
             };
             let spread_step = spread_press.filter(|_| self.spread_armed);
-            self.spread_armed = !(ui.is_key_down(KeyCode::KeyJ)
-                || ui.is_key_down(KeyCode::KeyK)
-                || ui.is_key_down(KeyCode::PageDown)
-                || ui.is_key_down(KeyCode::PageUp));
+            self.spread_armed = !(ui.key_down(KeyCode::KeyJ)
+                || ui.key_down(KeyCode::KeyK)
+                || ui.key_down(KeyCode::PageDown)
+                || ui.key_down(KeyCode::PageUp));
 
             let mut return_to_grid = false;
             if quit_pressed {
@@ -2860,8 +2861,8 @@ impl App {
                 // Leaving image view mid-drag: give the pointer back before
                 // the the grid click handling needs a visible cursor.
                 if self.pointer_captured {
-                    ui.enable_cursor();
-                    ui.set_mouse_position(self.grab_pos);
+                    ui.release_pointer();
+                    ui.place_pointer(self.grab_pos);
                     self.pending_restore = Some(self.grab_pos);
                     self.restore_tries = 0;
                     self.pointer_captured = false;
@@ -2930,21 +2931,21 @@ impl App {
 
             // Keyboard shortcuts. Capital W and capital E arrive as W/E plus
             // shift.
-            if ui.is_key_pressed(KeyCode::KeyW) {
+            if ui.key_pressed(KeyCode::KeyW) {
                 self.st.zoom = if shift {
                     ZoomMode::FitAll
                 } else {
                     ZoomMode::FitDown
                 };
                 self.st.target_pan = Vec2::ZERO;
-            } else if ui.is_key_pressed(KeyCode::KeyE) {
+            } else if ui.key_pressed(KeyCode::KeyE) {
                 self.st.zoom = if shift {
                     ZoomMode::FitHeight
                 } else {
                     ZoomMode::FitWidth
                 };
                 self.st.target_pan = Vec2::ZERO;
-            } else if ui.is_key_pressed(KeyCode::KeyT) || f_zoom {
+            } else if ui.key_pressed(KeyCode::KeyT) || f_zoom {
                 // t: two-state toggle, whole image visible (fit-all) against
                 // window completely covered (fill).
                 // This stays distinct for any image and window combination,
@@ -2967,7 +2968,7 @@ impl App {
                     && self.st.view_scale.is_some()
                 {
                     self.st.target_pan =
-                        aim_fill_pan(&self.st, ui.get_mouse_position(), win_w, win_h);
+                        aim_fill_pan(&self.st, ui.pointer(), win_w, win_h);
                 } else {
                     self.st.target_pan = Vec2::ZERO;
                 }
@@ -3003,15 +3004,15 @@ impl App {
                 // rate.
                 // The code reads input before begin_drawing borrows rl
                 // mutably.
-                let dt = ui.get_frame_time();
+                let dt = ui.frame_time();
                 // Ctrl + j/k zoom like `+`/`-` (Ctrl + Shift + j/k keeps
                 // the Shift speed).
                 // `j` and `k` also pan, so a held Ctrl turns them into zoom
                 // keys instead of pan keys.
                 let ctrl =
-                    ui.is_key_down(KeyCode::ControlLeft) || ui.is_key_down(KeyCode::ControlRight);
-                let ctrl_zoom_in = ctrl && ui.is_key_down(KeyCode::KeyJ);
-                let ctrl_zoom_out = ctrl && ui.is_key_down(KeyCode::KeyK);
+                    ui.key_down(KeyCode::ControlLeft) || ui.key_down(KeyCode::ControlRight);
+                let ctrl_zoom_in = ctrl && ui.key_down(KeyCode::KeyJ);
+                let ctrl_zoom_out = ctrl && ui.key_down(KeyCode::KeyK);
                 // Shift+J/K step a spread when the open surface names a
                 // spread column, so those two keys do not pan while the step
                 // can run.
@@ -3024,12 +3025,12 @@ impl App {
                         .as_ref()
                         .is_some_and(|s| s.spread_count() > 0);
                 let nav = NavKeys {
-                    left: ui.is_key_down(KeyCode::KeyH) || ui.is_key_down(KeyCode::ArrowLeft),
-                    right: ui.is_key_down(KeyCode::KeyL) || ui.is_key_down(KeyCode::ArrowRight),
-                    up: (ui.is_key_down(KeyCode::KeyK) && !ctrl_zoom_out && !spread_keys)
-                        || ui.is_key_down(KeyCode::ArrowUp),
-                    down: (ui.is_key_down(KeyCode::KeyJ) && !ctrl_zoom_in && !spread_keys)
-                        || ui.is_key_down(KeyCode::ArrowDown),
+                    left: ui.key_down(KeyCode::KeyH) || ui.key_down(KeyCode::ArrowLeft),
+                    right: ui.key_down(KeyCode::KeyL) || ui.key_down(KeyCode::ArrowRight),
+                    up: (ui.key_down(KeyCode::KeyK) && !ctrl_zoom_out && !spread_keys)
+                        || ui.key_down(KeyCode::ArrowUp),
+                    down: (ui.key_down(KeyCode::KeyJ) && !ctrl_zoom_in && !spread_keys)
+                        || ui.key_down(KeyCode::ArrowDown),
                     // US layouts put the zoom keys on the `=` and `-`
                     // keycodes (numpad included).
                     // Other layouts put `+`/`-` on another key, whose keycode
@@ -3038,20 +3039,20 @@ impl App {
                     // second key going down does not stop the zoom.
                     // Ctrl + j/k join them as a hold, so the ramp eases the
                     // same way.
-                    zoom_in: ui.is_key_down(KeyCode::Equal)
-                        || ui.is_key_down(KeyCode::NumpadAdd)
+                    zoom_in: ui.key_down(KeyCode::Equal)
+                        || ui.key_down(KeyCode::NumpadAdd)
                         || ctrl_zoom_in
                         || self
                             .zoom_keys
                             .zoom_in_key()
-                            .is_some_and(|k| ui.is_key_down(k)),
-                    zoom_out: ui.is_key_down(KeyCode::Minus)
-                        || ui.is_key_down(KeyCode::NumpadSubtract)
+                            .is_some_and(|k| ui.key_down(k)),
+                    zoom_out: ui.key_down(KeyCode::Minus)
+                        || ui.key_down(KeyCode::NumpadSubtract)
                         || ctrl_zoom_out
                         || self
                             .zoom_keys
                             .zoom_out_key()
-                            .is_some_and(|k| ui.is_key_down(k)),
+                            .is_some_and(|k| ui.key_down(k)),
                 };
                 // The pan cruise speed scales with the window, so the motion
                 // covers the same fraction of the view on any screen size.
@@ -3078,7 +3079,7 @@ impl App {
                 // The step comes from this frame's travel, so a held pointer
                 // holds the scale.
                 // The wheel below still zooms with no Shift.
-                let delta = ui.get_mouse_delta();
+                let delta = ui.travel();
                 let zoom_drag = self.f_capture && self.f_zoom_capture;
                 if zoom_drag {
                     // The grab edge seeds the anchor, and the drift carries it
@@ -3158,11 +3159,11 @@ impl App {
                 // the held keys build, and anchors the ease at the cursor:
                 // while the scale eases, the image point under the mouse
                 // stays put.
-                let wheel = ui.get_mouse_wheel_move();
+                let wheel = ui.wheel();
                 if wheel != 0.0 {
                     let factor = 1.25f32.powf(wheel);
                     self.st.zoom = ZoomMode::Free((target_scale * factor).clamp(0.01, 100.0));
-                    self.st.zoom_anchor = Some(ui.get_mouse_position());
+                    self.st.zoom_anchor = Some(ui.pointer());
                 }
                 // Left-drag pans: the image follows the cursor (grab-style).
                 // No easing while the cursor drives the pan.
@@ -3180,12 +3181,12 @@ impl App {
                 // the physical mouse travels.
                 // Mouse-up shows the pointer again at the position where the
                 // drag began.
-                let drag_pressed = ui.is_mouse_button_pressed(MouseButton::Left);
-                let drag_released = ui.is_mouse_button_released(MouseButton::Left);
+                let drag_pressed = ui.button_pressed(MouseButton::Left);
+                let drag_released = ui.button_released(MouseButton::Left);
                 if drag_pressed && !self.pointer_captured && !self.r_capture {
-                    self.grab_pos = ui.get_mouse_position();
+                    self.grab_pos = ui.pointer();
                     self.drag_virtual = self.grab_pos;
-                    ui.disable_cursor();
+                    ui.grab_pointer();
                     self.pointer_captured = true;
                     if self.debug {
                         eprintln!(
@@ -3206,12 +3207,12 @@ impl App {
                             self.grab_pos.y,
                             self.drag_virtual.x,
                             self.drag_virtual.y,
-                            ui.get_mouse_position().x,
-                            ui.get_mouse_position().y
+                            ui.pointer().x,
+                            ui.pointer().y
                         );
                     }
-                    ui.enable_cursor();
-                    ui.set_mouse_position(self.grab_pos);
+                    ui.release_pointer();
+                    ui.place_pointer(self.grab_pos);
                     self.pending_restore = Some(self.grab_pos);
                     self.restore_tries = 0;
                     self.pointer_captured = false;
@@ -3224,7 +3225,7 @@ impl App {
                 // is vertical, so the pan stays put.
                 let dragging = self.pointer_captured;
                 if dragging {
-                    let delta = ui.get_mouse_delta();
+                    let delta = ui.travel();
                     // The virtual cursor follows physical travel 1:1 (self.debug
                     // crosshair).
                     self.drag_virtual.x += delta.x;
@@ -3315,7 +3316,7 @@ impl App {
                         if self.debug {
                             eprintln!("vv: zoom drift anchor to ({ax:.0},{ay:.0})");
                         }
-                        ui.set_mouse_position(self.st.zoom_anchor.unwrap());
+                        ui.place_pointer(self.st.zoom_anchor.unwrap());
                     }
                 }
 
@@ -3400,7 +3401,7 @@ impl App {
                     && !self.pointer_captured
                     && let Some(frame) = frame
                 {
-                    let mouse = ui.get_mouse_position();
+                    let mouse = ui.pointer();
                     let drag = region_sel::press(
                         frame.to_image(mouse),
                         mouse,
@@ -3416,10 +3417,10 @@ impl App {
                         );
                     }
                 }
-                // `!is_key_down` also covers a press and release that land
+                // `!key_down` also covers a press and release that land
                 // inside one frame, like the `f` and `r` halves.
                 if let Some(drag) = self.region_drag
-                    && !ui.is_key_down(KeyCode::KeyV)
+                    && !ui.key_down(KeyCode::KeyV)
                 {
                     // The release reads the same rect the draw shows, so the
                     // committed region is the one on screen, and a tap commits
@@ -3428,7 +3429,7 @@ impl App {
                         self.st.frame(Vec2::new(win_w, win_h)),
                         None,
                         Some(drag),
-                        ui.get_mouse_position(),
+                        ui.pointer(),
                     );
                     self.region_drag = None;
                     if self.debug {
@@ -3471,14 +3472,14 @@ impl App {
                 self.st.frame(Vec2::new(win_w, win_h)),
                 self.st.selection,
                 self.region_drag,
-                ui.get_mouse_position(),
+                ui.pointer(),
             )
         } else {
             None
         };
 
         ui.begin(r);
-        Ui::clear_background(r, BACKGROUND);
+        Ui::clear(r, BACKGROUND);
 
         if self.st.mode == Mode::Grid {
             // VV_BLUR_BG gimmick: the blurred background follows the
