@@ -50,7 +50,7 @@ use versatile_viewer::{
     blurbg::{self, BlurBg},
     book::BookSurface,
     dim::{PreviewPx, RampTime, Rect, WinH, WinW},
-    draw::{Color, Quad, Vec2},
+    draw::{Color, Quad, Turn, Vec2},
     gpu::{FrameError, Gpu, GpuSettings, Present},
     grid::{DecodeFailure, EntrySource, Grid, GridAction, LoadPlan},
     input::Input,
@@ -59,7 +59,7 @@ use versatile_viewer::{
     render::Renderer,
     rotate,
     surface::{Size, Surface, View, open_book_surface, open_surface},
-    texture::{Texture, Uploader},
+    texture::{Filter, Texture, Uploader},
     tween::Ramp,
     zoomkeys::TypedKeys,
 };
@@ -1030,6 +1030,7 @@ fn draw_turned(
     scale: f32,
     center: Vec2,
     angle: f32,
+    filter: Filter,
 ) {
     let src = Rect::sized(texture.width() as f32, texture.height() as f32);
     let (dw, dh) = (img.w * scale, img.h * scale);
@@ -1038,9 +1039,9 @@ fn draw_turned(
         texture,
         src,
         dest,
-        dest.center_origin(),
-        rotate::normalize_deg(angle),
+        Turn::new(dest.center_origin(), rotate::normalize_deg(angle)),
         Color::WHITE,
+        filter,
     );
 }
 
@@ -1104,6 +1105,19 @@ impl Column {
     }
 }
 
+/// The sampler filter of the image view.
+///
+/// The `a` key picks it, and it reaches the whole-image texture and the region
+/// patches only: a thumbnail is always linear, because both users draw it far
+/// larger than the texture and nearest aliases badly there.
+const fn view_filter(pixelated: bool) -> Filter {
+    if pixelated {
+        Filter::Nearest
+    } else {
+        Filter::Linear
+    }
+}
+
 /// The snapped destination of a region patch, or `None` when the patch needs
 /// the free draw.
 ///
@@ -1150,7 +1164,7 @@ fn patch_dest(center: Vec2, dw: f32, dh: f32, tw: f32, th: f32, angle: f32) -> O
 /// the paint (see [`patch_dest`]).
 /// A turned patch keeps the free draw of [`draw_turned`], so it holds the
 /// transform of the whole image.
-fn draw_patch(r: &mut Renderer, patch: &CropState, frame: &region::Frame) {
+fn draw_patch(r: &mut Renderer, patch: &CropState, frame: &region::Frame, filter: Filter) {
     let rect = patch.patch.rect;
     let (scale, angle) = (frame.scale, frame.angle);
     let middle = Vec2::new(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
@@ -1162,9 +1176,9 @@ fn draw_patch(r: &mut Renderer, patch: &CropState, frame: &region::Frame) {
             &patch.texture,
             Rect::sized(tw, th),
             dest,
-            Vec2::ZERO,
-            0.0,
+            Turn::NONE,
             Color::WHITE,
+            filter,
         ),
         None => draw_turned(
             r,
@@ -1176,6 +1190,7 @@ fn draw_patch(r: &mut Renderer, patch: &CropState, frame: &region::Frame) {
             scale,
             center,
             angle,
+            filter,
         ),
     }
 }
@@ -2037,6 +2052,9 @@ impl App {
         self.renderer = Some(r);
         self.gpu = Some(gpu);
         self.input = input;
+        // The frame edges belong to one frame: the held state and the pointer
+        // stay, the pressed, released, typed and travel sets start empty.
+        self.input.begin_frame();
         result
     }
 }
@@ -3489,6 +3507,7 @@ impl App {
                         self.st.view_scale.unwrap(),
                         center,
                         self.st.angle,
+                        view_filter(self.st.pixelated),
                     );
                 } else if self.st.img.w > 0.0
                     && let Some(g) = self.grid.as_ref()
@@ -3513,7 +3532,15 @@ impl App {
                         .unwrap_or((win_w / self.st.img.w).min(win_h / self.st.img.h));
                     let center =
                         Vec2::new(win_w / 2.0 + self.st.pan.x, win_h / 2.0 + self.st.pan.y);
-                    draw_turned(r, tex, self.st.img, scale, center, self.st.angle);
+                    draw_turned(
+                        r,
+                        tex,
+                        self.st.img,
+                        scale,
+                        center,
+                        self.st.angle,
+                        Filter::Linear,
+                    );
                 }
             }
             // The region patches draw turned and scaled like the image, so
@@ -3525,7 +3552,7 @@ impl App {
             // window pixels (see `draw_patch`), so its text stays sharp.
             if let Some(frame) = self.st.frame(Vec2::new(win_w, win_h)) {
                 for patch in self.st.crop.iter().chain(self.st.prefetch.held()) {
-                    draw_patch(r, patch, &frame);
+                    draw_patch(r, patch, &frame, view_filter(self.st.pixelated));
                 }
             }
             // A region selection dims the picture outside it and marks the

@@ -19,9 +19,9 @@ use crate::{
     DecodedImage,
     dim::{LongSide, Rect, WinH, WinW},
     downscale_rgba_ref,
-    draw::{Color, Vec2},
+    draw::{Color, Turn},
     render::Renderer,
-    texture::{Texture, Uploader},
+    texture::{Filter, Texture, Uploader},
 };
 
 /// Long side of the blurred background texture.
@@ -269,9 +269,9 @@ impl BlurBg {
                 old,
                 Rect::sized(old.width() as f32, old.height() as f32),
                 cover_rect(old.width(), old.height(), win_w, win_h),
-                Vec2::ZERO,
-                0.0,
+                Turn::NONE,
                 Color::new(rgb, rgb, rgb, 255),
+                Filter::Linear,
             );
         }
         // ...then the new one, fading in (from the window background when
@@ -281,9 +281,9 @@ impl BlurBg {
             tex,
             Rect::sized(tex.width() as f32, tex.height() as f32),
             cover_rect(tex.width(), tex.height(), win_w, win_h),
-            Vec2::ZERO,
-            0.0,
+            Turn::NONE,
             Color::new(rgb, rgb, rgb, (t * 255.0) as u8),
+            Filter::Linear,
         );
     }
 }

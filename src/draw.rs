@@ -260,6 +260,32 @@ impl Color {
     }
 }
 
+/// The pivot of a turned draw: a point of the destination and an angle.
+///
+/// Raylib's `DrawTexturePro` took the two as loose arguments, and a caller that
+/// swapped them drew a turned rect around the origin of the window.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Turn {
+    /// The pivot, in window pixels.
+    pub origin: Vec2,
+    /// The clockwise angle, in degrees.
+    pub angle: f32,
+}
+
+impl Turn {
+    /// An unturned draw: no angle, and the origin names nothing.
+    pub const NONE: Self = Self {
+        origin: Vec2::ZERO,
+        angle: 0.0,
+    };
+
+    /// A turn about `origin`.
+    #[must_use]
+    pub const fn new(origin: Vec2, angle: f32) -> Self {
+        Self { origin, angle }
+    }
+}
+
 /// Four corners of one quad, in perimeter order.
 ///
 /// The renderer splits a quad into the two triangles `p0 p1 p2` and

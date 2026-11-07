@@ -39,8 +39,9 @@
 //! image.
 //! [`mcp`] serves the Model Context Protocol on stdio when the binary starts
 //! with `--mcp`.
-//! [`keyrepeat`] steps a held key for discrete moves, and [`tween`] ramps a
-//! held key for continuous motion.
+//! [`keyrepeat`] repeats the held side-button navigation, because the window
+//! system reports the keyboard repeat itself, and [`tween`] ramps a held key
+//! for continuous motion.
 //! [`region`] holds the visible-region raster of the image view: a vector
 //! source repaints the part of the window it shows, at the scale it shows it,
 //! so a deep zoom never stretches the base raster.
@@ -51,6 +52,12 @@
 //! cache fills the grid without a decode, across the exit of the viewer.
 //! [`placeholder`] holds the few-byte `ThumbHash` of a thumb, which the cache
 //! header carries so a warm launch paints every cell before any decode.
+//! [`draw`] holds the point, the color and the quad that the view code writes,
+//! so no GPU handle reaches it.
+//! [`render`] and [`texture`] draw those quads through one wgpu pipeline, and
+//! [`gpu`] owns the device and the swapchain behind them.
+//! [`input`] holds the held keys, the frame edges and the pointer of one
+//! frame.
 //! The binary in `main.rs` wires these pieces into the window and event loop.
 //! The unit tests and doctests here keep the pure helpers honest.
 

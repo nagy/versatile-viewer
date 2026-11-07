@@ -37,7 +37,7 @@ use bytemuck::{Pod, Zeroable};
 
 use crate::{
     dim::Rect,
-    draw::{Color, Quad, Vec2},
+    draw::{Color, Quad, Turn, Vec2},
     gpu::{FrameError, Gpu},
     texture::{Filter, Texture, TextureError, Uploader},
 };
@@ -403,18 +403,18 @@ impl Renderer {
         texture: &Texture,
         src: Rect,
         dest: Rect,
-        origin: Vec2,
-        angle: f32,
+        turn: Turn,
         tint: Color,
+        filter: Filter,
     ) {
         let rect = Rect::new(
-            dest.x - origin.x,
-            dest.y - origin.y,
+            dest.x - turn.origin.x,
+            dest.y - turn.origin.y,
             dest.width,
             dest.height,
         );
-        let quad = Quad::turned(rect, Vec2::new(dest.x, dest.y), angle);
-        self.texture(texture, src, quad, tint, Filter::Linear);
+        let quad = Quad::turned(rect, Vec2::new(dest.x, dest.y), turn.angle);
+        self.texture(texture, src, quad, tint, filter);
     }
 
     /// Draw a texture over a quad with one filter.

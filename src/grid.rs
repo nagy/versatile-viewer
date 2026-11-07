@@ -69,10 +69,10 @@ use crate::{
     DIM_TINT, DecodedImage,
     blurbg::{self},
     dim::{ImgH, ImgW, LongSide, Rect, WinH, WinW},
-    draw::{Color, Vec2},
+    draw::{Color, Turn, Vec2},
     render::Renderer,
     surface::{Surface, SurfaceError, View, open_book_surface, open_surface},
-    texture::{Ready, Texture, Uploader},
+    texture::{Filter, Ready, Texture, Uploader},
     thumbcache::Cache,
 };
 
@@ -1450,7 +1450,7 @@ impl Grid {
                 // The square cell shows its center crop (draw-time crop, so a
                 // resize never needs a re-decode).
                 let src = Rect::sized(tex.width() as f32, tex.height() as f32).center_square();
-                r.texture_pro(tex, src, thumb, Vec2::ZERO, 0.0, tint);
+                r.texture_pro(tex, src, thumb, Turn::NONE, tint, Filter::Linear);
             } else if e.cell.is_failed() {
                 // Decode failed: dim red placeholder with an error mark.
                 // The file stays visible instead of vanishing silently.
@@ -1461,7 +1461,7 @@ impl Grid {
                 // lands.
                 // It holds the whole image, so the draw crops it like a thumb.
                 let src = Rect::sized(tex.width() as f32, tex.height() as f32).center_square();
-                r.texture_pro(tex, src, thumb, Vec2::ZERO, 0.0, tint);
+                r.texture_pro(tex, src, thumb, Turn::NONE, tint, Filter::Linear);
             } else {
                 // Still decoding: placeholder square.
                 r.fill_rect(thumb, Color::new(28, 28, 28, 255).tint(tint));
