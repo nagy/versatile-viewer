@@ -63,14 +63,16 @@ use std::{
 };
 
 use derive_more::{Display, Error, From};
-use raylib::prelude::*;
+use winit::{event::MouseButton, keyboard::KeyCode};
 
 use crate::{
-    DIM_TINT, DecodedImage, UploadError,
+    DIM_TINT, DecodedImage,
     blurbg::{self},
     dim::{ImgH, ImgW, LongSide, Rect, WinH, WinW},
     draw::{Color, Vec2},
+    render::Renderer,
     surface::{Surface, SurfaceError, View, open_book_surface, open_surface},
+    texture::{Ready, Texture, Uploader},
     thumbcache::Cache,
 };
 
@@ -138,10 +140,6 @@ impl EntrySource {
 
 const MARGIN: f32 = 8.0;
 const GAP: f32 = 8.0;
-/// The maximum number of placeholder textures uploaded per frame.
-/// The uploads are cheap (a 64 px texture each), but a directory of thousands
-/// of files must not stall one frame with all of them.
-const PLACEHOLDER_UPLOADS_PER_FRAME: usize = 16;
 /// Grid zoom step for +/- (the same 25% steps as the image-view free zoom).
 const GRID_ZOOM_STEP: f32 = 1.25;
 /// Lower bound for the thumbnail side when the grid zooms out.
@@ -191,7 +189,9 @@ struct PlaceholderResult {
     /// The source dimensions from the cache header, zero on a miss.
     image: (ImgW, ImgH),
     /// The rendered placeholder, or None on a miss or a render failure.
-    rgba: Option<DecodedImage>,
+    /// The placeholder pass runs on a worker, so it uploads its own 32 px
+    /// texture when the grid holds a device.
+    ready: Option<Ready>,
 }
 
 /// Successful decode payload: the thumbnail and the full-resolution image.
@@ -207,20 +207,22 @@ struct PlaceholderResult {
 struct DecodeOk {
     /// The whole image with the aspect preserved, long side
     /// [`THUMB_LONG_SIDE`].
-    thumb: DecodedImage,
+    thumb: Ready,
     /// The source dimensions, as [`crate::surface::Surface::bounds`] reports
     /// them (capped at [`crate::MAX_TEXTURE_SIDE`]).
     /// The entry keeps them as the image size, not the thumb size, so the
     /// image view fits and zooms the picture, not its thumbnail.
     image: (ImgW, ImgH),
     /// The tiny blurred copy for the `VV_BLUR_BG` gimmick (None when off).
+    /// It stays pixels: it measures `VV_BLUR_PX` (128 by default) on its long
+    /// side, so the viewer uploads it in one cheap call when it needs it.
     blur: Option<DecodedImage>,
     /// The untouched full-resolution image.
     /// The cache hit path sets it to None, because the entry needs only the
     /// thumbnail.
     /// A multi-plane source sets it to None too, because its cell holds page 0
     /// and the image view renders the spread itself.
-    full: Option<DecodedImage>,
+    full: Option<Ready>,
     /// The source holds more than one plane, so no full-res texture helps this
     /// cell (see [`GridEntry::no_full`]).
     no_full: bool,
@@ -361,7 +363,7 @@ pub enum DecodeFailure {
     /// The background decode failed (bad bytes, unsupported content, I/O).
     #[display("decode failed")]
     Decode,
-    /// The GL texture upload failed (no context, driver refusal).
+    /// The texture upload failed (a buffer that does not match its size).
     #[display("texture upload failed")]
     TextureUpload,
 }
@@ -378,10 +380,10 @@ pub enum Cell {
         /// The uploaded [`Placeholder`], so a warm launch never shows a plain
         /// grey cell.
         /// The decoded thumb drops it.
-        placeholder: Option<Texture2D>,
+        placeholder: Option<Texture>,
     },
     /// The decoded thumbnail.
-    Thumb(Texture2D),
+    Thumb(Texture),
     /// The decode or the texture upload failed.
     /// The cell stays visible as a dimmed error square instead of vanishing,
     /// so the grid count never lies.
@@ -404,7 +406,7 @@ impl Cell {
 
     /// The decoded thumbnail, and never a placeholder.
     #[must_use]
-    pub fn thumb(&self) -> Option<&Texture2D> {
+    pub fn thumb(&self) -> Option<&Texture> {
         match self {
             Self::Thumb(tex) => Some(tex),
             Self::Pending { .. } | Self::Failed(_) => None,
@@ -413,7 +415,7 @@ impl Cell {
 
     /// The placeholder of a cell that has not decoded yet.
     #[must_use]
-    pub fn placeholder(&self) -> Option<&Texture2D> {
+    pub fn placeholder(&self) -> Option<&Texture> {
         match self {
             Self::Pending { placeholder } => placeholder.as_ref(),
             Self::Thumb(_) | Self::Failed(_) => None,
@@ -422,7 +424,7 @@ impl Cell {
 
     /// The texture to draw now: the thumb, or else its placeholder.
     #[must_use]
-    pub fn texture(&self) -> Option<&Texture2D> {
+    pub fn texture(&self) -> Option<&Texture> {
         self.thumb().or_else(|| self.placeholder())
     }
 
@@ -469,7 +471,7 @@ pub struct GridEntry {
     /// It drops as soon as the entry leaves that set.
     /// The grid view keeps none, so a grid-only session uploads no large
     /// texture.
-    pub full: Option<Texture2D>,
+    pub full: Option<Texture>,
     /// A unique, stable id used to match async decode results.
     pub id: u64,
     /// A decode job for this entry is queued or in flight.
@@ -535,11 +537,15 @@ pub struct Grid {
     result_tx: Sender<DecodeResult>,
     result_rx: Receiver<DecodeResult>,
     /// The placeholder pass of a launch (see [`PlaceholderResult`]).
+    /// The sender stays here so [`Grid::start`] can spawn the pass once the
+    /// GPU exists, which is after the window opens.
+    placeholder_tx: Sender<PlaceholderResult>,
     placeholder_rx: Receiver<PlaceholderResult>,
+    /// The device handle that lets a decode worker upload its own texture.
+    /// None until the window and the GPU exist, and None in every test, which
+    /// then receives pixels.
+    uploader: Option<Uploader>,
     inflight: usize,
-    /// Auto-repeat state for the four direction keys (h/j/k/l + arrows),
-    /// indexed [left, right, up, down], from the xset r rate values.
-    rep_dir: [crate::keyrepeat::RepeatState; 4],
     /// Thumbnail size zoom (1.0 = exact-fill default, and +/- steps it).
     zoom: f32,
     /// The vertical scroll offset, used only when zoomed in past the exact
@@ -567,7 +573,11 @@ pub struct Grid {
 }
 
 /// Run one decode job on a worker: the cache first, the file on a miss.
-fn run_job(job: &Job, cache: &Cache) -> Result<DecodeOk, SurfaceError> {
+fn run_job(
+    job: &Job,
+    cache: &Cache,
+    uploader: Option<&Uploader>,
+) -> Result<DecodeOk, SurfaceError> {
     // A miss is normal and stays silent, because the first launch of a
     // directory misses once per file.
     // A job that needs the full image skips the cache: the file decode
@@ -582,7 +592,7 @@ fn run_job(job: &Job, cache: &Cache) -> Result<DecodeOk, SurfaceError> {
         // A resample here would copy the buffer for nothing.
         let blur = job.blur.map(|config| config.blur(&hit.thumb));
         return Ok(DecodeOk {
-            thumb: hit.thumb,
+            thumb: ready(hit.thumb, uploader),
             image: hit.image,
             blur,
             full: None,
@@ -612,7 +622,7 @@ fn run_job(job: &Job, cache: &Cache) -> Result<DecodeOk, SurfaceError> {
         let blur = job.blur.map(|config| config.blur(&thumb));
         store_thumb(cache, path, &thumb, image.0, image.1);
         return Ok(DecodeOk {
-            thumb,
+            thumb: ready(thumb, uploader),
             image,
             blur,
             full: None,
@@ -628,9 +638,9 @@ fn run_job(job: &Job, cache: &Cache) -> Result<DecodeOk, SurfaceError> {
     store_thumb(cache, path, &thumb, image.0, image.1);
     // The keep-set refill is the only job that carries the full image to the
     // main thread; otherwise the large buffer drops here.
-    let full = job.want_full.then_some(full);
+    let full = job.want_full.then(|| ready(full, uploader));
     Ok(DecodeOk {
-        thumb,
+        thumb: ready(thumb, uploader),
         image,
         blur,
         full,
@@ -672,20 +682,19 @@ fn run_placeholder(cache: &Cache, path: &Path) -> ((ImgW, ImgH), Option<DecodedI
     )
 }
 
-/// Upload one thumbnail texture and filter it bilinear.
-/// A thumb measures [`THUMB_LONG_SIDE`] at most, and both users draw it far
-/// larger than that: a grid cell fills the cell, and the image view stretches
-/// it over the image rect while the full-res decode catches up.
-/// Nearest would show stair steps in both, so a thumb never takes the view
-/// filter of `a`, which picks the filter of the whole-image texture only.
-fn upload_thumb(
-    rl: &mut RaylibHandle,
-    thread: &RaylibThread,
-    rgba: &DecodedImage,
-) -> Result<Texture2D, UploadError> {
-    let tex = crate::upload_rgba(rl, thread, rgba.as_rgba(), rgba.width(), rgba.height())?;
-    tex.set_texture_filter(thread, TextureFilter::TEXTURE_FILTER_BILINEAR);
-    Ok(tex)
+/// Upload a frame on the worker that produced it, or keep its pixels when no
+/// device exists (a test).
+fn ready(image: DecodedImage, uploader: Option<&Uploader>) -> Ready {
+    match uploader {
+        Some(uploader) => match uploader.image(&image) {
+            Ok(texture) => Ready::Texture(texture),
+            Err(err) => {
+                eprintln!("vv: upload: {err}");
+                Ready::Pixels(image)
+            }
+        },
+        None => Ready::Pixels(image),
+    }
 }
 
 impl Grid {
@@ -742,27 +751,38 @@ impl Grid {
             })
             .collect();
 
-        // The placeholder pass: one cheap worker per entry, so the grid paints
-        // the window before the first decode lands.
-        // A job reads one header of about 200 bytes and renders 32 px, so the
-        // pass needs no inflight cap.
-        // Without a cache directory there is no header to read, so the pass
-        // stays off.
         let (ph_tx, placeholder_rx) = channel::<PlaceholderResult>();
-        if cache.dir().is_some() {
-            for e in &entries {
+        Self::from_parts(entries, cache, res_tx, res_rx, ph_tx, placeholder_rx)
+    }
+
+    /// Start the background passes that need a device.
+    ///
+    /// The grid lists a directory before the window opens, because the launch
+    /// title carries the count, and the GPU exists only after the window maps.
+    /// This call therefore starts the placeholder pass, and every decode that
+    /// follows uploads its own texture on its worker.
+    ///
+    /// The placeholder pass runs one cheap worker per entry, so the grid paints
+    /// the window before the first decode lands.
+    /// A job reads one header of about 200 bytes and renders 32 px, so the pass
+    /// needs no inflight cap.
+    /// Without a cache directory there is no header to read, so the pass stays
+    /// off.
+    pub fn start(&mut self, uploader: Uploader) {
+        if self.cache.dir().is_some() {
+            for e in &self.entries {
                 let (id, path) = (e.id, e.source.path().to_path_buf());
-                let cache = Arc::clone(&cache);
-                let tx = ph_tx.clone();
+                let cache = Arc::clone(&self.cache);
+                let tx = self.placeholder_tx.clone();
+                let uploader = uploader.clone();
                 rayon::spawn(move || {
                     let (image, rgba) = run_placeholder(&cache, &path);
-                    let _ = tx.send(PlaceholderResult { id, image, rgba });
+                    let ready = rgba.map(|rgba| ready(rgba, Some(&uploader)));
+                    let _ = tx.send(PlaceholderResult { id, image, ready });
                 });
             }
         }
-        drop(ph_tx);
-
-        Self::from_parts(entries, cache, res_tx, res_rx, placeholder_rx)
+        self.uploader = Some(uploader);
     }
 
     /// Assemble a grid from its entries and its worker channels.
@@ -771,6 +791,7 @@ impl Grid {
         cache: Arc<Cache>,
         result_tx: Sender<DecodeResult>,
         result_rx: Receiver<DecodeResult>,
+        placeholder_tx: Sender<PlaceholderResult>,
         placeholder_rx: Receiver<PlaceholderResult>,
     ) -> Grid {
         Grid {
@@ -780,10 +801,11 @@ impl Grid {
             drag: None,
             result_tx,
             result_rx,
+            placeholder_tx,
             placeholder_rx,
+            uploader: None,
             inflight: 0,
             layout_cache: RefCell::new(None),
-            rep_dir: Default::default(),
             zoom: 1.0,
             scroll: 0.0,
             blur: blurbg::Config::from_env(),
@@ -795,7 +817,7 @@ impl Grid {
     /// thread, and hand out new jobs for one [`LoadPlan`].
     /// The function runs every frame and never blocks.
     /// It skips entries whose texture the image view holds now.
-    pub fn load_pending(&mut self, rl: &mut RaylibHandle, thread: &RaylibThread, plan: &LoadPlan) {
+    pub fn load_pending(&mut self, plan: &LoadPlan) {
         // Ids that hold a full-resolution texture: the entry the
         // scan starts at (the open image) plus the prefetch priorities (its
         // neighbors).
@@ -814,23 +836,19 @@ impl Grid {
             HashSet::new()
         };
 
-        self.drain_placeholders(rl, thread);
-        self.drain_results(rl, thread, &keep);
+        self.drain_placeholders();
+        self.drain_results(&keep);
         self.dispatch(plan, &keep);
     }
 
-    /// Apply finished placeholder reads, bounded per frame.
-    /// The upload needs the main thread, but a whole directory of placeholders
-    /// must not land in one frame, so the budget
-    /// [`PLACEHOLDER_UPLOADS_PER_FRAME`] spreads them.
-    /// An entry that already holds a thumb or a failure skips the upload, and
+    /// Apply finished placeholder reads.
+    /// The worker already uploaded its texture, so a whole directory of
+    /// placeholders costs one channel drain and no pixel copy on this thread.
+    /// An entry that already holds a thumb or a failure skips the texture, and
     /// the source dimensions still land, because the image view fits the
     /// picture before any decode.
-    fn drain_placeholders(&mut self, rl: &mut RaylibHandle, thread: &RaylibThread) {
-        for _ in 0..PLACEHOLDER_UPLOADS_PER_FRAME {
-            let Ok(res) = self.placeholder_rx.try_recv() else {
-                break;
-            };
+    fn drain_placeholders(&mut self) {
+        while let Ok(res) = self.placeholder_rx.try_recv() {
             let Some(i) = self.index_of(res.id) else {
                 continue; // the entry left meanwhile, so the result is moot
             };
@@ -841,35 +859,24 @@ impl Grid {
                 e.width = res.image.0;
                 e.height = res.image.1;
             }
-            let Some(rgba) = res.rgba else {
+            let Some(ready) = res.ready else {
                 continue;
             };
             if !e.cell.is_cold() {
                 continue;
             }
-            match upload_thumb(rl, thread, &rgba) {
-                Ok(tex) => {
-                    e.cell = Cell::Pending {
-                        placeholder: Some(tex),
-                    }
-                }
-                Err(err) => eprintln!("vv: {}: {err:#}", e.source.label()),
-            }
+            e.cell = Cell::Pending {
+                placeholder: ready.into_texture(),
+            };
         }
     }
 
-    /// Upload the thumb of a finished job into entry `i`.
-    /// When that entry stays in the keep set and the job carried a
-    /// full-resolution image, the full-res texture uploads too, so opening it
-    /// is instant.
-    fn land_thumb(
-        &mut self,
-        i: usize,
-        ok: DecodeOk,
-        rl: &mut RaylibHandle,
-        thread: &RaylibThread,
-        keep: &HashSet<u64>,
-    ) {
+    /// Land the decode of entry `i`: its thumb, its dimensions, its blur copy
+    /// and, for a keep-set entry, its full-resolution texture.
+    ///
+    /// The worker already uploaded both textures, so this call only moves
+    /// handles: a cache hit and a fresh decode cost the same here.
+    fn land_thumb(&mut self, i: usize, ok: DecodeOk, keep: &HashSet<u64>) {
         let DecodeOk {
             thumb,
             image,
@@ -877,45 +884,25 @@ impl Grid {
             full,
             no_full,
         } = ok;
-        match upload_thumb(rl, thread, &thumb) {
-            Ok(tex) => {
-                let e = &mut self.entries[i];
-                // The decoded thumb replaces the placeholder, so its texture
-                // drops now.
-                e.cell = Cell::Thumb(tex);
-                e.width = image.0;
-                e.height = image.1;
-                e.blur = blur;
-                e.queued = false;
-                e.no_full |= no_full;
-                if keep.contains(&e.id)
-                    && let Some(full) = full
-                {
-                    match crate::upload_rgba(
-                        rl,
-                        thread,
-                        full.as_rgba(),
-                        full.width(),
-                        full.height(),
-                    ) {
-                        Ok(ft) => e.full = Some(ft),
-                        Err(err) => {
-                            // Non-fatal: the thumb still shows.
-                            // Opening falls back to streaming.
-                            eprintln!(
-                                "vv: {}: {err:#} (full-res texture skipped)",
-                                e.source.label()
-                            );
-                        }
-                    }
-                }
-            }
-            Err(err) => {
-                eprintln!("vv: {}: {err:#}", self.entries[i].source.label());
-                let e = &mut self.entries[i];
-                e.queued = false;
-                e.cell = Cell::Failed(DecodeFailure::TextureUpload);
-            }
+        let texture = thumb.into_texture();
+        let e = &mut self.entries[i];
+        if let Some(tex) = texture {
+            // The decoded thumb replaces the placeholder, so its texture drops
+            // now.
+            e.cell = Cell::Thumb(tex);
+        } else {
+            // No device (a test): the decode still carries its dimensions.
+            e.cell = Cell::Failed(DecodeFailure::TextureUpload);
+        }
+        e.width = image.0;
+        e.height = image.1;
+        e.blur = blur;
+        e.queued = false;
+        e.no_full |= no_full;
+        if keep.contains(&e.id)
+            && let Some(full) = full
+        {
+            e.full = full.into_texture();
         }
     }
 
@@ -923,8 +910,9 @@ impl Grid {
     /// A failed decode marks its entry as failed (the cell stays visible,
     /// dimmed, with an error mark) instead of deleting it, so the grid count
     /// never lies.
-    /// Textures upload here because that needs the main thread.
-    fn drain_results(&mut self, rl: &mut RaylibHandle, thread: &RaylibThread, keep: &HashSet<u64>) {
+    /// Textures arrive already uploaded, because the decode worker holds the
+    /// device.
+    fn drain_results(&mut self, keep: &HashSet<u64>) {
         while let Ok(res) = self.result_rx.try_recv() {
             self.inflight -= 1;
             let Some(i) = self.entries.iter().position(|e| e.id == res.id) else {
@@ -932,7 +920,7 @@ impl Grid {
             };
             match res.res {
                 Ok(ok) if self.entries[i].cell.thumb().is_none() => {
-                    self.land_thumb(i, ok, rl, thread, keep);
+                    self.land_thumb(i, ok, keep);
                 }
                 Ok(DecodeOk {
                     image,
@@ -955,19 +943,7 @@ impl Grid {
                         && let Some(e) = self.entries.get_mut(i)
                         && e.full.is_none()
                     {
-                        match crate::upload_rgba(
-                            rl,
-                            thread,
-                            full.as_rgba(),
-                            full.width(),
-                            full.height(),
-                        ) {
-                            Ok(ft) => e.full = Some(ft),
-                            Err(err) => {
-                                eprintln!("vv: {}: {err:#}", e.source.label());
-                                e.cell = Cell::Failed(DecodeFailure::TextureUpload);
-                            }
-                        }
+                        e.full = full.into_texture();
                     }
                 }
                 Ok(DecodeOk {
@@ -1062,9 +1038,10 @@ impl Grid {
             };
             let tx = self.result_tx.clone();
             let cache = Arc::clone(&self.cache);
+            let uploader = self.uploader.clone();
             rayon::spawn(move || {
                 let id = job.id;
-                let res = run_job(&job, &cache);
+                let res = run_job(&job, &cache, uploader.as_ref());
                 // Receiver gone (grid dropped): the code discards the
                 // result and the job simply ends.
                 let _ = tx.send(DecodeResult { id, res });
@@ -1182,7 +1159,7 @@ impl Grid {
     #[allow(clippy::too_many_lines)]
     pub fn handle_input(
         &mut self,
-        rl: &mut RaylibHandle,
+        input: &crate::input::Input,
         win: (WinW, WinH),
         step: u32,
     ) -> Option<GridAction> {
@@ -1190,15 +1167,11 @@ impl Grid {
         if self.entries.is_empty() {
             return None;
         }
-        // Drain the raw key queue instead of is_key_pressed().
-        // A press whose release lands within the same frame is invisible to
-        // is_key_pressed (raylib snapshots the current and previous key
-        // state once per frame, so a press+release pair between two polls
-        // nets out to 0->0).
-        // This case is easy to hit here: frames stall on full-res texture
-        // uploads, and a crisp Enter tap fits inside one.
-        // GetKeyPressed() and GetCharPressed() queue every press event
-        // during the poll, so nothing is lost.
+        // Read the frame's edge set, not a polled held state.
+        // A press whose release lands within the same frame is invisible to a
+        // held-state poll (0 -> 0 nets out), and a crisp Enter tap fits inside
+        // one stalled frame.
+        // The input layer records every event, so nothing is lost.
         let mut enter = false;
         let mut quit = false;
         let mut left = false;
@@ -1213,21 +1186,21 @@ impl Grid {
         let mut escape = false;
         let mut start_visual: Option<VisualMode> = None;
         let mut swap_ends = false;
-        while let Some(k) = rl.get_key_pressed() {
+        for k in input.pressed_keys() {
             match k {
-                KeyboardKey::KEY_ENTER | KeyboardKey::KEY_KP_ENTER => enter = true,
-                KeyboardKey::KEY_Q => quit = true,
-                KeyboardKey::KEY_ESCAPE => escape = true,
-                KeyboardKey::KEY_V => {
+                KeyCode::Enter | KeyCode::NumpadEnter => enter = true,
+                KeyCode::KeyQ => quit = true,
+                KeyCode::Escape => escape = true,
+                KeyCode::KeyV => {
                     // Vim: `v` charwise, `V` linewise, `Ctrl+v` blockwise.
                     // The same key again ends the visual selection, and a
                     // different key switches its mode in place.
-                    let mode = if rl.is_key_down(KeyboardKey::KEY_LEFT_CONTROL)
-                        || rl.is_key_down(KeyboardKey::KEY_RIGHT_CONTROL)
+                    let mode = if input.is_key_down(KeyCode::ControlLeft)
+                        || input.is_key_down(KeyCode::ControlRight)
                     {
                         VisualMode::Block
-                    } else if rl.is_key_down(KeyboardKey::KEY_LEFT_SHIFT)
-                        || rl.is_key_down(KeyboardKey::KEY_RIGHT_SHIFT)
+                    } else if input.is_key_down(KeyCode::ShiftLeft)
+                        || input.is_key_down(KeyCode::ShiftRight)
                     {
                         VisualMode::Line
                     } else {
@@ -1235,23 +1208,35 @@ impl Grid {
                     };
                     start_visual = Some(mode);
                 }
-                KeyboardKey::KEY_O => swap_ends = true,
-                KeyboardKey::KEY_F => open_at_cursor = true,
-                KeyboardKey::KEY_H | KeyboardKey::KEY_LEFT => left = true,
-                KeyboardKey::KEY_L | KeyboardKey::KEY_RIGHT => right = true,
-                KeyboardKey::KEY_K | KeyboardKey::KEY_UP => up = true,
-                KeyboardKey::KEY_J | KeyboardKey::KEY_DOWN => down = true,
-                KeyboardKey::KEY_G => {
-                    if rl.is_key_down(KeyboardKey::KEY_LEFT_SHIFT)
-                        || rl.is_key_down(KeyboardKey::KEY_RIGHT_SHIFT)
+                KeyCode::KeyO => swap_ends = true,
+                KeyCode::KeyF => open_at_cursor = true,
+                KeyCode::KeyH | KeyCode::ArrowLeft => left = true,
+                KeyCode::KeyL | KeyCode::ArrowRight => right = true,
+                KeyCode::KeyK | KeyCode::ArrowUp => up = true,
+                KeyCode::KeyJ | KeyCode::ArrowDown => down = true,
+                KeyCode::KeyG => {
+                    if input.is_key_down(KeyCode::ShiftLeft)
+                        || input.is_key_down(KeyCode::ShiftRight)
                     {
                         jump_last = true;
                     } else {
                         jump_first = true;
                     }
                 }
-                KeyboardKey::KEY_EQUAL | KeyboardKey::KEY_KP_ADD => zoom_in = true,
-                KeyboardKey::KEY_MINUS | KeyboardKey::KEY_KP_SUBTRACT => zoom_out = true,
+                KeyCode::Equal | KeyCode::NumpadAdd => zoom_in = true,
+                KeyCode::Minus | KeyCode::NumpadSubtract => zoom_out = true,
+                _ => {}
+            }
+        }
+        // An auto-repeat steps the selection again, at the repeat rate the X
+        // server sends. The input layer separates it from the press edge, so a
+        // one-shot key above never fires twice.
+        for k in input.repeated_keys() {
+            match k {
+                KeyCode::KeyH | KeyCode::ArrowLeft => left = true,
+                KeyCode::KeyL | KeyCode::ArrowRight => right = true,
+                KeyCode::KeyK | KeyCode::ArrowUp => up = true,
+                KeyCode::KeyJ | KeyCode::ArrowDown => down = true,
                 _ => {}
             }
         }
@@ -1263,30 +1248,14 @@ impl Grid {
         // up.
         // The code drains the queue every frame, so unmatched chars never
         // accumulate.
-        while let Some(c) = rl.get_char_pressed() {
-            match c {
+        for typed in input.typed() {
+            match typed.text {
                 '\n' | '\r' => enter = true,
                 '+' => zoom_in = true,
                 '-' => zoom_out = true,
                 _ => {}
             }
         }
-        // Auto-repeat for the direction keys: the initial press fires
-        // at once (edge from the queue above).
-        // Holding fires at the X server repeat rate after its delay (xset r
-        // rate values).
-        let now = rl.get_time();
-        let (delay, rate) = crate::keyrepeat::settings();
-        let down_left = rl.is_key_down(KeyboardKey::KEY_H) || rl.is_key_down(KeyboardKey::KEY_LEFT);
-        let down_right =
-            rl.is_key_down(KeyboardKey::KEY_L) || rl.is_key_down(KeyboardKey::KEY_RIGHT);
-        let down_up = rl.is_key_down(KeyboardKey::KEY_K) || rl.is_key_down(KeyboardKey::KEY_UP);
-        let down_down = rl.is_key_down(KeyboardKey::KEY_J) || rl.is_key_down(KeyboardKey::KEY_DOWN);
-        let rep = &mut self.rep_dir;
-        let left = rep[0].tick(left, down_left, now, delay, rate);
-        let right = rep[1].tick(right, down_right, now, delay, rate);
-        let up = rep[2].tick(up, down_up, now, delay, rate);
-        let down = rep[3].tick(down, down_down, now, delay, rate);
         // +/- zoom the thumbnails (the same 25% steps and key detection as
         // the image-view free zoom: the US-layout =/- keycodes, numpad
         // included, plus the typed character for non-US layouts).
@@ -1323,7 +1292,7 @@ impl Grid {
         let scroll_max = (l.content_h - win_h).max(0.0);
         // Mouse wheel scrolls the grid (only meaningful once zoomed in past
         // the exact-fill layout, where nothing overflows).
-        let wheel = rl.get_mouse_wheel_move();
+        let wheel = input.wheel_move();
         if wheel != 0.0 && scroll_max > 0.0 {
             self.scroll = (self.scroll - wheel * (side + GAP) * 3.0).clamp(0.0, scroll_max);
         }
@@ -1384,16 +1353,16 @@ impl Grid {
         // selects a rectangle exactly like `Ctrl+v`.
         // A drag that ends where it started is still a plain click, and a
         // click on the cursor cell still opens it.
-        let mouse = rl.get_mouse_position();
-        let left_down = rl.is_mouse_button_down(MouseButton::MOUSE_BUTTON_LEFT);
+        let mouse = input.cursor_position();
+        let left_down = input.is_button_down(MouseButton::Left);
         // A release ends the hold. The code clears on the held state, not on
         // the release edge, so a frame that returns early never leaves a
         // stale hold behind.
         if !left_down {
             self.drag = None;
         }
-        if rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
-            && let Some(idx) = self.cell_at(mouse.into(), win.0, win.1)
+        if input.is_button_pressed(MouseButton::Left)
+            && let Some(idx) = self.cell_at(mouse, win.0, win.1)
         {
             self.drag = Some(Drag { anchor: idx });
             if idx == self.selected {
@@ -1403,7 +1372,7 @@ impl Grid {
             self.ensure_visible(win.0, win.1);
         }
         if let Some(drag) = self.drag
-            && let Some(idx) = self.cell_at(mouse.into(), win.0, win.1)
+            && let Some(idx) = self.cell_at(mouse, win.0, win.1)
             && idx != drag.anchor
         {
             // The press already selected the anchor cell, so a travel to a
@@ -1416,9 +1385,7 @@ impl Grid {
             self.ensure_visible(win.0, win.1);
         }
 
-        if open_at_cursor
-            && let Some(idx) = self.cell_at(rl.get_mouse_position().into(), win.0, win.1)
-        {
+        if open_at_cursor && let Some(idx) = self.cell_at(mouse, win.0, win.1) {
             self.selected = idx;
             self.ensure_visible(win.0, win.1);
             return Some(GridAction::Open(idx));
@@ -1450,7 +1417,7 @@ impl Grid {
     /// An empty grid draws nothing: the window title already carries the count
     /// (`(0 image(s)) – <dir> – versatile-viewer`), so the grid needs no text
     /// layer to say it.
-    pub fn draw(&self, d: &mut RaylibDrawHandle, win: (WinW, WinH)) {
+    pub fn draw(&self, r: &mut Renderer, win: (WinW, WinH)) {
         let win_h = win.1.raw();
         if self.entries.is_empty() {
             return;
@@ -1483,24 +1450,24 @@ impl Grid {
                 // The square cell shows its center crop (draw-time crop, so a
                 // resize never needs a re-decode).
                 let src = Rect::sized(tex.width() as f32, tex.height() as f32).center_square();
-                d.draw_texture_pro(tex, src, thumb, Vec2::ZERO, 0.0, tint);
+                r.texture_pro(tex, src, thumb, Vec2::ZERO, 0.0, tint);
             } else if e.cell.is_failed() {
                 // Decode failed: dim red placeholder with an error mark.
                 // The file stays visible instead of vanishing silently.
-                d.draw_rectangle_rec(thumb, Color::new(72, 26, 26, 255).tint(tint));
-                draw_failure_mark(d, thumb, tint);
+                r.fill_rect(thumb, Color::new(72, 26, 26, 255).tint(tint));
+                draw_failure_mark(r, thumb, tint);
             } else if let Some(tex) = e.cell.placeholder() {
                 // The few-byte ThumbHash placeholder, until the decoded thumb
                 // lands.
                 // It holds the whole image, so the draw crops it like a thumb.
                 let src = Rect::sized(tex.width() as f32, tex.height() as f32).center_square();
-                d.draw_texture_pro(tex, src, thumb, Vec2::ZERO, 0.0, tint);
+                r.texture_pro(tex, src, thumb, Vec2::ZERO, 0.0, tint);
             } else {
                 // Still decoding: placeholder square.
-                d.draw_rectangle_rec(thumb, Color::new(28, 28, 28, 255).tint(tint));
+                r.fill_rect(thumb, Color::new(28, 28, 28, 255).tint(tint));
             }
             if in_selection {
-                d.draw_rectangle_lines_ex(thumb, 4.0, Color::WHITE);
+                r.stroke_rect(thumb, 4.0, Color::WHITE);
             }
         }
     }
@@ -1510,15 +1477,15 @@ impl Grid {
 ///
 /// The mark is an exclamation built from two rectangles: a bar and a dot.
 /// The grid owns no font, so the cell shows a shape instead of a glyph.
-fn draw_failure_mark(d: &mut impl RaylibDraw, thumb: Rect, tint: Color) {
+fn draw_failure_mark(r: &mut Renderer, thumb: Rect, tint: Color) {
     let color = Color::new(214, 92, 92, 255).tint(tint);
     let stroke = (thumb.width * 0.08).max(2.0);
     let bar = thumb.height * 0.40;
     let gap = thumb.height * 0.12;
     let left = thumb.x + (thumb.width - stroke) / 2.0;
     let top = thumb.y + (thumb.height - (bar + gap + stroke)) / 2.0;
-    d.draw_rectangle_rec(Rect::new(left, top, stroke, bar), color);
-    d.draw_rectangle_rec(Rect::new(left, top + bar + gap, stroke, stroke), color);
+    r.fill_rect(Rect::new(left, top, stroke, bar), color);
+    r.fill_rect(Rect::new(left, top + bar + gap, stroke, stroke), color);
 }
 
 /// Move the selection by one direction press, `step` times over.
@@ -1686,7 +1653,7 @@ mod tests {
             want_full: false,
             blur: None,
         };
-        let miss = run_job(&job, &cache).expect("decode");
+        let miss = run_job(&job, &cache, None).expect("decode");
         assert!(miss.full.is_none(), "a thumb-only job keeps no full image");
         assert_eq!(miss.image, (ImgW::new(64), ImgH::new(32)));
         assert!(
@@ -1694,15 +1661,15 @@ mod tests {
             "the decode stores a thumbnail"
         );
         // The second job takes the cached thumbnail and decodes nothing.
-        let hit = run_job(&job, &cache).expect("cache hit");
+        let hit = run_job(&job, &cache, None).expect("cache hit");
         assert!(hit.full.is_none());
         // The entry is lossy, so the hit keeps the shape and the alpha plane
         // and only the color samples drift.
+        assert_eq!(hit.thumb.dims(), miss.thumb.dims());
         assert_eq!(
-            (hit.thumb.width(), hit.thumb.height()),
-            (miss.thumb.width(), miss.thumb.height())
+            hit.thumb.pixels().unwrap().as_rgba().len(),
+            miss.thumb.pixels().unwrap().as_rgba().len()
         );
-        assert_eq!(hit.thumb.data.len(), miss.thumb.data.len());
         // The hit still reports the source dimensions, so the image view fits
         // the picture and not the cached thumb.
         assert_eq!(hit.image, miss.image);
@@ -1711,7 +1678,7 @@ mod tests {
             want_full: true,
             ..job
         };
-        let refill = run_job(&keep, &cache).expect("decode");
+        let refill = run_job(&keep, &cache, None).expect("decode");
         assert!(refill.full.is_some());
         assert_eq!(refill.image, miss.image);
     }
@@ -1736,16 +1703,13 @@ mod tests {
             want_full: false,
             blur: None,
         };
-        let miss = run_job(&job, &cache).expect("decode");
+        let miss = run_job(&job, &cache, None).expect("decode");
         assert!(miss.full.is_none());
         // The thumbnail paints at the cell size, and the entry keeps the
         // base raster size, clamped up to the minimum side.
-        assert_eq!(
-            (miss.thumb.width, miss.thumb.height),
-            (ImgW::new(512), ImgH::new(256))
-        );
+        assert_eq!(miss.thumb.dims(), (512, 256));
         assert_eq!(miss.image, (ImgW::new(1024), ImgH::new(512)));
-        let hit = run_job(&job, &cache).expect("cache hit");
+        let hit = run_job(&job, &cache, None).expect("cache hit");
         assert_eq!(hit.image, miss.image);
         // The keep-set refill paints the base raster, so the open image zooms
         // on more pixels than the cell shows.
@@ -1753,12 +1717,9 @@ mod tests {
             want_full: true,
             ..job
         };
-        let refill = run_job(&keep, &cache).expect("decode");
+        let refill = run_job(&keep, &cache, None).expect("decode");
         let full = refill.full.expect("the keep set keeps the full image");
-        assert_eq!(
-            (full.width(), full.height()),
-            (ImgW::new(1024), ImgH::new(512))
-        );
+        assert_eq!(full.dims(), (1024, 512));
         assert_eq!(refill.image, miss.image);
     }
 

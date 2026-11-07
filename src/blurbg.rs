@@ -15,13 +15,13 @@
 
 use std::time::Instant;
 
-use raylib::{consts::TextureFilter, prelude::*, texture::RaylibTexture2D};
-
 use crate::{
     DecodedImage,
     dim::{LongSide, Rect, WinH, WinW},
     downscale_rgba_ref,
     draw::{Color, Vec2},
+    render::Renderer,
+    texture::{Texture, Uploader},
 };
 
 /// Long side of the blurred background texture.
@@ -156,19 +156,17 @@ pub fn small_blur(image: &DecodedImage, long_side: LongSide) -> DecodedImage {
 
 /// GPU side of the gimmick.
 /// It holds the blurred background texture for the image view.
-/// It lives between `rl` and its users in main.
-/// It then drops and unloads before the window closes.
 #[derive(Debug)]
 pub struct BlurBg {
     dim: f32,
     /// The current background texture.
-    tex: Option<Texture2D>,
+    tex: Option<Texture>,
     /// Source tag of the current texture (grid entry id).
     /// None means unknown, for example a single-file launch.
     /// The code uses the tag to skip redundant transitions.
     current: Option<u64>,
     /// The previous texture, kept while a crossfade to `tex` runs.
-    old: Option<Texture2D>,
+    old: Option<Texture>,
     /// The start time of the running crossfade.
     fade_start: Option<Instant>,
 }
@@ -188,26 +186,15 @@ impl BlurBg {
     }
 
     /// Upload a tiny blurred copy as the background texture.
-    /// The function updates the texture in place when the dimensions match
-    /// (streaming previews).
-    fn upload(&mut self, rl: &mut RaylibHandle, thread: &RaylibThread, data: &DecodedImage) {
-        let (width, height, rgba) = (data.width(), data.height(), data.as_rgba());
-        let same = matches!(&self.tex, Some(t) if t.width() == width.as_i32() && t.height() == height.as_i32());
-        if same {
-            if let Some(t) = &mut self.tex
-                && t.update_texture(rgba).is_err()
-            {
-                self.tex = None;
-            }
-            return;
-        }
-        match crate::upload_rgba(rl, thread, rgba, width, height) {
-            Ok(t) => {
-                // Bilinear filtering turns the tiny copy into a smooth blur
-                // when the GPU upscales it every frame.
-                t.set_texture_filter(thread, TextureFilter::TEXTURE_FILTER_BILINEAR);
-                self.tex = Some(t); // drops (unloads) any previous texture
-            }
+    ///
+    /// The copy measures `VV_BLUR_PX` on its long side (128 by default), so a
+    /// fresh upload costs a few kilobytes and the previous texture simply
+    /// drops.
+    fn upload(&mut self, uploader: &Uploader, data: &DecodedImage) {
+        match uploader.image(data) {
+            // The linear filter is the default of an upload, and the GPU
+            // upscale of this tiny texture is the blur.
+            Ok(texture) => self.tex = Some(texture),
             Err(err) => {
                 eprintln!("vv: blur background: {err}");
                 self.tex = None;
@@ -221,14 +208,8 @@ impl BlurBg {
     /// The code cuts a running crossfade short.
     /// Errors are non-fatal: the background just stays transparent, and the
     /// window background shows through.
-    pub fn attach(
-        &mut self,
-        rl: &mut RaylibHandle,
-        thread: &RaylibThread,
-        data: &DecodedImage,
-        tag: Option<u64>,
-    ) {
-        self.upload(rl, thread, data);
+    pub fn attach(&mut self, uploader: &Uploader, data: &DecodedImage, tag: Option<u64>) {
+        self.upload(uploader, data);
         if tag.is_some() {
             self.current = tag;
         }
@@ -239,23 +220,15 @@ impl BlurBg {
     /// The grid calls this function every frame for the selected entry.
     /// Without an existing background, the new texture fades in from the
     /// window background.
-    pub fn transition(
-        &mut self,
-        rl: &mut RaylibHandle,
-        thread: &RaylibThread,
-        data: &DecodedImage,
-        tag: u64,
-    ) {
+    pub fn transition(&mut self, uploader: &Uploader, data: &DecodedImage, tag: u64) {
         if self.current == Some(tag) {
             return;
         }
-        let (rgba, width, height) = (data.as_rgba(), data.width(), data.height());
         // First background ever (empty window at startup): show it
         // at once, with no fade-in from the window background.
         let first = self.tex.is_none();
-        match crate::upload_rgba(rl, thread, rgba, width, height) {
+        match uploader.image(data) {
             Ok(t) => {
-                t.set_texture_filter(thread, TextureFilter::TEXTURE_FILTER_BILINEAR);
                 if first {
                     self.old = None;
                     self.fade_start = None;
@@ -278,7 +251,7 @@ impl BlurBg {
     /// The new texture fades in on top.
     /// Call this function every frame so the fades complete and the code
     /// frees the old texture.
-    pub fn draw(&mut self, d: &mut RaylibDrawHandle, win_w: WinW, win_h: WinH) {
+    pub fn draw(&mut self, r: &mut Renderer, win_w: WinW, win_h: WinH) {
         let progress = self
             .fade_start
             .map_or(1.0, |s| (s.elapsed().as_secs_f64() / FADE_SECS).min(1.0));
@@ -292,10 +265,10 @@ impl BlurBg {
         let rgb = (self.dim * 255.0) as u8;
         // Old texture first, at full opacity...
         if let Some(old) = &self.old {
-            d.draw_texture_pro(
+            r.texture_pro(
                 old,
                 Rect::sized(old.width() as f32, old.height() as f32),
-                cover_rect(old.width() as u32, old.height() as u32, win_w, win_h),
+                cover_rect(old.width(), old.height(), win_w, win_h),
                 Vec2::ZERO,
                 0.0,
                 Color::new(rgb, rgb, rgb, 255),
@@ -304,10 +277,10 @@ impl BlurBg {
         // ...then the new one, fading in (from the window background when
         // there is no old).
         let t = progress * progress * (3.0 - 2.0 * progress); // smoothstep
-        d.draw_texture_pro(
+        r.texture_pro(
             tex,
             Rect::sized(tex.width() as f32, tex.height() as f32),
-            cover_rect(tex.width() as u32, tex.height() as u32, win_w, win_h),
+            cover_rect(tex.width(), tex.height(), win_w, win_h),
             Vec2::ZERO,
             0.0,
             Color::new(rgb, rgb, rgb, (t * 255.0) as u8),

@@ -33,7 +33,8 @@ anyhow = "1.0.104"
 # JPEG XL decode, pure Rust (no libjxl C dependency).
 jxl-oxide = "0.12.6"
 # Common-format decode. Keep in sync with grid.rs is_image_path(): every
-# extension it accepts must have a feature here, except "pdf" (see below).
+# extension it accepts must have a feature here, except "pdf" and "typ" (see
+# below).
 # webp = image-webp, pure Rust (lossy VP8 + lossless VP8L decode).
 image = { version = "0.25.10", default-features = false, features = [
   "bmp",
@@ -61,7 +62,6 @@ winit = { version = "0.30.13", default-features = false, features = [
 ] }
 # Block on the two async wgpu calls of startup (adapter, device).
 pollster = "1.0.1"
-raylib = "6.0.0"
 # Work pool for parallel background decodes (grid prefetch); jxl-oxide also
 # uses rayon internally for single-image decode (its default feature).
 rayon = "1.12.0"
@@ -188,11 +188,6 @@ merman = { version = "0.9.3", default-features = false, features = [
   "native-fonts",
   "svg",
 ], optional = true }
-
-# X11 WM_CLASS setup (XSetClassHint); Linux only, links the same libX11
-# raylib's X11 backend already pulls in.
-[target.'cfg(target_os = "linux")'.dependencies]
-x11 = "2.21.0"
 
 [[bin]]
 name = "vv"

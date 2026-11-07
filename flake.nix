@@ -32,37 +32,33 @@
         let
           craneLib = crane.mkLib pkgs;
 
-          # The system libraries that raylib-sys compiles against.
-          # The final binary links them at runtime (X11 / GL family).
-          # jxl-oxide is pure Rust, so there is no libjxl here.
+          # The system libraries the binary loads at runtime.
+          #
+          # Every decoder is pure Rust, so nothing compiles C here.
+          # winit opens the X11 libraries with `dlopen` as well, and wgpu
+          # opens `libvulkan.so.1` the same way, so the two families stay
+          # dependencies of the build and of the rpath.
+          # The Vulkan driver itself is the host's: the loader reads the ICD
+          # manifests of the machine (/run/opengl-driver on NixOS).
           libInputs = [
-            pkgs.libGL
             pkgs.libx11
+            pkgs.libxcb
+            pkgs.libxkbcommon
             pkgs.libxi
             pkgs.libxrandr
             pkgs.libxfixes
             pkgs.libxcursor
-            pkgs.libxinerama
+            pkgs.vulkan-loader
           ];
 
-          # The native tools that the raylib-sys crate needs.
-          # It compiles the vendored raylib with CMake.
-          # It generates bindings with bindgen.
+          # The native tools of the build.
+          # No CMake, no clang and no pkg-config: nothing here compiles C.
           nativeBuildInputs = [
-            pkgs.pkg-config
-            pkgs.cmake
-            pkgs.llvmPackages.libclang
             pkgs.makeWrapper
           ];
 
-          # The environment that bindgen and clang need.
-          env = {
-            LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-            BINDGEN_EXTRA_CLANG_ARGS = lib.concatStringsSep " " [
-              "-isystem"
-              "${pkgs.stdenv.cc.libc_dev}/include"
-            ];
-          };
+          # The environment the build reads.
+          env = { };
 
           # rpath link arguments, so the binary finds the system libraries at
           # runtime.
@@ -90,14 +86,15 @@
               env
               ;
             buildInputs = libInputs;
-            # raylib dlopens libGL at runtime, and libGL is not in DT_NEEDED.
+            # wgpu opens `libvulkan.so.1` and winit opens the X11 libraries at
+            # runtime, so none of them sits in DT_NEEDED.
             # Nix's fixup step shrinks RUNPATH down to only the DT_NEEDED
             # libraries.
             # autoPatchelfHook runs in postFixup, after shrink.
             # appendRunpaths thus survives and bakes the directories into the
             # final DT_RUNPATH.
-            # The binary is then self-contained.
-            # This is the same idiom as nixpkgs' raylib package.
+            # The binary is then self-contained, and the Vulkan driver still
+            # comes from the host.
             nativeBuildInputs = nativeBuildInputs ++ [ pkgs.autoPatchelfHook ];
             appendRunpaths = [ (lib.makeLibraryPath libInputs) ];
             meta.description = "A fast image viewer. nsxiv meets mpv. JPEG XL first-class.";

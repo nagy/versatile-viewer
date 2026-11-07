@@ -45,27 +45,32 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use raylib::{
-    consts::{KeyboardKey, MouseCursor, TextureFilter},
-    prelude::*,
-    texture::RaylibTexture2D,
-};
-#[cfg(target_os = "linux")]
-use versatile_viewer::wmclass;
 use versatile_viewer::{
-    DIM_VEIL, DecodedImage, TAP_SLACK, UploadError,
+    DIM_VEIL, DecodedImage, TAP_SLACK,
     blurbg::{self, BlurBg},
     book::BookSurface,
-    dim::{ImgH, ImgW, PreviewPx, RampTime, Rect, WinH, WinW},
-    draw::{Color, Vec2},
+    dim::{PreviewPx, RampTime, Rect, WinH, WinW},
+    draw::{Color, Quad, Vec2},
+    gpu::{FrameError, Gpu, GpuSettings, Present},
     grid::{DecodeFailure, EntrySource, Grid, GridAction, LoadPlan},
-    keyrepeat,
+    input::Input,
     loader::{DecodeMsg, Loader},
-    mcp, region, region_sel, rotate,
+    mcp, region, region_sel,
+    render::Renderer,
+    rotate,
     surface::{Size, Surface, View, open_book_surface, open_surface},
+    texture::{Texture, Uploader},
     tween::Ramp,
-    upload_rgba,
     zoomkeys::TypedKeys,
+};
+#[cfg(target_os = "linux")]
+use winit::platform::x11::WindowAttributesExtX11 as _;
+use winit::{
+    application::ApplicationHandler,
+    event::{DeviceEvent, DeviceId, KeyEvent, MouseButton, WindowEvent},
+    event_loop::{ActiveEventLoop, EventLoop},
+    keyboard::{KeyCode, PhysicalKey},
+    window::{CursorGrabMode, Window, WindowId},
 };
 
 /// The window background color, `#062329`.
@@ -221,7 +226,7 @@ struct ViewState {
     /// entries.
     view_from_grid: Option<u64>,
     /// The texture shown in image mode now.
-    view_tex: Option<Texture2D>,
+    view_tex: Option<Texture>,
     view_loading: bool,
     /// The full-resolution plane extent, in surface units (0 x 0 until
     /// known).
@@ -337,8 +342,9 @@ struct ViewState {
 /// The patch carries its own texture, so the whole-image texture stays as the
 /// fallback of a pan or a resize that outruns the repaint.
 struct CropState {
-    /// The pixels of the patch.
-    texture: Texture2D,
+    /// The pixels of the patch, already uploaded by the worker that painted
+    /// them.
+    texture: Texture,
     /// The source rect the patch covers and the scale it holds, so a paint
     /// rule reads one value instead of a rect beside a loose scale.
     patch: region::Patch,
@@ -413,7 +419,7 @@ enum CropMsg {
     Crop {
         generation: u64,
         patch: region::Patch,
-        image: DecodedImage,
+        texture: Texture,
     },
     /// A finished patch of a spread step, painted before the step landed.
     /// `id` names the aim, so the result of an older aim drops.
@@ -421,7 +427,7 @@ enum CropMsg {
         generation: u64,
         id: u64,
         patch: region::Patch,
-        image: DecodedImage,
+        texture: Texture,
     },
     /// The prefetch of aim `id` failed.
     PrefetchFailed { generation: u64, id: u64 },
@@ -590,7 +596,7 @@ impl ViewState {
     /// it, and the result lands in [`ViewState::prefetch`] instead of replacing
     /// the patch on screen.
     /// A step that misses a spread calls nothing, because it moves nothing.
-    fn prefetch_spread(&mut self, win: Vec2) {
+    fn prefetch_spread(&mut self, win: Vec2, uploader: &Uploader) {
         if self.source.is_none() || self.img.w <= 0.0 || self.view_loading {
             return;
         }
@@ -618,14 +624,21 @@ impl ViewState {
         };
         let (generation, tx) = (self.crop_gen, self.crop_tx.clone());
         let plane = self.source_plane;
+        let uploader = uploader.clone();
         rayon::spawn(move || {
             match source.render(View::region(plane, patch.rect, scale)) {
                 Ok(image) => {
+                    // The patch uploads on this worker, so the glide never
+                    // waits on a pixel copy.
+                    let Ok(texture) = uploader.image(&image) else {
+                        let _ = tx.send(CropMsg::PrefetchFailed { generation, id });
+                        return;
+                    };
                     let _ = tx.send(CropMsg::Prefetch {
                         generation,
                         id,
                         patch,
-                        image,
+                        texture,
                     });
                 }
                 Err(err) => {
@@ -703,7 +716,7 @@ impl ViewState {
     /// A spread step paints its landing region before the glide ends, so a
     /// patch that already covers the window replaces the one on screen here and
     /// skips the debounce and the paint.
-    fn tick_crop(&mut self, now: Instant, win: Vec2) {
+    fn tick_crop(&mut self, now: Instant, win: Vec2, uploader: &Uploader) {
         if self.source.is_none() || self.crop_pending || self.img.w <= 0.0 || self.view_loading {
             return;
         }
@@ -780,13 +793,20 @@ impl ViewState {
         self.close_prefetch();
         let (generation, tx) = (self.crop_gen, self.crop_tx.clone());
         let plane = self.source_plane;
+        let uploader = uploader.clone();
         rayon::spawn(
             move || match source.render(View::region(plane, paint.rect, scale)) {
                 Ok(image) => {
+                    // The paint is a window patch, so it uploads on this worker
+                    // and the main thread only draws it.
+                    let Ok(texture) = uploader.image(&image) else {
+                        let _ = tx.send(CropMsg::Failed { generation });
+                        return;
+                    };
                     let _ = tx.send(CropMsg::Crop {
                         generation,
                         patch: paint,
-                        image,
+                        texture,
                     });
                 }
                 Err(err) => {
@@ -798,14 +818,11 @@ impl ViewState {
     }
 
     /// Apply finished region work.
-    /// A source lands as is, and a patch uploads and replaces the one on
-    /// screen.
+    /// A source lands as is, and a patch replaces the one on screen.
+    /// The paint worker uploaded its own texture, so this call only moves
+    /// handles.
     /// A result of an earlier image drops.
-    fn drain_crops(
-        &mut self,
-        rl: &mut RaylibHandle,
-        thread: &RaylibThread,
-    ) -> Result<(), UploadError> {
+    fn drain_crops(&mut self) {
         while let Ok(msg) = self.crop_rx.try_recv() {
             match msg {
                 CropMsg::Source { generation, source } => {
@@ -816,15 +833,12 @@ impl ViewState {
                 CropMsg::Crop {
                     generation,
                     patch,
-                    image,
+                    texture,
                 } => {
                     if generation != self.crop_gen {
                         continue;
                     }
                     self.crop_pending = false;
-                    let texture =
-                        upload_rgba(rl, thread, image.as_rgba(), image.width(), image.height())?;
-                    apply_view_filter(thread, &texture, self.pixelated);
                     // The old patch drops here, so one patch lives at a time.
                     self.crop = Some(CropState { texture, patch });
                 }
@@ -840,7 +854,7 @@ impl ViewState {
                     generation,
                     id,
                     patch,
-                    image,
+                    texture,
                 } => {
                     // A result of an earlier image or of an aim the view left
                     // drops, so an old spread never lands on the new one.
@@ -851,9 +865,6 @@ impl ViewState {
                     if generation != self.crop_gen || !aimed {
                         continue;
                     }
-                    let texture =
-                        upload_rgba(rl, thread, image.as_rgba(), image.width(), image.height())?;
-                    apply_view_filter(thread, &texture, self.pixelated);
                     self.prefetch = Prefetch::Ready(CropState { texture, patch });
                 }
                 CropMsg::PrefetchFailed { generation, id } => {
@@ -868,7 +879,6 @@ impl ViewState {
                 }
             }
         }
-        Ok(())
     }
 }
 
@@ -978,67 +988,24 @@ struct NavButton {
 }
 
 /// Read the side-button nav state once per frame.
-/// A held side button auto-repeats through `keyrepeat`, exactly like `n` and
+///
+/// A held side button repeats through the auto-repeat path, exactly like `n` and
 /// `p`.
-fn read_nav_mouse(rl: &RaylibHandle) -> NavMouse {
-    let buttons = |list: &[MouseButton]| NavButton {
-        edge: list.iter().any(|&b| rl.is_mouse_button_pressed(b)),
-        held: list.iter().any(|&b| rl.is_mouse_button_down(b)),
-    };
+/// X11 reports buttons 8 and 9 as `Back` and `Forward`, which is what the raylib
+/// backend mapped its side and extra codes onto.
+fn read_nav_mouse(input: &Input) -> NavMouse {
+    const NEXT: [MouseButton; 2] = [MouseButton::Forward, MouseButton::Other(9)];
+    const PREV: [MouseButton; 2] = [MouseButton::Back, MouseButton::Other(8)];
     NavMouse {
-        next: buttons(&[
-            MouseButton::MOUSE_BUTTON_EXTRA,
-            MouseButton::MOUSE_BUTTON_FORWARD,
-        ]),
-        prev: buttons(&[
-            MouseButton::MOUSE_BUTTON_SIDE,
-            MouseButton::MOUSE_BUTTON_BACK,
-        ]),
-    }
-}
-
-/// Show a new RGBA8 frame in image view.
-/// When a texture with the same dimensions exists (progressive previews of
-/// the same image), the function updates its pixels in place instead of
-/// reallocating a GPU texture.
-fn show_frame(
-    rl: &mut RaylibHandle,
-    thread: &RaylibThread,
-    view_tex: &mut Option<Texture2D>,
-    rgba: &[u8],
-    width: ImgW,
-    height: ImgH,
-    pixelated: bool,
-) -> Result<(), UploadError> {
-    match view_tex {
-        Some(tex) if tex.width() == width.as_i32() && tex.height() == height.as_i32() => {
-            tex.update_texture(rgba)?;
-        }
-        _ => {
-            let tex = upload_rgba(rl, thread, rgba, width, height)?;
-            apply_view_filter(thread, &tex, pixelated);
-            *view_tex = Some(tex);
-        }
-    }
-    Ok(())
-}
-
-/// Set the texture filter for the image view.
-/// The default is bilinear, which suits photos.
-/// `a` toggles nearest-neighbor (pixelated) for 1:1 pixel peeping.
-/// The flag reaches the whole-image texture and the region patches only.
-/// A grid thumb stays bilinear through [`crate::grid`], because the cell and
-/// the image-view placeholder both draw it far larger than the texture, and
-/// nearest aliases badly there.
-fn apply_view_filter(thread: &RaylibThread, tex: &Texture2D, pixelated: bool) {
-    tex.set_texture_filter(
-        thread,
-        if pixelated {
-            TextureFilter::TEXTURE_FILTER_POINT
-        } else {
-            TextureFilter::TEXTURE_FILTER_BILINEAR
+        next: NavButton {
+            edge: input.any_button_pressed(&NEXT),
+            held: input.any_button_down(&NEXT),
         },
-    );
+        prev: NavButton {
+            edge: input.any_button_pressed(&PREV),
+            held: input.any_button_down(&PREV),
+        },
+    }
 }
 
 /// Draw a texture over the image rect, turned by `angle` degrees clockwise
@@ -1050,15 +1017,15 @@ fn apply_view_filter(thread: &RaylibThread, tex: &Texture2D, pixelated: bool) {
 /// The scale and the pan stay as they are, so a turned image shows its
 /// corners past the window edge.
 ///
-/// Raylib turns the quad around `dest.position`, and `origin` pulls the rect
-/// back by half its size.
+/// The quad turns around `dest.position`, and `origin` pulls the rect back by
+/// half its size.
 /// The dest position is therefore the image center, so the turn pivots on the
 /// middle of the image at every angle.
 /// A zero angle draws the plain centered rect, because the origin pulls it
 /// back by the same half size.
 fn draw_turned(
-    d: &mut impl RaylibDraw,
-    texture: &Texture2D,
+    r: &mut Renderer,
+    texture: &Texture,
     img: Size,
     scale: f32,
     center: Vec2,
@@ -1067,7 +1034,7 @@ fn draw_turned(
     let src = Rect::sized(texture.width() as f32, texture.height() as f32);
     let (dw, dh) = (img.w * scale, img.h * scale);
     let dest = Rect::new(center.x, center.y, dw, dh);
-    d.draw_texture_pro(
+    r.texture_pro(
         texture,
         src,
         dest,
@@ -1183,7 +1150,7 @@ fn patch_dest(center: Vec2, dw: f32, dh: f32, tw: f32, th: f32, angle: f32) -> O
 /// the paint (see [`patch_dest`]).
 /// A turned patch keeps the free draw of [`draw_turned`], so it holds the
 /// transform of the whole image.
-fn draw_patch(d: &mut impl RaylibDraw, patch: &CropState, frame: &region::Frame) {
+fn draw_patch(r: &mut Renderer, patch: &CropState, frame: &region::Frame) {
     let rect = patch.patch.rect;
     let (scale, angle) = (frame.scale, frame.angle);
     let middle = Vec2::new(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
@@ -1191,7 +1158,7 @@ fn draw_patch(d: &mut impl RaylibDraw, patch: &CropState, frame: &region::Frame)
     let tw = patch.texture.width() as f32;
     let th = patch.texture.height() as f32;
     match patch_dest(center, rect.w * scale, rect.h * scale, tw, th, angle) {
-        Some(dest) => d.draw_texture_pro(
+        Some(dest) => r.texture_pro(
             &patch.texture,
             Rect::sized(tw, th),
             dest,
@@ -1200,7 +1167,7 @@ fn draw_patch(d: &mut impl RaylibDraw, patch: &CropState, frame: &region::Frame)
             Color::WHITE,
         ),
         None => draw_turned(
-            d,
+            r,
             &patch.texture,
             Size {
                 w: rect.w,
@@ -1251,7 +1218,7 @@ fn selection_rect(
 /// matches the grid's dim tint (see [`versatile_viewer::DIM_LEVEL`]).
 /// The bands and the border map through [`region::Frame::to_screen`], so they
 /// follow the pan, the zoom and the turn of the draw.
-fn draw_selection(d: &mut impl RaylibDraw, frame: region::Frame, selection: region::Crop) {
+fn draw_selection(r: &mut Renderer, frame: region::Frame, selection: region::Crop) {
     let outer = region::Crop {
         x: 0.0,
         y: 0.0,
@@ -1260,15 +1227,12 @@ fn draw_selection(d: &mut impl RaylibDraw, frame: region::Frame, selection: regi
     };
     for band in region_sel::around(outer, selection) {
         let p = band.map(|point| frame.to_screen(point));
-        // raylib culls a back face, so the band goes out in its winding (see
-        // [`region_sel::veil_triangles`]).
-        for tri in region_sel::veil_triangles(p) {
-            d.draw_triangle(tri[0], tri[1], tri[2], DIM_VEIL);
-        }
+        // The pipeline culls nothing, so a band draws in either winding.
+        r.fill(Quad::new(p), DIM_VEIL);
     }
     let corners = region_sel::corners(selection).map(|point| frame.to_screen(point));
     for i in 0..4 {
-        d.draw_line_ex(
+        r.line(
             corners[i],
             corners[(i + 1) % 4],
             SELECTION_BORDER_PX,
@@ -1336,13 +1300,12 @@ fn keep_pivot(st: &mut ViewState, from: f32, win_w: f32, win_h: f32) {
 /// The function does nothing when the gimmick is off or the copy is missing.
 fn attach_blur_bg(
     blur_bg: &mut Option<BlurBg>,
-    rl: &mut RaylibHandle,
-    thread: &RaylibThread,
+    uploader: &Uploader,
     blur: Option<&DecodedImage>,
     tag: Option<u64>,
 ) {
     if let (Some(bg), Some(data)) = (blur_bg.as_mut(), blur) {
-        bg.attach(rl, thread, data, tag);
+        bg.attach(uploader, data, tag);
     }
 }
 
@@ -1353,7 +1316,7 @@ fn attach_blur_bg(
 fn put_back_view(
     grid: &mut Option<Grid>,
     view_from_grid: &mut Option<u64>,
-    view_tex: &mut Option<Texture2D>,
+    view_tex: &mut Option<Texture>,
 ) {
     if let Some(id) = view_from_grid.take()
         && let Some(e) = grid
@@ -1385,8 +1348,8 @@ fn show_entry(
     st: &mut ViewState,
     grid: &mut Grid,
     idx: usize,
-    rl: &mut RaylibHandle,
-    thread: &RaylibThread,
+    ui: &Ui,
+    r: &Renderer,
     win: (WinW, WinH),
     set_scale_now: bool,
 ) {
@@ -1419,7 +1382,6 @@ fn show_entry(
         st.open_box = None;
         grid.entries[idx].viewing = true;
         st.view_from_grid = Some(id);
-        apply_view_filter(thread, &tex, st.pixelated);
         st.view_tex = Some(tex);
         st.img = Size {
             w: w.as_f32(),
@@ -1430,7 +1392,7 @@ fn show_entry(
         if set_scale_now {
             st.view_scale = Some((win_w / st.img.w).min(win_h / st.img.h));
         }
-        attach_blur_bg(&mut st.blur_bg, rl, thread, blur.as_ref(), st.open_id);
+        attach_blur_bg(&mut st.blur_bg, &r.uploader(), blur.as_ref(), st.open_id);
     } else {
         st.open_box = None;
         st.view_from_grid = None;
@@ -1465,8 +1427,12 @@ fn show_entry(
             // nothing: the loader renders the book now.
             None
         } else {
-            let preview_px =
-                PreviewPx::new(rl.get_screen_width().max(rl.get_screen_height()) as u32);
+            let preview_px = PreviewPx::new(
+                ui.get_screen_width()
+                    .max(ui.get_screen_height())
+                    .try_into()
+                    .unwrap_or(512),
+            );
             // The image view opens a document as a book, so plane 0 holds
             // every spread.
             // The opening box comes from the surface before the loader takes
@@ -1474,7 +1440,12 @@ fn show_entry(
             match source.open_book() {
                 Ok((surface, plane)) => {
                     st.open_box = surface.open_box(plane);
-                    Some(Loader::start_plane(surface, plane, preview_px))
+                    Some(Loader::start_plane(
+                        surface,
+                        plane,
+                        preview_px,
+                        &Some(r.uploader()),
+                    ))
                 }
                 Err(err) => {
                     eprintln!("vv: {}: {err}", source.label());
@@ -1483,7 +1454,7 @@ fn show_entry(
                 }
             }
         };
-        attach_blur_bg(&mut st.blur_bg, rl, thread, blur.as_ref(), st.open_id);
+        attach_blur_bg(&mut st.blur_bg, &r.uploader(), blur.as_ref(), st.open_id);
     }
 }
 
@@ -1547,384 +1518,698 @@ fn window_title(path: &Path, dir_grid: Option<&Grid>) -> String {
 
 /// Start the MCP stdio server once, in the background.
 ///
-/// The server owns stdin and stdout, so raylib must not write its trace log
-/// there. The code redirects the trace log to stderr instead.
+/// The server owns stdin and stdout, and every diagnostic of the viewer goes to
+/// stderr, so no library writes a protocol frame by accident.
 ///
 /// The whole program is single-threaded at this point.
 fn start_mcp() -> Result<()> {
-    raylib::core::callbacks::set_trace_log_callback(|_level, text| {
-        eprintln!("vv: raylib: {text}");
-    })
-    .context("failed to redirect the raylib trace log")?;
     mcp::spawn().context("failed to start the MCP server")
 }
 
 // The event loop is one long state machine by design.
 // Splitting it scatters the frame-order invariants across call sites.
-#[allow(clippy::too_many_lines)]
-fn main() -> Result<()> {
-    // `--mcp` may come before or after the path, so the path is the first
-    // argument that is not the flag.
-    let mut mcp = false;
-    let mut args = env::args().skip(1);
-    let arg = loop {
-        match args.next() {
-            Some(flag) if flag == "--mcp" => mcp = true,
-            Some(path) => break path,
-            None => bail!("usage: vv [--mcp] <image-path-or-directory>"),
-        }
-    };
-    if mcp {
-        start_mcp()?;
+/// One frame's window, input and clock, as the view code reads them.
+///
+/// The type bundles the platform facts that the raylib handle used to carry, so
+/// the frame body reads one name: the pointer, the held keys, the frame time,
+/// the window size and the three window calls (cursor, grab, title).
+///
+/// The drawing does not live here: the frame body holds the [`Renderer`] apart,
+/// because the batch needs a mutable borrow for the whole frame while the input
+/// is read at the same time.
+struct Ui<'a> {
+    input: &'a Input,
+    window: &'a Window,
+    gpu: &'a Gpu,
+    size: (u32, u32),
+    /// The seconds since the viewer started.
+    time: f64,
+    /// The seconds the previous frame took.
+    dt: f32,
+}
+
+impl Ui<'_> {
+    /// The window width, in physical pixels.
+    fn get_screen_width(&self) -> i32 {
+        i32::try_from(self.size.0).unwrap_or(i32::MAX)
     }
-    let path = Path::new(&arg);
 
-    // Directory launch: list the directory before opening the window (the
-    // title shows the image count).
-    // No GL is involved yet.
-    // Single-file launch: open the surface now.
-    // A document opens as a book (see `book.rs`) and keeps a one-cell grid, so
-    // ESC still has a target and that cell shows the cover page.
-    // A one-plane surface goes straight into the image view with no grid.
-    let mut book = false;
-    let (dir_grid, single_surface) = if path.is_dir() {
-        (Some(Grid::from_dir(path)?), None)
-    } else if path.is_file() {
-        let plain = open_surface(path)?;
-        book = plain.plane_count() > 1;
-        let surface: Arc<dyn Surface> = if book {
-            Arc::new(BookSurface::new(plain.into())?)
+    /// The window height, in physical pixels.
+    fn get_screen_height(&self) -> i32 {
+        i32::try_from(self.size.1).unwrap_or(i32::MAX)
+    }
+
+    /// The seconds since the viewer started.
+    fn get_time(&self) -> f64 {
+        self.time
+    }
+
+    /// The seconds the previous frame took.
+    fn get_frame_time(&self) -> f32 {
+        self.dt
+    }
+
+    /// The pointer position, in window pixels.
+    ///
+    /// A captured drag moves this value by the raw device travel, so the view
+    /// keeps reading one pointer while the real cursor stays grabbed.
+    fn get_mouse_position(&self) -> Vec2 {
+        self.input.cursor_position()
+    }
+
+    /// The raw device travel since the previous frame.
+    fn get_mouse_delta(&self) -> Vec2 {
+        self.input.delta()
+    }
+
+    /// The wheel travel since the previous frame, in notches.
+    fn get_mouse_wheel_move(&self) -> f32 {
+        self.input.wheel_move()
+    }
+
+    /// Is the key held now?
+    fn is_key_down(&self, key: KeyCode) -> bool {
+        self.input.is_key_down(key)
+    }
+
+    /// Did the key go down this frame, without a repeat?
+    fn is_key_pressed(&self, key: KeyCode) -> bool {
+        self.input.is_key_pressed(key)
+    }
+
+    /// The keys that went down this frame, without a repeat.
+    fn pressed_keys(&self) -> impl Iterator<Item = KeyCode> + '_ {
+        self.input.pressed_keys()
+    }
+
+    /// The input state of this frame.
+    fn input(&self) -> &Input {
+        self.input
+    }
+
+    /// The typed characters of this frame, each with its physical key.
+    fn typed(&self) -> &[versatile_viewer::input::Typed] {
+        self.input.typed()
+    }
+
+    /// Did the mouse button go down this frame?
+    fn is_mouse_button_pressed(&self, button: MouseButton) -> bool {
+        self.input.is_button_pressed(button)
+    }
+
+    /// Did the mouse button come up this frame?
+    fn is_mouse_button_released(&self, button: MouseButton) -> bool {
+        self.input.is_button_released(button)
+    }
+
+    /// Set the window title.
+    fn set_window_title(&self, title: &str) {
+        self.window.set_title(title);
+    }
+
+    /// Grab the pointer and hide it, so a drag has unbounded travel.
+    ///
+    /// `Locked` is the mode with no pointer motion at all, and X11 refuses it,
+    /// so `Confined` is the fallback. The raw device deltas arrive either way.
+    fn disable_cursor(&self) {
+        for mode in [CursorGrabMode::Locked, CursorGrabMode::Confined] {
+            if self.window.set_cursor_grab(mode).is_ok() {
+                break;
+            }
+        }
+        self.window.set_cursor_visible(false);
+    }
+
+    /// Give the pointer back and show it again.
+    fn enable_cursor(&self) {
+        let _ = self.window.set_cursor_grab(CursorGrabMode::None);
+        self.window.set_cursor_visible(true);
+    }
+
+    /// Put the pointer at a window point.
+    fn set_mouse_position(&self, at: Vec2) {
+        let position = winit::dpi::PhysicalPosition::new(at.x.round(), at.y.round());
+        let _ = self.window.set_cursor_position(position);
+    }
+
+    /// Start a frame: set the viewport and empty the batch.
+    fn begin(&self, r: &mut Renderer) {
+        r.begin(self.gpu.queue(), self.size);
+    }
+
+    /// Clear the window to `color`.
+    fn clear_background(r: &mut Renderer, color: Color) {
+        r.set_clear(color);
+    }
+
+    /// Draw the batch and present it.
+    fn end(&self, r: &mut Renderer) -> Result<(), FrameError> {
+        r.flush(self.gpu)
+    }
+}
+
+/// What the launch decided before a window existed.
+///
+/// The CLI, the directory listing and, for a single file, the decode all run
+/// here: the window title carries the image count, and a picture sizes its own
+/// window. The GPU work waits for [`App::resumed`], because a surface needs a
+/// window.
+struct Launch {
+    /// The grid of a directory launch, or the one-cell grid behind a document.
+    grid: Option<Grid>,
+    /// The decoded picture of a single-file launch.
+    decoded: Option<DecodedImage>,
+    /// The surface of a single-file launch, kept when it can repaint a region.
+    source: Option<Arc<dyn Surface>>,
+    /// The part of the plane a fresh open frames.
+    open_box: Option<Size>,
+    /// The tiny blurred background of a single-file launch.
+    blur: Option<DecodedImage>,
+    /// The launch starts in the image view.
+    single_plane: bool,
+    /// The window the launch asks for, in physical pixels.
+    win0: (u32, u32),
+    /// The title that both views start from.
+    title: String,
+}
+
+impl Launch {
+    /// Read the command line and open the path.
+    fn open(path: &Path) -> Result<Self> {
+        // Directory launch: list the directory before opening the window (the
+        // title shows the image count).
+        // Single-file launch: open the surface now.
+        // A document opens as a book (see `book.rs`) and keeps a one-cell grid,
+        // so ESC still has a target and that cell shows the cover page.
+        // A one-plane surface goes straight into the image view with no grid.
+        let mut book = false;
+        let (grid, single_surface) = if path.is_dir() {
+            (Some(Grid::from_dir(path)?), None)
+        } else if path.is_file() {
+            let plain = open_surface(path)?;
+            book = plain.plane_count() > 1;
+            let surface: Arc<dyn Surface> = if book {
+                Arc::new(BookSurface::new(plain.into())?)
+            } else {
+                plain.into()
+            };
+            let grid = book.then(|| Grid::from_paths(vec![path.to_path_buf()]));
+            (grid, Some(surface))
         } else {
-            plain.into()
+            bail!("no such file or directory: {}", path.display());
         };
-        let grid = book.then(|| Grid::from_paths(vec![path.to_path_buf()]));
-        (grid, Some(surface))
-    } else {
-        bail!("no such file or directory: {}", path.display());
-    };
-    // A single-file launch shows its picture (a book shows every spread) and
-    // keeps the one-cell grid behind it for ESC.
-    let single_plane = single_surface.is_some();
+        let single_plane = single_surface.is_some();
 
-    // Single-plane launch: render before opening the window, so the window
-    // can be sized to the image.
-    // Directory launch: fixed default window size.
-    // A vector file or a book keeps the surface it opened, so the image view
-    // can repaint the region its window shows.
-    let single_decoded = if single_plane {
-        Some(
-            single_surface
-                .as_ref()
-                .expect("a single-file launch has a surface")
-                .render(View::whole(0, 1.0))?,
-        )
-    } else {
-        None
-    };
-    // The box the launch frames: a book names its first spread, so the cover
-    // page shows whole, and every other source frames its whole plane.
-    let single_box = single_surface
-        .as_ref()
-        .and_then(|surface| surface.open_box(0));
-    // Only a source that can render a sharper picture of the same plane keeps
-    // its handle: a vector file repaints the region its window shows, while a
-    // raster file has nothing to add past its own pixels.
-    let single_source = if single_plane
-        && single_surface
+        // A single-plane launch renders before the window exists, so the window
+        // can be sized to the picture.
+        // A directory launch keeps the default window size.
+        let decoded = if single_plane {
+            Some(
+                single_surface
+                    .as_ref()
+                    .expect("a single-file launch has a surface")
+                    .render(View::whole(0, 1.0))?,
+            )
+        } else {
+            None
+        };
+        // The box the launch frames: a book names its first spread, so the
+        // cover page shows whole, and every other source frames its whole
+        // plane.
+        let open_box = single_surface
             .as_ref()
-            .is_some_and(|surface| surface.can_refine())
-    {
-        single_surface
-    } else {
-        None
-    };
-    // Blur-background source for a single-plane launch: computed while the
-    // RGBA buffer still exists (before the window and GL context exist).
-    // The code uploads it once the window is open.
-    let single_blur = if single_plane {
-        blurbg::Config::from_env()
-            .map(|config| config.blur(single_decoded.as_ref().expect("single image decoded")))
-    } else {
-        None
-    };
-    // A book sizes the window to the default, because its canvas can stand
-    // taller than any texture and wider than any screen.
-    let (win0_w, win0_h) = single_decoded
-        .as_ref()
-        .filter(|_| !book)
-        .map_or((1024, 768), |image| {
-            (image.width().as_i32(), image.height().as_i32())
-        });
-
-    let (mut rl, thread) = raylib::init()
-        .size(win0_w, win0_h)
-        .title(&window_title(
-            path,
-            dir_grid.as_ref().filter(|_| !single_plane),
-        ))
-        .resizable()
-        // Vsync on: the compositor or driver paces the frame loop to the
-        // monitor refresh rate and removes tearing (most visible during the
-        // zoom ease).
-        // This replaces set_target_fps below.
-        // A software 60 FPS cap fights a non-60 Hz monitor (judder) and
-        // adds input latency.
-        .vsync()
-        .build();
-    // WM_CLASS: raylib derives it from the creation title (the full path,
-    // which is not useful for window rules).
-    // The code stamps "vv" on X11 and does nothing on Wayland.
-    #[cfg(target_os = "linux")]
-    // SAFETY: the code only reads the handle.
-    // The handle stays valid while the window is open.
-    unsafe {
-        wmclass::set_class(rl.get_window_handle());
-    }
-    // The code quits through the q key handling.
-    // set_exit_key makes ESC close the window outright instead of
-    // returning to the grid.
-    rl.set_exit_key(None);
-    // Explicit default-arrow cursor while the mouse hovers the window.
-    rl.set_mouse_cursor(MouseCursor::MOUSE_CURSOR_ARROW);
-
-    // VV_BLUR_BG gimmick: a blurred copy of the viewed image behind it.
-    // The code declares it after `rl`, so it drops (and unloads its texture)
-    // before the window.
-    // Take the grid AFTER the window exists: it holds GPU textures, and
-    // because the code declares it after `rl`, it drops (and unloads) BEFORE
-    // the window closes, on normal exit and on panic unwinding.
-    let mut grid = dir_grid;
-    // Image-view state: what is shown and how it is framed.
-    // Its Loader field drops (and cancels the worker) before the window
-    // closes, like `grid`.
-    let (crop_tx, crop_rx) = channel();
-    let mut st = ViewState {
-        // A single-file launch shows its picture (a document shows its first
-        // spread) and keeps the grid, if any, behind it for ESC.
-        mode: if single_plane {
-            Mode::Image
+            .and_then(|surface| surface.open_box(0));
+        // Only a source that can render a sharper picture of the same plane
+        // keeps its handle: a vector file repaints the region its window shows,
+        // while a raster file has nothing to add past its own pixels.
+        let source = if single_plane
+            && single_surface
+                .as_ref()
+                .is_some_and(|surface| surface.can_refine())
+        {
+            single_surface
         } else {
-            Mode::Grid
-        },
-        open_id: None,
-        view_from_grid: None,
-        view_tex: None,
-        view_loading: false,
-        img: Size { w: 0.0, h: 0.0 },
-        zoom: ZoomMode::FitDown,
-        pan: Vec2::ZERO,
-        target_pan: Vec2::ZERO,
-        view_scale: None,
-        zoom_anchor: None,
-        angle: 0.0,
-        pivot: None,
-        selection: None,
-        ramps: Ramps::default(),
-        pixelated: false,
-        loader: None,
-        blur_bg: BlurBg::from_env(),
-        source: None,
-        source_plane: 0,
-        open_box: None,
-        open_align: OpenAlign::Free,
-        spread_glide: None,
-        prefetch: Prefetch::Idle,
-        prefetch_seq: 0,
-        crop: None,
-        crop_pending: false,
-        crop_gen: 0,
-        crop_seen: None,
-
-        crop_quiet_at: Instant::now(),
-        crop_tx,
-        crop_rx,
-    };
-    if let Some(image) = single_decoded {
-        st.view_tex = Some(upload_rgba(
-            &mut rl,
-            &thread,
-            image.as_rgba(),
-            image.width(),
-            image.height(),
-        )?);
-        apply_view_filter(
-            &thread,
-            st.view_tex.as_ref().expect("just uploaded"),
-            st.pixelated,
-        );
-        st.adopt_source(single_source);
-        st.img = Size {
-            w: image.width().as_f32(),
-            h: image.height().as_f32(),
+            None
         };
-        // A book frames its first spread, a picture frames the whole plane.
-        st.open_box = single_box;
-        st.reset_view();
-        if let Some(data) = single_blur {
-            attach_blur_bg(&mut st.blur_bg, &mut rl, &thread, Some(&data), None);
+        // Blur-background source for a single-plane launch: computed while the
+        // RGBA buffer still exists, so the window uploads it once.
+        let blur = if single_plane {
+            blurbg::Config::from_env()
+                .map(|config| config.blur(decoded.as_ref().expect("single image decoded")))
+        } else {
+            None
+        };
+        // A book keeps the default size, because its canvas can stand taller
+        // than any texture and wider than any screen.
+        let win0 = decoded
+            .as_ref()
+            .filter(|_| !book)
+            .map_or((1024, 768), |image| {
+                (image.width().raw().max(1), image.height().raw().max(1))
+            });
+        let title = window_title(path, grid.as_ref().filter(|_| !single_plane));
+        Ok(Self {
+            grid,
+            decoded,
+            source,
+            open_box,
+            blur,
+            single_plane,
+            win0,
+            title,
+        })
+    }
+}
+
+/// The viewer: the window, the GPU stack, the two views and the latches of the
+/// frame loop.
+#[allow(clippy::struct_excessive_bools)]
+struct App {
+    // --- platform ---
+    window: Option<Arc<Window>>,
+    gpu: Option<Gpu>,
+    renderer: Option<Renderer>,
+    input: Input,
+    /// The swapchain arrived and the launch frame uploaded.
+    started: bool,
+    /// The window size of this frame, in physical pixels.
+    size: (u32, u32),
+    /// When the previous frame started, for the frame time.
+    last_frame: Instant,
+    /// When the first frame started, for `Ui::get_time`.
+    started_at: Instant,
+    /// The frame time of the previous frame, in seconds.
+    dt: f32,
+    /// A failure that stopped the loop, returned from `main`.
+    fatal: Option<anyhow::Error>,
+
+    // --- launch data, consumed in `resumed` ---
+    decoded: Option<DecodedImage>,
+    pending_source: Option<Arc<dyn Surface>>,
+    pending_box: Option<Size>,
+    blur: Option<DecodedImage>,
+    single_plane: bool,
+    win0: (u32, u32),
+    launch_title: String,
+
+    // --- views ---
+    st: ViewState,
+    grid: Option<Grid>,
+
+    // --- frame-loop latches ---
+    /// The grid entry whose title the window shows now.
+    title_open_id: Option<u64>,
+    /// Set when the viewer exits entirely.
+    quit: bool,
+    /// `VV_DEBUG=1`: trace the input and the drag geometry to stderr.
+    debug: bool,
+    /// `VV_TIMING=1`: trace a slow frame to stderr.
+    timing: bool,
+    /// One spread step per press: a step disarms the next one, and the release
+    /// of `j`/`k` arms it again.
+    spread_armed: bool,
+    /// The previous frame's window size, for the resize detection.
+    last_win: Option<(f32, f32)>,
+    /// True while an image-view drag holds the pointer.
+    pointer_captured: bool,
+    /// The window point where the current drag grabbed the pointer.
+    grab_pos: Vec2,
+    /// The pointer position while captured: the grab point plus the raw travel.
+    drag_virtual: Vec2,
+    /// A post-drag pointer restore that waits for the warp to land.
+    pending_restore: Option<Vec2>,
+    /// How many warps the restore tried.
+    restore_tries: u32,
+    /// `f` held captures the pointer (a pan, or a free zoom with Shift).
+    f_capture: bool,
+    /// The running `f` hold zooms instead of panning.
+    f_zoom_capture: bool,
+    /// The running `f` hold ever zoomed, so its release runs no tap action.
+    f_zoom_tapped: bool,
+    /// The free-zoom drag's on-screen anchor.
+    f_zoom_anchor: Option<Vec2>,
+    /// `r` held captures the pointer and turns the image.
+    r_capture: bool,
+    /// The `v` region drag in progress.
+    region_drag: Option<region_sel::Drag>,
+    /// The held state of the zoom keys on layouts where `+`/`-` sit elsewhere.
+    zoom_keys: TypedKeys,
+    /// The auto-repeat of the held side-button navigation.
+    rep_nav_fwd: versatile_viewer::keyrepeat::RepeatState,
+    rep_nav_back: versatile_viewer::keyrepeat::RepeatState,
+}
+
+impl App {
+    /// Hold the launch result until the window exists.
+    fn new(launch: Launch) -> Self {
+        let (crop_tx, crop_rx) = channel();
+        Self {
+            window: None,
+            gpu: None,
+            renderer: None,
+            input: Input::default(),
+            started: false,
+            size: launch.win0,
+            last_frame: Instant::now(),
+            started_at: Instant::now(),
+            dt: 0.0,
+            fatal: None,
+            decoded: launch.decoded,
+            pending_source: launch.source,
+            pending_box: launch.open_box,
+            blur: launch.blur,
+            single_plane: launch.single_plane,
+            win0: launch.win0,
+            launch_title: launch.title,
+            st: ViewState {
+                // A single-file launch shows its picture (a document shows its
+                // first spread) and keeps the grid, if any, behind it for ESC.
+                mode: if launch.single_plane {
+                    Mode::Image
+                } else {
+                    Mode::Grid
+                },
+                open_id: None,
+                view_from_grid: None,
+                view_tex: None,
+                view_loading: false,
+                img: Size { w: 0.0, h: 0.0 },
+                zoom: ZoomMode::FitDown,
+                pan: Vec2::ZERO,
+                target_pan: Vec2::ZERO,
+                view_scale: None,
+                zoom_anchor: None,
+                angle: 0.0,
+                pivot: None,
+                selection: None,
+                ramps: Ramps::default(),
+                pixelated: false,
+                loader: None,
+                blur_bg: BlurBg::from_env(),
+                source: None,
+                source_plane: 0,
+                open_box: None,
+                open_align: OpenAlign::Free,
+                spread_glide: None,
+                prefetch: Prefetch::Idle,
+                prefetch_seq: 0,
+                crop: None,
+                crop_pending: false,
+                crop_gen: 0,
+                crop_seen: None,
+                crop_quiet_at: Instant::now(),
+                crop_tx,
+                crop_rx,
+            },
+            grid: launch.grid,
+            title_open_id: None,
+            quit: false,
+            debug: std::env::var_os("VV_DEBUG").is_some(),
+            timing: versatile_viewer::timing_enabled(),
+            spread_armed: true,
+            last_win: None,
+            pointer_captured: false,
+            grab_pos: Vec2::ZERO,
+            drag_virtual: Vec2::ZERO,
+            pending_restore: None,
+            restore_tries: 0,
+            f_capture: false,
+            f_zoom_capture: false,
+            f_zoom_tapped: false,
+            f_zoom_anchor: None,
+            r_capture: false,
+            region_drag: None,
+            zoom_keys: TypedKeys::default(),
+            rep_nav_fwd: versatile_viewer::keyrepeat::RepeatState::default(),
+            rep_nav_back: versatile_viewer::keyrepeat::RepeatState::default(),
         }
     }
-    // A one-image directory skips the grid: jump straight into that image
-    // (ESC still returns to the grid view).
-    // A single-file launch already shows its picture (a document shows its
-    // first spread), so it keeps what the launch rendered.
-    if !single_plane && grid.as_ref().is_some_and(|g| g.entries.len() == 1) {
-        let win = (
-            WinW::new(rl.get_screen_width() as f32),
-            WinH::new(rl.get_screen_height() as f32),
+
+    /// Upload the launch frame and start the background passes.
+    ///
+    /// The decode ran before the window existed, so this is the first moment a
+    /// texture can exist.
+    fn start_views(&mut self, window: &Arc<Window>) {
+        self.size = window.inner_size().into();
+        let (renderer, gpu) = (
+            self.renderer.as_ref().expect("just built"),
+            self.gpu.as_ref().expect("just built"),
         );
-        show_entry(
-            &mut st,
-            grid.as_mut().unwrap(),
-            0,
-            &mut rl,
-            &thread,
-            win,
-            true,
-        );
+        if let Some(image) = self.decoded.take() {
+            match renderer.upload(&image) {
+                Ok(texture) => self.st.view_tex = Some(texture),
+                Err(err) => eprintln!("vv: upload: {err}"),
+            }
+            self.st.adopt_source(self.pending_source.take());
+            self.st.img = Size {
+                w: image.width().as_f32(),
+                h: image.height().as_f32(),
+            };
+            // A book frames its first spread, a picture frames the whole plane.
+            self.st.open_box = self.pending_box.take();
+            self.st.reset_view();
+            if let Some(data) = self.blur.take() {
+                attach_blur_bg(
+                    &mut self.st.blur_bg,
+                    &renderer.uploader(),
+                    Some(&data),
+                    None,
+                );
+            }
+        }
+        // The grid listed its directory before the window existed; the decodes
+        // and the placeholder pass upload their own textures, so they start
+        // here.
+        if let Some(grid) = self.grid.as_mut() {
+            grid.start(renderer.uploader());
+        }
+        // A one-image directory skips the grid: jump straight into that image
+        // (ESC still returns to the grid view).
+        if !self.single_plane && self.grid.as_ref().is_some_and(|g| g.entries.len() == 1) {
+            let ui = Ui {
+                input: &self.input,
+                window,
+                gpu,
+                size: self.size,
+                time: 0.0,
+                dt: 0.0,
+            };
+            let win = (WinW::new(self.size.0 as f32), WinH::new(self.size.1 as f32));
+            show_entry(
+                &mut self.st,
+                self.grid.as_mut().unwrap(),
+                0,
+                &ui,
+                renderer,
+                win,
+                true,
+            );
+        }
     }
 
-    // Window title: grid mode and single-file launch keep the launch title.
-    // Image view rewrites it per open entry (reset when open_id changes).
-    let launch_title = window_title(path, grid.as_ref());
-    let mut title_open_id: Option<u64> = None;
+    /// Run one frame: read the input, advance every ease, draw and present.
+    //
+    // One frame is one long state machine by design: the order of the steps
+    // (drain, input, motion, draw) carries the invariants.
+    #[allow(clippy::too_many_lines)]
+    fn frame(&mut self) -> Result<()> {
+        let window = self.window.as_ref().expect("started").clone();
+        let now = Instant::now();
+        let time = now.duration_since(self.started_at).as_secs_f64();
+        let dt = now.duration_since(self.last_frame).as_secs_f32();
+        self.last_frame = now;
+        self.dt = dt;
+        // The frame body borrows the frame's input and GPU immutably while it
+        // mutates the views, so the two move out of the app for the length of
+        // the call and back in afterwards.
+        let gpu = self.gpu.take().expect("started");
+        let input = std::mem::take(&mut self.input);
+        let ui = Ui {
+            input: &input,
+            window: &window,
+            gpu: &gpu,
+            size: self.size,
+            time,
+            dt,
+        };
+        let mut r = self.renderer.take().expect("started");
+        let result = self.body(&ui, &mut r);
+        self.renderer = Some(r);
+        self.gpu = Some(gpu);
+        self.input = input;
+        result
+    }
+}
 
-    // Set when the viewer exits entirely.
-    let mut quit = false;
-    // VV_DEBUG=1: trace grid open/return events to stderr.
-    let debug = std::env::var_os("VV_DEBUG").is_some();
-    // VV_TIMING=1: trace slow frames to stderr.
-    let timing = versatile_viewer::timing_enabled();
-    // Previous per-key down state for the VV_DEBUG event trace.
-    let mut prev_down = [false; 349];
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.started {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+            return;
+        }
+        let attributes = Window::default_attributes()
+            .with_title(self.launch_title.clone())
+            // WM_CLASS on X11, which replaces `src/wmclass.rs`: the class and
+            // the instance name are both `vv`.
+            .with_name("vv", "vv")
+            .with_inner_size(winit::dpi::PhysicalSize::new(self.win0.0, self.win0.1))
+            .with_resizable(true);
+        let window = match event_loop.create_window(attributes) {
+            Ok(window) => Arc::new(window),
+            Err(err) => {
+                self.fatal = Some(anyhow::anyhow!("cannot create the window: {err}"));
+                event_loop.exit();
+                return;
+            }
+        };
+        let settings = GpuSettings {
+            present: Present::from_env(),
+            latency: versatile_viewer::gpu::DEFAULT_LATENCY,
+            trace: self.debug || self.timing,
+        };
+        let gpu = match Gpu::new(&window, settings) {
+            Ok(gpu) => gpu,
+            Err(err) => {
+                self.fatal = Some(anyhow::anyhow!("{err}"));
+                event_loop.exit();
+                return;
+            }
+        };
+        let renderer = Renderer::new(
+            gpu.device(),
+            gpu.queue(),
+            gpu.format(),
+            gpu.max_texture_side(),
+        );
+        self.size = window.inner_size().into();
+        self.window = Some(Arc::clone(&window));
+        self.gpu = Some(gpu);
+        self.renderer = Some(renderer);
+        self.started = true;
+        self.started_at = Instant::now();
+        self.last_frame = Instant::now();
+        self.start_views(&window);
+        window.request_redraw();
+    }
 
-    // No set_target_fps: vsync paces the frame loop (see the builder above).
-    // Auto-repeat state for image-mode prev/next (xset r rate values).
-    let mut rep_nav_fwd = keyrepeat::RepeatState::default();
-    let mut rep_nav_back = keyrepeat::RepeatState::default();
-    // One spread step per press: a step disarms the next one, and the release
-    // of `j`/`k` arms it again.
-    // The key queue already reports a press once, so this only guards the
-    // input setups whose auto-repeat arrives as a second press.
-    let mut spread_armed = true;
-    // Previous frame window size: self-tracked resize detection (see the
-    // `resized` computation in the loop).
-    let mut last_win: Option<(f32, f32)> = None;
-    // True while an image-view drag has the pointer captured (DisableCursor:
-    // hidden and locked, unbounded virtual deltas, so the drag cannot hit a
-    // screen edge).
-    // The code releases it on mouse-up.
-    // The pointer then reappears exactly where the drag started (GLFW
-    // restores the pre-capture position).
-    let mut pointer_captured = false;
-    // Window position where the current (or last) drag grabbed the pointer.
-    // The raylib EnableCursor does not reliably restore it, so the code warps
-    // back explicitly on release.
-    let mut grab_pos = Vec2::ZERO;
-    // Virtual cursor position while captured (grab_pos + accumulated raw
-    // deltas).
-    // The raylib virtual position is unreliable to interpret.
-    let mut drag_virtual = Vec2::ZERO;
-    // Post-drag pointer restore, re-checked for a few frames: X11 warps are
-    // async, and the GLFW EnableCursor re-warp can land after ours and
-    // recenter the cursor.
-    // The code warps again until the position sticks.
-    let mut pending_restore: Option<Vec2> = None;
-    let mut restore_tries = 0u32;
-    // `f` held captures the pointer like a left-drag (hold = pan, cursor
-    // hidden).
-    // Shift+F held zooms instead: it captures the pointer the same way, and
-    // the vertical mouse travel drives the free zoom (up zooms in, down zooms
-    // out) on the wheel's anchor path.
-    // A tap (no pointer travel) runs the `f` action on release instead, so
-    // the code can tell a press and a press-and-hold apart.
-    let mut f_capture = false;
-    // True when the running `f` hold zooms instead of panning.
-    // A Shift at the `f` press edge starts in the zoom, and Shift going down
-    // or up mid-hold switches the mode.
-    let mut f_zoom_capture = false;
-    // Set when the running `f` hold ever zoomed, so its release runs no tap
-    // action even though a zoom hold travels the pointer no distance.
-    let mut f_zoom_tapped = false;
-    // The free-zoom drag's on-screen anchor.
-    // A zoom hold that starts with Shift at the grab point anchors there, and
-    // the zoom drift then walks it toward the window center, exactly like the
-    // wheel zoom's anchor.
-    // The capture keeps the pointer still, so the image point under the anchor
-    // is what slides toward the center on screen.
-    // A switch from the pan hold anchors at the window center instead (see
-    // the switch below).
-    let mut f_zoom_anchor: Option<Vec2> = None;
-    // `r` held captures the pointer like the `f` hold, and the vertical mouse
-    // travel turns the image: down turns it clockwise and up turns it
-    // counter-clockwise.
-    // The turn adds to the angle the image shows now, so a second hold
-    // continues from where the first one left it.
-    // The release keeps the angle, so the image stays turned.
-    let mut r_capture = false;
-    // `v` held drags a region selection with a free cursor: the press anchors
-    // in source units, the pointer moves the opposite corner, and the release
-    // keeps the rect.
-    // No capture here, so the cursor stays visible and the region stops at the
-    // window edge.
-    let mut region_drag: Option<region_sel::Drag> = None;
-    // The held state of the zoom keys on layouts where `+`/`-` do not sit on
-    // their US keycodes.
-    // The raw character events repeat at the X auto-repeat rate, so this
-    // turns them into a timed hold that the motion ramps can read.
-    let mut zoom_keys = TypedKeys::default();
-
-    while !rl.window_should_close() && !quit {
-        // VV_TIMING: the frame started now.
-        // The code reports it at the end of the frame when it ran long.
-        let frame_started = timing.then(std::time::Instant::now);
-        // VV_DEBUG: trace every key raylib sees (keycode per raylib/GLFW:
-        // 257=Enter, 335=KpEnter, 256=Esc, 262/263=Right/Left,
-        // 264/265=Up/Down, 72/74/75/76=h/j/k/l).
-        if debug {
-            for k in 32u32..=348 {
-                let (down, pressed) = unsafe {
-                    (
-                        raylib::ffi::IsKeyDown(k as i32),
-                        raylib::ffi::IsKeyPressed(k as i32),
-                    )
-                };
-                if pressed {
-                    eprintln!("vv: PRESSED key {k}");
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        match event {
+            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::RedrawRequested => match self.frame() {
+                Ok(()) => {
+                    if self.quit {
+                        event_loop.exit();
+                    } else if let Some(window) = &self.window {
+                        // A continuous loop, like the ramps and the eases need:
+                        // a held key or a running ease draws the next frame.
+                        window.request_redraw();
+                    }
                 }
-                if down != prev_down[k as usize] {
-                    eprintln!("vv: key {k} {}", if down { "DOWN" } else { "UP" });
-                    prev_down[k as usize] = down;
+                Err(err) => {
+                    self.fatal = Some(err);
+                    event_loop.exit();
+                }
+            },
+            WindowEvent::Resized(size) => {
+                if let Some(gpu) = self.gpu.as_mut() {
+                    gpu.resize(size.width, size.height);
+                }
+                if let Some(window) = &self.window {
+                    self.size = window.inner_size().into();
                 }
             }
-            // Frames longer than a key tap can swallow the IsKeyPressed edge
-            // detection entirely (press+release between two polls).
-            // The code logs them.
-            let ft = rl.get_frame_time();
+            WindowEvent::ScaleFactorChanged { .. } => {
+                if let Some(window) = &self.window {
+                    self.size = window.inner_size().into();
+                    if let Some(gpu) = self.gpu.as_mut() {
+                        gpu.resize(self.size.0, self.size.1);
+                    }
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } => self.key(&event),
+            WindowEvent::MouseWheel { delta, .. } => self.input.wheel(delta),
+            WindowEvent::CursorMoved { position, .. } => {
+                // A captured drag reads the raw device travel, so the real
+                // pointer does not steer it.
+                if !self.pointer_captured {
+                    self.input
+                        .cursor(Vec2::new(position.x as f32, position.y as f32));
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } => self.input.button(button, state),
+            WindowEvent::Focused(false) => {
+                // A lost focus never delivers the releases, so a captured drag
+                // must not outlive it.
+                self.input.forget_held();
+                self.pointer_captured = false;
+                self.f_capture = false;
+                self.f_zoom_capture = false;
+                self.r_capture = false;
+                self.region_drag = None;
+                if let Some(window) = &self.window {
+                    let _ = window.set_cursor_grab(CursorGrabMode::None);
+                    window.set_cursor_visible(true);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn device_event(&mut self, _event_loop: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
+        if let DeviceEvent::MouseMotion { delta } = event {
+            // The raw travel of the device: no pointer acceleration and no
+            // desktop scale, which is the source raylib's `DisableCursor` fed
+            // the view too.
+            self.input.motion(Vec2::new(delta.0 as f32, delta.1 as f32));
+        }
+    }
+}
+
+impl App {
+    /// One frame: read the input, advance every ease, draw and present.
+    ///
+    /// `ui` carries the window and the input of this frame, and `r` the batch
+    /// the draw calls fill.
+    #[allow(clippy::too_many_lines)]
+    fn body(&mut self, ui: &Ui, r: &mut Renderer) -> Result<()> {
+        // VV_TIMING: the frame started now.
+        // The code reports it at the end of the frame when it ran long.
+        let frame_started = self.timing.then(std::time::Instant::now);
+        // VV_DEBUG: trace every key press this frame.
+        if self.debug {
+            for k in ui.pressed_keys() {
+                eprintln!("vv: PRESSED key {k:?}");
+            }
+            // A frame longer than a key tap can hide the whole press. The input
+            // layer records every event, so the trace above still shows it, and
+            // this line names the frame that swallowed it.
+            let ft = ui.get_frame_time();
             if ft > 0.1 {
                 eprintln!("vv: slow frame {ft:.0} ms");
             }
         }
-        let win_w = rl.get_screen_width() as f32;
-        let win_h = rl.get_screen_height() as f32;
+        let win_w = ui.get_screen_width() as f32;
+        let win_h = ui.get_screen_height() as f32;
         // Post-drag restore: verify the warp landed where the code sent it.
         // If a competing re-warp (GLFW, WM, XWayland) moved it, snap again.
         // The code gives up after a few tries so a user moving the mouse is
         // never pinned.
-        if let Some(target) = pending_restore {
-            let cur = rl.get_mouse_position();
+        if let Some(target) = self.pending_restore {
+            let cur = ui.get_mouse_position();
             let settled = (cur.x - target.x).abs() < 1.0 && (cur.y - target.y).abs() < 1.0;
-            if debug && !settled {
+            if self.debug && !settled {
                 eprintln!(
-                    "vv: restore try {restore_tries}: cur ({:.0},{:.0}) -> ({:.0},{:.0})",
-                    cur.x, cur.y, target.x, target.y
+                    "vv: restore try {}: cur ({:.0},{:.0}) -> ({:.0},{:.0})",
+                    self.restore_tries, cur.x, cur.y, target.x, target.y
                 );
             }
-            if settled || restore_tries >= 3 {
-                pending_restore = None;
+            if settled || self.restore_tries >= 3 {
+                self.pending_restore = None;
             } else {
-                rl.set_mouse_position(target);
-                restore_tries += 1;
+                ui.set_mouse_position(target);
+                self.restore_tries += 1;
             }
         }
         // The code does the resize detection itself.
@@ -1934,29 +2219,31 @@ fn main() -> Result<()> {
         // nowhere".
         // Any size difference from the previous frame counts as a resize
         // frame.
-        let resized = last_win != Some((win_w, win_h));
-        last_win = Some((win_w, win_h));
+        let resized = self.last_win != Some((win_w, win_h));
+        self.last_win = Some((win_w, win_h));
 
         // Dynamic window title: follow the open image in image view.
-        // Back to the launch title in grid mode.
-        if st.open_id != title_open_id {
-            title_open_id = st.open_id;
-            // A grid title is the launch title already, so the borrow costs
+        // Back to the launch title in self.grid mode.
+        if self.st.open_id != self.title_open_id {
+            self.title_open_id = self.st.open_id;
+            // A self.grid title is the launch title already, so the borrow costs
             // no allocation.
-            let title = st
+            let title = self
+                .st
                 .open_id
                 .and_then(|id| {
-                    grid.as_ref()?
+                    self.grid
+                        .as_ref()?
                         .entries
                         .iter()
                         .find(|e| e.id == id)
                         .map(|e| Cow::Owned(image_title(e.source.path())))
                 })
-                .unwrap_or(Cow::Borrowed(launch_title.as_str()));
-            rl.set_window_title(&thread, &title);
+                .unwrap_or(Cow::Borrowed(self.launch_title.as_str()));
+            ui.set_window_title(&title);
         }
 
-        // Prefetch priority: in grid mode the neighbors of the selected
+        // Prefetch priority: in self.grid mode the neighbors of the selected
         // entry (left, right, up, down).
         // In image mode the previous and next entries.
         // While the image view still waits for its own decode, only the
@@ -1964,15 +2251,16 @@ fn main() -> Result<()> {
         // the visible image gets all the cores.
         // load_pending drains finished decodes (texture uploads happen here,
         // on the main thread) and dispatches new ones to the rayon pool.
-        let plan = if st.mode == Mode::Image {
-            match st
+        let plan = if self.st.mode == Mode::Image {
+            match self
+                .st
                 .open_id
-                .and_then(|id| grid.as_ref().and_then(|g| g.index_of(id)))
+                .and_then(|id| self.grid.as_ref().and_then(|g| g.index_of(id)))
             {
                 Some(i) => {
-                    let n = grid.as_ref().unwrap().entries.len();
+                    let n = self.grid.as_ref().unwrap().entries.len();
                     let mut priority = Vec::new();
-                    if st.view_loading {
+                    if self.st.view_loading {
                         priority.push(i);
                     } else {
                         if i > 0 {
@@ -1985,7 +2273,7 @@ fn main() -> Result<()> {
                     LoadPlan {
                         priority,
                         scan_start: i,
-                        scan: !st.view_loading,
+                        scan: !self.st.view_loading,
                         preload_full: true,
                     }
                 }
@@ -1995,7 +2283,7 @@ fn main() -> Result<()> {
                     ..LoadPlan::default()
                 },
             }
-        } else if let Some(g) = grid.as_ref() {
+        } else if let Some(g) = self.grid.as_ref() {
             LoadPlan {
                 priority: g.prefetch_neighbors(g.selected, WinW::new(win_w), WinH::new(win_h)),
                 scan_start: g.selected,
@@ -2008,19 +2296,20 @@ fn main() -> Result<()> {
                 ..LoadPlan::default()
             }
         };
-        if let Some(g) = grid.as_mut() {
-            g.load_pending(&mut rl, &thread, &plan);
+        if let Some(g) = self.grid.as_mut() {
+            g.load_pending(&plan);
         }
 
         // Image mode: drain the streaming loader first.
         // Texture uploads need the main thread.
-        if st.mode == Mode::Image {
+        if self.st.mode == Mode::Image {
             let mut open_failed = false;
-            // Waiting on a grid decode (no streaming loader for this open).
+            // Waiting on a self.grid decode (no streaming loader for this open).
             // When its texture lands, the code takes it over as the view.
-            if st.view_tex.is_none() && st.loader.is_none() && st.open_id.is_some() {
-                let id = st.open_id.expect("checked above");
-                match grid
+            if self.st.view_tex.is_none() && self.st.loader.is_none() && self.st.open_id.is_some() {
+                let id = self.st.open_id.expect("checked above");
+                match self
+                    .grid
                     .as_mut()
                     .and_then(|g| g.entries.iter().position(|e| e.id == id).map(|i| (g, i)))
                 {
@@ -2037,11 +2326,11 @@ fn main() -> Result<()> {
                             // texture for the open entry (keep set), and
                             // show_entry takes it over.
                             show_entry(
-                                &mut st,
+                                &mut self.st,
                                 g,
                                 i,
-                                &mut rl,
-                                &thread,
+                                ui,
+                                r,
                                 (WinW::new(win_w), WinH::new(win_h)),
                                 false,
                             );
@@ -2058,62 +2347,45 @@ fn main() -> Result<()> {
             }
             // One message at a time: the borrow of the loader field ends
             // before the body touches the view, so a refit may borrow it.
-            while let Some(msg) = st.loader.as_ref().and_then(Loader::try_recv) {
+            while let Some(msg) = self.st.loader.as_ref().and_then(Loader::try_recv) {
                 match msg {
                     Ok(DecodeMsg::Header { width, height }) => {
                         // Dimensions known: fit down at once (the ease
                         // block only runs from the next frame on).
-                        st.img = Size {
+                        self.st.img = Size {
                             w: width.as_f32(),
                             h: height.as_f32(),
                         };
-                        st.refit_open();
+                        self.st.refit_open();
                     }
-                    Ok(DecodeMsg::Preview { image, blur }) => {
+                    Ok(DecodeMsg::Preview { frame, blur }) => {
                         // Progressively better render of the same image.
-                        show_frame(
-                            &mut rl,
-                            &thread,
-                            &mut st.view_tex,
-                            image.as_rgba(),
-                            image.width(),
-                            image.height(),
-                            st.pixelated,
-                        )?;
+                        self.st.view_tex = Some(frame.upload(&r.uploader())?);
                         attach_blur_bg(
-                            &mut st.blur_bg,
-                            &mut rl,
-                            &thread,
+                            &mut self.st.blur_bg,
+                            &r.uploader(),
                             blur.as_ref(),
-                            st.open_id,
+                            self.st.open_id,
                         );
                     }
-                    Ok(DecodeMsg::Done { image, blur }) => {
+                    Ok(DecodeMsg::Done { frame, blur }) => {
                         // Non-JXL formats only learn dimensions here.
-                        if st.img.w == 0.0 {
-                            st.img = Size {
-                                w: image.width().as_f32(),
-                                h: image.height().as_f32(),
+                        if self.st.img.w == 0.0 {
+                            let (width, height) = frame.dims();
+                            self.st.img = Size {
+                                w: width as f32,
+                                h: height as f32,
                             };
-                            st.refit_open();
+                            self.st.refit_open();
                         }
-                        show_frame(
-                            &mut rl,
-                            &thread,
-                            &mut st.view_tex,
-                            image.as_rgba(),
-                            image.width(),
-                            image.height(),
-                            st.pixelated,
-                        )?;
+                        self.st.view_tex = Some(frame.upload(&r.uploader())?);
                         attach_blur_bg(
-                            &mut st.blur_bg,
-                            &mut rl,
-                            &thread,
+                            &mut self.st.blur_bg,
+                            &r.uploader(),
                             blur.as_ref(),
-                            st.open_id,
+                            self.st.open_id,
                         );
-                        st.view_loading = false;
+                        self.st.view_loading = false;
                     }
                     Err(err) => {
                         eprintln!("vv: {err}");
@@ -2122,31 +2394,31 @@ fn main() -> Result<()> {
                 }
             }
             if open_failed {
-                st.loader = None; // cancel the worker
-                st.close_crop();
+                self.st.loader = None; // cancel the worker
+                self.st.close_crop();
                 // Keep the entry: mark it as failed, so its cell stays
                 // visible (dimmed, error mark) instead of vanishing
                 // silently.
-                if let Some(id) = st.open_id.take() {
-                    grid.as_mut()
+                if let Some(id) = self.st.open_id.take() {
+                    self.grid
+                        .as_mut()
                         .unwrap()
                         .mark_failed(id, DecodeFailure::Decode);
                 }
-                st.view_from_grid = None;
-                st.mode = Mode::Grid;
-                st.view_tex = None;
-                st.view_loading = false;
+                self.st.view_from_grid = None;
+                self.st.mode = Mode::Grid;
+                self.st.view_tex = None;
+                self.st.view_loading = false;
             }
         }
 
         // True while a Shift key is down.
-        // Shift + h/j/k/l moves at double speed in both views: the grid
+        // Shift + h/j/k/l moves at double speed in both views: the self.grid
         // selection step and the image pan and free zoom.
         // The flag lives outside the mode branches because both read it.
-        let shift = rl.is_key_down(KeyboardKey::KEY_LEFT_SHIFT)
-            || rl.is_key_down(KeyboardKey::KEY_RIGHT_SHIFT);
+        let shift = ui.is_key_down(KeyCode::ShiftLeft) || ui.is_key_down(KeyCode::ShiftRight);
         // Shift + h/j/k/l moves at double speed in both views.
-        // The grid passes the step count to its input handler, and the image
+        // The self.grid passes the step count to its input handler, and the image
         // view scales its pan and zoom ramps.
         let shift_mult = if shift {
             versatile_viewer::SHIFT_SPEED_MULTIPLIER
@@ -2155,48 +2427,48 @@ fn main() -> Result<()> {
         };
         let shift_speed = shift_mult as f32;
 
-        if st.mode == Mode::Grid {
+        if self.st.mode == Mode::Grid {
             // Grid navigation: h/j/k/l and the arrows move the selection,
             // Enter opens the selected image, q quits (ESC is inert here,
-            // because the grid is the home view).
-            match grid.as_mut().unwrap().handle_input(
-                &mut rl,
+            // because the self.grid is the home view).
+            match self.grid.as_mut().unwrap().handle_input(
+                ui.input(),
                 (WinW::new(win_w), WinH::new(win_h)),
                 shift_mult,
             ) {
                 Some(GridAction::Open(i)) => {
-                    if debug {
+                    if self.debug {
                         eprintln!("vv: enter pressed -> open idx {i}");
                     }
                     show_entry(
-                        &mut st,
-                        grid.as_mut().unwrap(),
+                        &mut self.st,
+                        self.grid.as_mut().unwrap(),
                         i,
-                        &mut rl,
-                        &thread,
+                        ui,
+                        r,
                         (WinW::new(win_w), WinH::new(win_h)),
                         true,
                     );
                 }
-                Some(GridAction::Quit) => quit = true,
+                Some(GridAction::Quit) => self.quit = true,
                 None => {}
             }
         } else {
             // Image mode.
             // Drain the raw key and char queues every frame (same rationale
-            // as grid.rs handle_input).
+            // as self.grid.rs handle_input).
             // is_key_pressed misses a press+release pair that lands inside
             // one frame, and this is easy here while frames stall on texture
             // uploads or decode.
-            // Leftover queue entries otherwise leak into grid mode and act
+            // Leftover queue entries otherwise leak into self.grid mode and act
             // there (for example a missed Enter that reopens the
             // just-viewed image at once).
             // State queries (is_key_down panning, is_key_pressed W/E/=/-) are
             // unaffected: the queue is separate from the key snapshot.
-            // Enter and ESC return to the grid when one exists (nsxiv-like:
-            // Enter toggles between the grid and the open image).
+            // Enter and ESC return to the self.grid when one exists (nsxiv-like:
+            // Enter toggles between the self.grid and the open image).
             // q quits, and ESC never quits the program (inert in single-file
-            // launches, where there is no grid to return to).
+            // launches, where there is no self.grid to return to).
             // Space and Backspace switch to the next or previous image
             // (nsxiv-style nav, with n or Space for next and p or
             // Backspace for previous, while the arrows and h/j/k/l stay
@@ -2232,49 +2504,47 @@ fn main() -> Result<()> {
             // The key that went down this frame, if any.
             // A typed `+`/`-` pairs with it to learn which physical key holds
             // that character (see zoomkeys::TypedKeys).
-            let mut pressed_key: Option<KeyboardKey> = None;
-            while let Some(k) = rl.get_key_pressed() {
-                pressed_key = Some(k);
+            for k in ui.pressed_keys() {
                 match k {
                     // ESC drops a region selection first and keeps the image
-                    // view, so a second ESC returns to the grid.
-                    KeyboardKey::KEY_ESCAPE => escape = true,
-                    KeyboardKey::KEY_ENTER | KeyboardKey::KEY_KP_ENTER => {
+                    // view, so a second ESC returns to the self.grid.
+                    KeyCode::Escape => escape = true,
+                    KeyCode::Enter | KeyCode::NumpadEnter => {
                         enter = true;
                     }
-                    KeyboardKey::KEY_Q => quit_pressed = true,
-                    KeyboardKey::KEY_A => pixelated_toggle = true,
-                    KeyboardKey::KEY_F => f_key = true,
-                    KeyboardKey::KEY_R => {
+                    KeyCode::KeyQ => quit_pressed = true,
+                    KeyCode::KeyA => pixelated_toggle = true,
+                    KeyCode::KeyF => f_key = true,
+                    KeyCode::KeyR => {
                         r_key = true;
                         r_pivot_edge = shift;
                     }
-                    KeyboardKey::KEY_V => {
+                    KeyCode::KeyV => {
                         v_key = true;
                         v_square_edge = shift;
                     }
-                    KeyboardKey::KEY_SPACE => {
+                    KeyCode::Space => {
                         if shift {
                             nav_prev_edge = true;
                         } else {
                             nav_next_edge = true;
                         }
                     }
-                    KeyboardKey::KEY_N => nav_next_edge = true,
-                    KeyboardKey::KEY_BACKSPACE | KeyboardKey::KEY_P => nav_prev_edge = true,
-                    KeyboardKey::KEY_G => {
+                    KeyCode::KeyN => nav_next_edge = true,
+                    KeyCode::Backspace | KeyCode::KeyP => nav_prev_edge = true,
+                    KeyCode::KeyG => {
                         if shift {
                             jump_last = true;
                         } else {
                             jump_first = true;
                         }
                     }
-                    KeyboardKey::KEY_J => spread_next = shift,
-                    KeyboardKey::KEY_K => spread_prev = shift,
+                    KeyCode::KeyJ => spread_next = shift,
+                    KeyCode::KeyK => spread_prev = shift,
                     // Page-down and Page-up step a spread too, so a reader who
                     // never learned the Shift+J/K pair still turns the page.
-                    KeyboardKey::KEY_PAGE_DOWN => spread_next = true,
-                    KeyboardKey::KEY_PAGE_UP => spread_prev = true,
+                    KeyCode::PageDown => spread_next = true,
+                    KeyCode::PageUp => spread_prev = true,
                     _ => {}
                 }
             }
@@ -2292,48 +2562,48 @@ fn main() -> Result<()> {
             // still, so the image point under it drifts toward the center on
             // screen.
             // Auto-repeat re-fires the press edge while held, hence the
-            // `!pointer_captured && !f_capture` guard.
+            // `!self.pointer_captured && !self.f_capture` guard.
             // The same guard covers the `r` rotation hold, which grabs the
             // pointer the same way.
             let mut f_click: Option<Vec2> = None;
-            if (f_key || r_key) && !pointer_captured && !f_capture && !r_capture {
-                grab_pos = rl.get_mouse_position().into();
-                drag_virtual = grab_pos;
-                rl.disable_cursor();
-                pointer_captured = true;
+            if (f_key || r_key) && !self.pointer_captured && !self.f_capture && !self.r_capture {
+                self.grab_pos = ui.get_mouse_position();
+                self.drag_virtual = self.grab_pos;
+                ui.disable_cursor();
+                self.pointer_captured = true;
                 if r_key {
                     // `r` turns the image. The hold adds to the angle the image
                     // shows now, so the press never resets the turn.
                     // A plain `r` turns around the image center, and Shift+R
                     // turns around the grabbed point, which stays on its window
                     // spot while the pointer stays captured.
-                    r_capture = true;
-                    st.pivot = r_pivot_edge.then_some(grab_pos);
-                    if debug {
+                    self.r_capture = true;
+                    self.st.pivot = r_pivot_edge.then_some(self.grab_pos);
+                    if self.debug {
                         eprintln!(
                             "vv: r hold grab at ({:.0},{:.0}), angle {}, pivot {:?}",
-                            grab_pos.x, grab_pos.y, st.angle, st.pivot
+                            self.grab_pos.x, self.grab_pos.y, self.st.angle, self.st.pivot
                         );
                     }
                 } else {
-                    f_capture = true;
-                    f_zoom_capture = shift;
-                    f_zoom_anchor = f_zoom_capture.then_some(grab_pos);
-                    if debug {
+                    self.f_capture = true;
+                    self.f_zoom_capture = shift;
+                    self.f_zoom_anchor = self.f_zoom_capture.then_some(self.grab_pos);
+                    if self.debug {
                         eprintln!(
                             "vv: f hold grab at ({:.0},{:.0}), zoom {}",
-                            grab_pos.x, grab_pos.y, f_zoom_capture
+                            self.grab_pos.x, self.grab_pos.y, self.f_zoom_capture
                         );
                     }
                 }
             }
             // A Shift change mid-hold switches the pan and the zoom.
             // The capture stays, so the travel stays unbounded.
-            if f_capture && shift != f_zoom_capture {
-                f_zoom_capture = shift;
+            if self.f_capture && shift != self.f_zoom_capture {
+                self.f_zoom_capture = shift;
                 // Forget the distance the tap test and the pan measured.
-                grab_pos = rl.get_mouse_position().into();
-                drag_virtual = grab_pos;
+                self.grab_pos = ui.get_mouse_position();
+                self.drag_virtual = self.grab_pos;
                 // A zoom from here on anchors on the view center: the image
                 // point the window shows at its middle.
                 // The pointer is hidden, so its last screen spot says nothing
@@ -2341,14 +2611,14 @@ fn main() -> Result<()> {
                 // spot away from the middle.
                 // The anchor is the middle of the window, so the ease needs no
                 // drift toward it.
-                f_zoom_anchor = f_zoom_capture.then_some(Vec2 {
+                self.f_zoom_anchor = self.f_zoom_capture.then_some(Vec2 {
                     x: win_w / 2.0,
                     y: win_h / 2.0,
                 });
                 // A zoom hold never counts as a tap.
-                f_zoom_tapped = true;
-                if debug {
-                    eprintln!("vv: f hold switch, zoom {f_zoom_capture}");
+                self.f_zoom_tapped = true;
+                if self.debug {
+                    eprintln!("vv: f hold switch, zoom {}", self.f_zoom_capture);
                 }
             }
             // `!is_key_down` also covers a press+release landing inside one
@@ -2356,48 +2626,53 @@ fn main() -> Result<()> {
             // release edge to observe).
             // Without this the capture sticks.
             // The `r` release keeps the angle, so the image stays turned.
-            if (f_capture || r_capture)
-                && !rl.is_key_down(KeyboardKey::KEY_F)
-                && !rl.is_key_down(KeyboardKey::KEY_R)
+            if (self.f_capture || self.r_capture)
+                && !ui.is_key_down(KeyCode::KeyF)
+                && !ui.is_key_down(KeyCode::KeyR)
             {
                 // Fold in this frame's motion before the lock is released
                 // (the drag block below no longer runs once capture ends).
-                let delta = rl.get_mouse_delta();
-                drag_virtual.x += delta.x;
-                drag_virtual.y += delta.y;
-                let f_dragged = (drag_virtual - grab_pos).length() > TAP_SLACK;
-                if pointer_captured {
-                    rl.enable_cursor();
-                    rl.set_mouse_position(grab_pos);
-                    pending_restore = Some(grab_pos);
-                    restore_tries = 0;
-                    pointer_captured = false;
+                let delta = ui.get_mouse_delta();
+                self.drag_virtual.x += delta.x;
+                self.drag_virtual.y += delta.y;
+                let f_dragged = (self.drag_virtual - self.grab_pos).length() > TAP_SLACK;
+                if self.pointer_captured {
+                    ui.enable_cursor();
+                    ui.set_mouse_position(self.grab_pos);
+                    self.pending_restore = Some(self.grab_pos);
+                    self.restore_tries = 0;
+                    self.pointer_captured = false;
                 }
                 // A zoom hold has no tap action: it would otherwise run the
                 // `f` fill aim on release.
-                if f_capture && !f_dragged && !f_zoom_capture && !f_zoom_tapped {
-                    f_click = Some(grab_pos);
+                if self.f_capture && !f_dragged && !self.f_zoom_capture && !self.f_zoom_tapped {
+                    f_click = Some(self.grab_pos);
                 }
-                if f_capture {
-                    f_capture = false;
-                    f_zoom_capture = false;
-                    f_zoom_tapped = false;
-                    f_zoom_anchor = None;
+                if self.f_capture {
+                    self.f_capture = false;
+                    self.f_zoom_capture = false;
+                    self.f_zoom_tapped = false;
+                    self.f_zoom_anchor = None;
                 }
-                if r_capture {
+                if self.r_capture {
                     // The release snaps a near quarter turn exactly, and it is
                     // the only place that snaps: the drag itself turns freely.
                     // A pivot turn keeps its point on screen through the snap.
-                    let before = st.angle;
-                    st.angle = rotate::snap_deg(st.angle);
-                    keep_pivot(&mut st, before, win_w, win_h);
-                    r_capture = false;
+                    let before = self.st.angle;
+                    self.st.angle = rotate::snap_deg(self.st.angle);
+                    keep_pivot(&mut self.st, before, win_w, win_h);
+                    self.r_capture = false;
                 }
-                if debug {
+                if self.debug {
                     eprintln!(
                         "vv: hold release: grab ({:.0},{:.0}), virtual ({:.0},{:.0}), dragged {}, \
                          angle {}",
-                        grab_pos.x, grab_pos.y, drag_virtual.x, drag_virtual.y, f_dragged, st.angle
+                        self.grab_pos.x,
+                        self.grab_pos.y,
+                        self.drag_virtual.x,
+                        self.drag_virtual.y,
+                        f_dragged,
+                        self.st.angle
                     );
                 }
             }
@@ -2406,34 +2681,41 @@ fn main() -> Result<()> {
             // after its delay.
             // The mouse side buttons ride the same nav path: forward is next
             // and back is previous, exactly like n and p.
-            let now = rl.get_time();
-            let (delay, rate) = keyrepeat::settings();
-            let mouse_nav = read_nav_mouse(&rl);
+            let now = ui.get_time();
+            let (delay, rate) = versatile_viewer::keyrepeat::settings();
+            let mouse_nav = read_nav_mouse(ui.input());
             let next_edge = nav_next_edge || mouse_nav.next.edge;
             let prev_edge = nav_prev_edge || mouse_nav.prev.edge;
             // A held Shift moves the Space hold to the previous direction,
             // so a hold repeats the way its press edge stepped.
-            let space_held = rl.is_key_down(KeyboardKey::KEY_SPACE);
+            let space_held = ui.is_key_down(KeyCode::Space);
             let next_held =
-                rl.is_key_down(KeyboardKey::KEY_N) || (space_held && !shift) || mouse_nav.next.held;
-            let prev_held = rl.is_key_down(KeyboardKey::KEY_P)
-                || rl.is_key_down(KeyboardKey::KEY_BACKSPACE)
+                ui.is_key_down(KeyCode::KeyN) || (space_held && !shift) || mouse_nav.next.held;
+            let prev_held = ui.is_key_down(KeyCode::KeyP)
+                || ui.is_key_down(KeyCode::Backspace)
                 || (space_held && shift)
                 || mouse_nav.prev.held;
-            let mut nav = if rep_nav_fwd.tick(next_edge, next_held, now, delay, rate) {
+            let mut nav = if self
+                .rep_nav_fwd
+                .tick(next_edge, next_held, now, delay, rate)
+            {
                 Some(1)
-            } else if rep_nav_back.tick(prev_edge, prev_held, now, delay, rate) {
+            } else if self
+                .rep_nav_back
+                .tick(prev_edge, prev_held, now, delay, rate)
+            {
                 Some(-1)
             } else {
                 None
             };
             // g/G: jump to the first or last image (as a nav delta).
             if (jump_first || jump_last)
-                && let Some(cur) = st
+                && let Some(cur) = self
+                    .st
                     .open_id
-                    .and_then(|id| grid.as_ref().and_then(|g| g.index_of(id)))
+                    .and_then(|id| self.grid.as_ref().and_then(|g| g.index_of(id)))
             {
-                let n = grid.as_ref().unwrap().entries.len();
+                let n = self.grid.as_ref().unwrap().entries.len();
                 let t = if jump_first { 0 } else { n - 1 };
                 nav = Some(t as i64 - cur as i64);
             }
@@ -2447,24 +2729,24 @@ fn main() -> Result<()> {
             // keycodes.
             // The code then polls that keycode's held state, and the motion
             // stays continuous however the auto-repeat behaves.
-            while let Some(c) = rl.get_char_pressed() {
-                match c {
+            for typed in ui.typed() {
+                match typed.text {
                     '\n' | '\r' => enter = true,
-                    '+' => zoom_keys.typed_zoom_in(pressed_key),
-                    '-' => zoom_keys.typed_zoom_out(pressed_key),
+                    '+' => self.zoom_keys.typed_zoom_in(Some(typed.key)),
+                    '-' => self.zoom_keys.typed_zoom_out(Some(typed.key)),
                     _ => {}
                 }
             }
             // ESC drops the region selection first: it clears a kept region
             // and cancels a drag in flight.
-            // Only an ESC with nothing to drop returns to the grid, so the
+            // Only an ESC with nothing to drop returns to the self.grid, so the
             // region never costs a surprise exit.
             if escape {
-                let kept = st.selection.take();
-                let dragging = region_drag.take();
+                let kept = self.st.selection.take();
+                let dragging = self.region_drag.take();
                 if kept.is_none() && dragging.is_none() {
                     enter = true;
-                } else if debug {
+                } else if self.debug {
                     eprintln!(
                         "vv: esc dropped region {:?}, drag {}",
                         kept.map(|r| (r.x, r.y, r.w, r.h)),
@@ -2483,35 +2765,28 @@ fn main() -> Result<()> {
             } else {
                 None
             };
-            let spread_step = spread_press.filter(|_| spread_armed);
-            spread_armed = !(rl.is_key_down(KeyboardKey::KEY_J)
-                || rl.is_key_down(KeyboardKey::KEY_K)
-                || rl.is_key_down(KeyboardKey::KEY_PAGE_DOWN)
-                || rl.is_key_down(KeyboardKey::KEY_PAGE_UP));
+            let spread_step = spread_press.filter(|_| self.spread_armed);
+            self.spread_armed = !(ui.is_key_down(KeyCode::KeyJ)
+                || ui.is_key_down(KeyCode::KeyK)
+                || ui.is_key_down(KeyCode::PageDown)
+                || ui.is_key_down(KeyCode::PageUp));
 
             let mut return_to_grid = false;
             if quit_pressed {
-                quit = true; // single-file launch: no grid to fall back to
+                self.quit = true; // single-file launch: no self.grid to fall back to
             }
             // `a`: toggle smooth (bilinear, default) against pixelated
             // (nearest-neighbor) filtering for the shown texture.
             // The code re-applies the flag to every texture that arrives
             // later.
             if pixelated_toggle {
-                st.pixelated = !st.pixelated;
-                if let Some(tex) = &st.view_tex {
-                    apply_view_filter(&thread, tex, st.pixelated);
-                }
-                if let Some(crop) = &st.crop {
-                    apply_view_filter(&thread, &crop.texture, st.pixelated);
-                }
-                if let Some(patch) = st.prefetch.held() {
-                    apply_view_filter(&thread, &patch.texture, st.pixelated);
-                }
+                // The filter is a draw-time choice of this frame on, so the
+                // toggle only flips the flag: every texture draws with it.
+                self.st.pixelated = !self.st.pixelated;
             }
             // `f` tap action: it needs known geometry, and the hit test uses
             // the drawn image rect (offset + pan at the on-screen scale).
-            // A cursor over the background returns to the grid (ESC-like).
+            // A cursor over the background returns to the self.grid (ESC-like).
             // A cursor over an image that covers the whole window zooms out
             // (recentred, like the zoom-out half of t).
             // Otherwise it zooms into fill view aimed at the cursor (like the
@@ -2520,28 +2795,28 @@ fn main() -> Result<()> {
             let mut f_open_grid = false;
             let mut f_zoom = false;
             if let Some(m) = f_click
-                && st.img.w > 0.0
-                && let Some(scale) = st.view_scale
+                && self.st.img.w > 0.0
+                && let Some(scale) = self.st.view_scale
             {
-                let center = Vec2::new(win_w / 2.0 + st.pan.x, win_h / 2.0 + st.pan.y);
+                let center = Vec2::new(win_w / 2.0 + self.st.pan.x, win_h / 2.0 + self.st.pan.y);
                 // A turned image must hit-test its own outline, so the point
                 // goes back into the unrotated image space first.
-                let m = rotate::unrotate_point(m, center, st.angle);
-                let ox = (win_w - st.img.w * scale) / 2.0 + st.pan.x;
-                let oy = (win_h - st.img.h * scale) / 2.0 + st.pan.y;
+                let m = rotate::unrotate_point(m, center, self.st.angle);
+                let ox = (win_w - self.st.img.w * scale) / 2.0 + self.st.pan.x;
+                let oy = (win_h - self.st.img.h * scale) / 2.0 + self.st.pan.y;
                 let inside = m.x >= ox
-                    && m.x < ox + st.img.w * scale
+                    && m.x < ox + self.st.img.w * scale
                     && m.y >= oy
-                    && m.y < oy + st.img.h * scale;
+                    && m.y < oy + self.st.img.h * scale;
                 let filled = ox <= 0.0
                     && oy <= 0.0
-                    && ox + st.img.w * scale >= win_w
-                    && oy + st.img.h * scale >= win_h;
+                    && ox + self.st.img.w * scale >= win_w
+                    && oy + self.st.img.h * scale >= win_h;
                 if !inside {
-                    f_open_grid = grid.is_some();
+                    f_open_grid = self.grid.is_some();
                 } else if filled {
-                    st.zoom = ZoomMode::FitAll;
-                    st.target_pan = Vec2::ZERO;
+                    self.st.zoom = ZoomMode::FitAll;
+                    self.st.target_pan = Vec2::ZERO;
                 } else {
                     f_zoom = true;
                 }
@@ -2549,42 +2824,46 @@ fn main() -> Result<()> {
             if f_open_grid {
                 enter = true;
             }
-            if grid.is_some() && enter {
+            if self.grid.is_some() && enter {
                 return_to_grid = true;
             }
             if return_to_grid {
                 // Leaving image view mid-drag: give the pointer back before
-                // the grid click handling needs a visible cursor.
-                if pointer_captured {
-                    rl.enable_cursor();
-                    rl.set_mouse_position(grab_pos);
-                    pending_restore = Some(grab_pos);
-                    restore_tries = 0;
-                    pointer_captured = false;
+                // the self.grid click handling needs a visible cursor.
+                if self.pointer_captured {
+                    ui.enable_cursor();
+                    ui.set_mouse_position(self.grab_pos);
+                    self.pending_restore = Some(self.grab_pos);
+                    self.restore_tries = 0;
+                    self.pointer_captured = false;
                 }
-                f_capture = false;
-                r_capture = false;
+                self.f_capture = false;
+                self.r_capture = false;
                 // The region belongs to the image view.
-                region_drag = None;
-                st.selection = None;
-                st.mode = Mode::Grid;
-                // Hand the shown texture back to its grid entry and make
-                // that entry the grid selection (nsxiv-like).
-                put_back_view(&mut grid, &mut st.view_from_grid, &mut st.view_tex);
-                if let Some(id) = st.open_id.take()
-                    && let Some(g) = grid.as_mut()
+                self.region_drag = None;
+                self.st.selection = None;
+                self.st.mode = Mode::Grid;
+                // Hand the shown texture back to its self.grid entry and make
+                // that entry the self.grid selection (nsxiv-like).
+                put_back_view(
+                    &mut self.grid,
+                    &mut self.st.view_from_grid,
+                    &mut self.st.view_tex,
+                );
+                if let Some(id) = self.st.open_id.take()
+                    && let Some(g) = self.grid.as_mut()
                     && let Some(i) = g.index_of(id)
                 {
                     g.selected = i;
                     // Scrolled (zoomed-in) grids: bring it back on screen.
                     g.ensure_visible(WinW::new(win_w), WinH::new(win_h));
                 }
-                st.loader = None; // cancels a still-running stream
-                st.view_loading = false;
-                st.close_crop();
+                self.st.loader = None; // cancels a still-running stream
+                self.st.view_loading = false;
+                self.st.close_crop();
             }
 
-            // Prev/next while viewing (only with a grid to navigate).
+            // Prev/next while viewing (only with a self.grid to navigate).
             // A ready texture swaps in the same frame.
             // A decode in flight is waited on (auto-swap when it lands).
             // Otherwise the streaming loader takes over.
@@ -2593,21 +2872,26 @@ fn main() -> Result<()> {
             // The spreads of a book all sit in one figure, so a step always
             // moves to another file.
             if !return_to_grid && let Some(delta) = nav {
-                let cur = st
+                let cur = self
+                    .st
                     .open_id
-                    .and_then(|id| grid.as_ref().and_then(|g| g.index_of(id)));
+                    .and_then(|id| self.grid.as_ref().and_then(|g| g.index_of(id)));
                 if let Some(cur) = cur {
-                    let n = grid.as_ref().unwrap().entries.len();
+                    let n = self.grid.as_ref().unwrap().entries.len();
                     let t = cur as i64 + delta;
                     if t >= 0 && (t as usize) < n {
                         let j = t as usize;
-                        put_back_view(&mut grid, &mut st.view_from_grid, &mut st.view_tex);
+                        put_back_view(
+                            &mut self.grid,
+                            &mut self.st.view_from_grid,
+                            &mut self.st.view_tex,
+                        );
                         show_entry(
-                            &mut st,
-                            grid.as_mut().unwrap(),
+                            &mut self.st,
+                            self.grid.as_mut().unwrap(),
                             j,
-                            &mut rl,
-                            &thread,
+                            ui,
+                            r,
                             (WinW::new(win_w), WinH::new(win_h)),
                             true,
                         );
@@ -2617,21 +2901,21 @@ fn main() -> Result<()> {
 
             // Keyboard shortcuts. Capital W and capital E arrive as W/E plus
             // shift.
-            if rl.is_key_pressed(KeyboardKey::KEY_W) {
-                st.zoom = if shift {
+            if ui.is_key_pressed(KeyCode::KeyW) {
+                self.st.zoom = if shift {
                     ZoomMode::FitAll
                 } else {
                     ZoomMode::FitDown
                 };
-                st.target_pan = Vec2::ZERO;
-            } else if rl.is_key_pressed(KeyboardKey::KEY_E) {
-                st.zoom = if shift {
+                self.st.target_pan = Vec2::ZERO;
+            } else if ui.is_key_pressed(KeyCode::KeyE) {
+                self.st.zoom = if shift {
                     ZoomMode::FitHeight
                 } else {
                     ZoomMode::FitWidth
                 };
-                st.target_pan = Vec2::ZERO;
-            } else if rl.is_key_pressed(KeyboardKey::KEY_T) || f_zoom {
+                self.st.target_pan = Vec2::ZERO;
+            } else if ui.is_key_pressed(KeyCode::KeyT) || f_zoom {
                 // t: two-state toggle, whole image visible (fit-all) against
                 // window completely covered (fill).
                 // This stays distinct for any image and window combination,
@@ -2639,36 +2923,41 @@ fn main() -> Result<()> {
                 // f (f_zoom) always zooms in: it only reaches here when the
                 // cursor is on a not-yet-covering image.
                 if f_zoom {
-                    st.zoom = ZoomMode::Fill;
-                } else if st.zoom == ZoomMode::Fill {
-                    st.zoom = ZoomMode::FitAll;
+                    self.st.zoom = ZoomMode::Fill;
+                } else if self.st.zoom == ZoomMode::Fill {
+                    self.st.zoom = ZoomMode::FitAll;
                 } else {
-                    st.zoom = ZoomMode::Fill;
+                    self.st.zoom = ZoomMode::Fill;
                 }
                 // Zoom-in lands with the image point under the mouse at the
                 // window center, clamped so the window never shows
                 // background.
                 // Zoom-out recentres.
-                if st.zoom == ZoomMode::Fill && st.img.w > 0.0 && st.view_scale.is_some() {
-                    st.target_pan = aim_fill_pan(&st, rl.get_mouse_position().into(), win_w, win_h);
+                if self.st.zoom == ZoomMode::Fill
+                    && self.st.img.w > 0.0
+                    && self.st.view_scale.is_some()
+                {
+                    self.st.target_pan =
+                        aim_fill_pan(&self.st, ui.get_mouse_position(), win_w, win_h);
                 } else {
-                    st.target_pan = Vec2::ZERO;
+                    self.st.target_pan = Vec2::ZERO;
                 }
             }
 
             // Before the header arrives the image dimensions are unknown.
             // The code skips all scale and pan math (it divides by
             // img_w/img_h).
-            if st.img.w > 0.0 {
+            if self.st.img.w > 0.0 {
                 // Scale for the current mode (fit modes recompute every
                 // frame, so resizing stays correct).
                 // A fit measures the opening box when the surface names one:
                 // a book frames its first spread, so the cover page shows
                 // whole and whichever side binds decides.
-                let (fit_w, fit_h) = st
+                let (fit_w, fit_h) = self
+                    .st
                     .open_box
-                    .map_or((st.img.w, st.img.h), |boxed| (boxed.w, boxed.h));
-                let fit_scale = match st.zoom {
+                    .map_or((self.st.img.w, self.st.img.h), |boxed| (boxed.w, boxed.h));
+                let fit_scale = match self.st.zoom {
                     ZoomMode::FitDown => (win_w / fit_w).min(win_h / fit_h).min(1.0),
                     ZoomMode::FitAll => (win_w / fit_w).min(win_h / fit_h),
                     ZoomMode::FitWidth => win_w / fit_w,
@@ -2685,30 +2974,33 @@ fn main() -> Result<()> {
                 // rate.
                 // The code reads input before begin_drawing borrows rl
                 // mutably.
-                let dt = rl.get_frame_time();
+                let dt = ui.get_frame_time();
                 // Ctrl + j/k zoom like `+`/`-` (Ctrl + Shift + j/k keeps
                 // the Shift speed).
                 // `j` and `k` also pan, so a held Ctrl turns them into zoom
                 // keys instead of pan keys.
-                let ctrl = rl.is_key_down(KeyboardKey::KEY_LEFT_CONTROL)
-                    || rl.is_key_down(KeyboardKey::KEY_RIGHT_CONTROL);
-                let ctrl_zoom_in = ctrl && rl.is_key_down(KeyboardKey::KEY_J);
-                let ctrl_zoom_out = ctrl && rl.is_key_down(KeyboardKey::KEY_K);
+                let ctrl =
+                    ui.is_key_down(KeyCode::ControlLeft) || ui.is_key_down(KeyCode::ControlRight);
+                let ctrl_zoom_in = ctrl && ui.is_key_down(KeyCode::KeyJ);
+                let ctrl_zoom_out = ctrl && ui.is_key_down(KeyCode::KeyK);
                 // Shift+J/K step a spread when the open surface names a
                 // spread column, so those two keys do not pan while the step
                 // can run.
                 // Every other source, and a book whose surface has not landed
                 // yet, keeps the doubled pan.
-                let spread_keys = shift && st.source.as_ref().is_some_and(|s| s.spread_count() > 0);
+                let spread_keys = shift
+                    && self
+                        .st
+                        .source
+                        .as_ref()
+                        .is_some_and(|s| s.spread_count() > 0);
                 let nav = NavKeys {
-                    left: rl.is_key_down(KeyboardKey::KEY_H)
-                        || rl.is_key_down(KeyboardKey::KEY_LEFT),
-                    right: rl.is_key_down(KeyboardKey::KEY_L)
-                        || rl.is_key_down(KeyboardKey::KEY_RIGHT),
-                    up: (rl.is_key_down(KeyboardKey::KEY_K) && !ctrl_zoom_out && !spread_keys)
-                        || rl.is_key_down(KeyboardKey::KEY_UP),
-                    down: (rl.is_key_down(KeyboardKey::KEY_J) && !ctrl_zoom_in && !spread_keys)
-                        || rl.is_key_down(KeyboardKey::KEY_DOWN),
+                    left: ui.is_key_down(KeyCode::KeyH) || ui.is_key_down(KeyCode::ArrowLeft),
+                    right: ui.is_key_down(KeyCode::KeyL) || ui.is_key_down(KeyCode::ArrowRight),
+                    up: (ui.is_key_down(KeyCode::KeyK) && !ctrl_zoom_out && !spread_keys)
+                        || ui.is_key_down(KeyCode::ArrowUp),
+                    down: (ui.is_key_down(KeyCode::KeyJ) && !ctrl_zoom_in && !spread_keys)
+                        || ui.is_key_down(KeyCode::ArrowDown),
                     // US layouts put the zoom keys on the `=` and `-`
                     // keycodes (numpad included).
                     // Other layouts put `+`/`-` on another key, whose keycode
@@ -2717,27 +3009,34 @@ fn main() -> Result<()> {
                     // second key going down does not stop the zoom.
                     // Ctrl + j/k join them as a hold, so the ramp eases the
                     // same way.
-                    zoom_in: rl.is_key_down(KeyboardKey::KEY_EQUAL)
-                        || rl.is_key_down(KeyboardKey::KEY_KP_ADD)
+                    zoom_in: ui.is_key_down(KeyCode::Equal)
+                        || ui.is_key_down(KeyCode::NumpadAdd)
                         || ctrl_zoom_in
-                        || zoom_keys.zoom_in_key().is_some_and(|k| rl.is_key_down(k)),
-                    zoom_out: rl.is_key_down(KeyboardKey::KEY_MINUS)
-                        || rl.is_key_down(KeyboardKey::KEY_KP_SUBTRACT)
+                        || self
+                            .zoom_keys
+                            .zoom_in_key()
+                            .is_some_and(|k| ui.is_key_down(k)),
+                    zoom_out: ui.is_key_down(KeyCode::Minus)
+                        || ui.is_key_down(KeyCode::NumpadSubtract)
                         || ctrl_zoom_out
-                        || zoom_keys.zoom_out_key().is_some_and(|k| rl.is_key_down(k)),
+                        || self
+                            .zoom_keys
+                            .zoom_out_key()
+                            .is_some_and(|k| ui.is_key_down(k)),
                 };
                 // The pan cruise speed scales with the window, so the motion
                 // covers the same fraction of the view on any screen size.
                 // Shift multiplies both the pan cruise speed and the zoom
                 // rate.
-                let motion = st
+                let motion = self
+                    .st
                     .ramps
                     .tick(nav, win_w.max(win_h) * PAN_RATE, dt, shift_speed);
                 // Fold the ramped delta into the pan and its target together,
                 // so the pan follows the ramp at once and the ease below sees
                 // no leftover distance.
-                st.pan += motion.pan;
-                st.target_pan += motion.pan;
+                self.st.pan += motion.pan;
+                self.st.target_pan += motion.pan;
                 // A held `f` with Shift turns the vertical mouse travel into
                 // the free zoom, so the pointer replaces the wheel with one
                 // continuous rate.
@@ -2750,19 +3049,19 @@ fn main() -> Result<()> {
                 // The step comes from this frame's travel, so a held pointer
                 // holds the scale.
                 // The wheel below still zooms with no Shift.
-                let delta = rl.get_mouse_delta();
-                let zoom_drag = f_capture && f_zoom_capture;
+                let delta = ui.get_mouse_delta();
+                let zoom_drag = self.f_capture && self.f_zoom_capture;
                 if zoom_drag {
                     // The grab edge seeds the anchor, and the drift carries it
                     // from frame to frame.
-                    st.zoom_anchor = Some(*f_zoom_anchor.get_or_insert(grab_pos));
+                    self.st.zoom_anchor = Some(*self.f_zoom_anchor.get_or_insert(self.grab_pos));
                     if delta.y != 0.0 {
                         // One e-fold of scale per ZOOM_DRAG_SPAN of travel,
                         // where the span scales with the window.
                         let span = win_w.max(win_h) * ZOOM_DRAG_SPAN;
                         let r = (-delta.y * ZOOM_DRAG_SPEED / span).exp();
-                        let base = st.zoom.free_or(fit_scale);
-                        st.zoom = ZoomMode::Free((base * r).clamp(0.01, 100.0));
+                        let base = self.st.zoom.free_or(fit_scale);
+                        self.st.zoom = ZoomMode::Free((base * r).clamp(0.01, 100.0));
                     }
                 }
                 // A held `r` turns the vertical mouse travel into the image
@@ -2773,16 +3072,17 @@ fn main() -> Result<()> {
                 // Each frame adds this frame's travel to the current angle, so
                 // a new hold continues from the angle the image shows and a
                 // release keeps it.
-                if r_capture {
+                if self.r_capture {
                     // One full turn per ROTATE_DRAG_SPAN of travel, where the
                     // span scales with the window.
                     let span = win_w.max(win_h) * ROTATE_DRAG_SPAN;
-                    let from = st.angle;
-                    st.angle = rotate::apply_turn(st.angle, delta.y * ROTATE_DRAG_SPEED, span);
+                    let from = self.st.angle;
+                    self.st.angle =
+                        rotate::apply_turn(self.st.angle, delta.y * ROTATE_DRAG_SPEED, span);
                     // A pivot turns the image in place: the pan takes the shift
                     // that the plain centered turn would move the pivot by, so
                     // the point under the pivot keeps its window spot.
-                    keep_pivot(&mut st, from, win_w, win_h);
+                    keep_pivot(&mut self.st, from, win_w, win_h);
                 }
 
                 // Free zoom: the held +/- keys scale the free-zoom factor
@@ -2794,24 +3094,24 @@ fn main() -> Result<()> {
                 // frame, and that lag reads as stepping.
                 let zoom_step = motion.zoom;
                 if let Some(factor) = zoom_step {
-                    let base = st.zoom.free_or(fit_scale);
-                    st.zoom = ZoomMode::Free((base * factor).clamp(0.01, 100.0));
+                    let base = self.st.zoom.free_or(fit_scale);
+                    self.st.zoom = ZoomMode::Free((base * factor).clamp(0.01, 100.0));
                     // Keyboard zoom centers on the picture, not the cursor.
                     // None falls back to the window center anchor.
-                    st.zoom_anchor = None;
+                    self.st.zoom_anchor = None;
                 }
                 // The Shift+F drag rides the pointer, so its target moves
                 // every frame: the ease must stay out of its way, like the
                 // wheel step.
-                let target_scale = st.zoom.free_or(fit_scale);
+                let target_scale = self.st.zoom.free_or(fit_scale);
 
                 // The exponential ease only carries a discrete jump (a fit
                 // mode change, the wheel, the `f` aim) the rest of the way.
                 // A held key already set the target to the on-screen value, so
                 // the ease stays out of its way.
-                let prev_scale = st.view_scale;
+                let prev_scale = self.st.view_scale;
                 let alpha = 1.0 - (-dt / EASE_TIME).exp();
-                st.view_scale = Some(match st.view_scale {
+                self.st.view_scale = Some(match self.st.view_scale {
                     None => target_scale,
                     Some(_) if resized => target_scale,
                     Some(_) if zoom_step.is_some() => target_scale,
@@ -2829,11 +3129,11 @@ fn main() -> Result<()> {
                 // the held keys build, and anchors the ease at the cursor:
                 // while the scale eases, the image point under the mouse
                 // stays put.
-                let wheel = rl.get_mouse_wheel_move();
+                let wheel = ui.get_mouse_wheel_move();
                 if wheel != 0.0 {
                     let factor = 1.25f32.powf(wheel);
-                    st.zoom = ZoomMode::Free((target_scale * factor).clamp(0.01, 100.0));
-                    st.zoom_anchor = Some(rl.get_mouse_position().into());
+                    self.st.zoom = ZoomMode::Free((target_scale * factor).clamp(0.01, 100.0));
+                    self.st.zoom_anchor = Some(ui.get_mouse_position());
                 }
                 // Left-drag pans: the image follows the cursor (grab-style).
                 // No easing while the cursor drives the pan.
@@ -2851,34 +3151,41 @@ fn main() -> Result<()> {
                 // the physical mouse travels.
                 // Mouse-up shows the pointer again at the position where the
                 // drag began.
-                let drag_pressed = rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT);
-                let drag_released = rl.is_mouse_button_released(MouseButton::MOUSE_BUTTON_LEFT);
-                if drag_pressed && !pointer_captured && !r_capture {
-                    grab_pos = rl.get_mouse_position().into();
-                    drag_virtual = grab_pos;
-                    rl.disable_cursor();
-                    pointer_captured = true;
-                    if debug {
-                        eprintln!("vv: drag grab at ({:.0},{:.0})", grab_pos.x, grab_pos.y);
+                let drag_pressed = ui.is_mouse_button_pressed(MouseButton::Left);
+                let drag_released = ui.is_mouse_button_released(MouseButton::Left);
+                if drag_pressed && !self.pointer_captured && !self.r_capture {
+                    self.grab_pos = ui.get_mouse_position();
+                    self.drag_virtual = self.grab_pos;
+                    ui.disable_cursor();
+                    self.pointer_captured = true;
+                    if self.debug {
+                        eprintln!(
+                            "vv: drag grab at ({:.0},{:.0})",
+                            self.grab_pos.x, self.grab_pos.y
+                        );
                     }
-                } else if drag_released && pointer_captured && !f_capture && !r_capture {
-                    if debug {
+                } else if drag_released
+                    && self.pointer_captured
+                    && !self.f_capture
+                    && !self.r_capture
+                {
+                    if self.debug {
                         eprintln!(
                             "vv: drag release: grab ({:.0},{:.0}), virtual ({:.0},{:.0}), rl pos \
                              ({:.0},{:.0})",
-                            grab_pos.x,
-                            grab_pos.y,
-                            drag_virtual.x,
-                            drag_virtual.y,
-                            rl.get_mouse_position().x,
-                            rl.get_mouse_position().y
+                            self.grab_pos.x,
+                            self.grab_pos.y,
+                            self.drag_virtual.x,
+                            self.drag_virtual.y,
+                            ui.get_mouse_position().x,
+                            ui.get_mouse_position().y
                         );
                     }
-                    rl.enable_cursor();
-                    rl.set_mouse_position(grab_pos);
-                    pending_restore = Some(grab_pos);
-                    restore_tries = 0;
-                    pointer_captured = false;
+                    ui.enable_cursor();
+                    ui.set_mouse_position(self.grab_pos);
+                    self.pending_restore = Some(self.grab_pos);
+                    self.restore_tries = 0;
+                    self.pointer_captured = false;
                 }
                 // Any captured pointer (left-drag or a held `f`) pans or zooms.
                 // The virtual cursor tracks the raw travel the same way.
@@ -2886,17 +3193,17 @@ fn main() -> Result<()> {
                 // leaves the pan alone.
                 // An `r` capture turns the image instead: the travel it needs
                 // is vertical, so the pan stays put.
-                let dragging = pointer_captured;
+                let dragging = self.pointer_captured;
                 if dragging {
-                    let delta = rl.get_mouse_delta();
-                    // The virtual cursor follows physical travel 1:1 (debug
+                    let delta = ui.get_mouse_delta();
+                    // The virtual cursor follows physical travel 1:1 (self.debug
                     // crosshair).
-                    drag_virtual.x += delta.x;
-                    drag_virtual.y += delta.y;
+                    self.drag_virtual.x += delta.x;
+                    self.drag_virtual.y += delta.y;
                     // The pan gets the 2x speedup.
-                    if !f_zoom_capture && !r_capture {
-                        st.target_pan.x += delta.x * 2.0;
-                        st.target_pan.y += delta.y * 2.0;
+                    if !self.f_zoom_capture && !self.r_capture {
+                        self.st.target_pan.x += delta.x * 2.0;
+                        self.st.target_pan.y += delta.y * 2.0;
                     }
                 }
 
@@ -2920,9 +3227,9 @@ fn main() -> Result<()> {
                 // drift.
                 // A zoom hold that starts at the window center needs no drift
                 // either: its anchor already sits there.
-                let continuous_zoom = f_capture && f_zoom_capture;
-                let scale = st.view_scale.unwrap();
-                if matches!(st.zoom, ZoomMode::Free(_))
+                let continuous_zoom = self.f_capture && self.f_zoom_capture;
+                let scale = self.st.view_scale.unwrap();
+                if matches!(self.st.zoom, ZoomMode::Free(_))
                     && let Some(s_old) = prev_scale
                     && (scale - s_old).abs() > f32::EPSILON
                     && s_old > 0.0
@@ -2931,15 +3238,15 @@ fn main() -> Result<()> {
                         x: win_w / 2.0,
                         y: win_h / 2.0,
                     };
-                    let anchor = st.zoom_anchor;
+                    let anchor = self.st.zoom_anchor;
                     let a = anchor.unwrap_or(center);
                     let (ax, ay) = (a.x, a.y);
                     let keyboard_zoom = anchor.is_none();
                     let r = scale / s_old;
-                    let ox = ax - (ax - (win_w - st.img.w * s_old) / 2.0 - st.pan.x) * r;
-                    let oy = ay - (ay - (win_h - st.img.h * s_old) / 2.0 - st.pan.y) * r;
-                    let new_x = ox - (win_w - st.img.w * scale) / 2.0;
-                    let new_y = oy - (win_h - st.img.h * scale) / 2.0;
+                    let ox = ax - (ax - (win_w - self.st.img.w * s_old) / 2.0 - self.st.pan.x) * r;
+                    let oy = ay - (ay - (win_h - self.st.img.h * s_old) / 2.0 - self.st.pan.y) * r;
+                    let new_x = ox - (win_w - self.st.img.w * scale) / 2.0;
+                    let new_y = oy - (win_h - self.st.img.h * scale) / 2.0;
                     // A held key zoom skips the drift: it centers anyway.
                     // So does an anchor that already sits at the window
                     // center: the drift can only move it away from there.
@@ -2956,18 +3263,18 @@ fn main() -> Result<()> {
                     // Move the pan and its target by the same amount.
                     // The anchor then holds without discarding the offset a
                     // held pan key added this frame.
-                    let dx = new_x + d.x - st.pan.x;
-                    let dy = new_y + d.y - st.pan.y;
-                    st.pan.x += dx;
-                    st.pan.y += dy;
-                    st.target_pan.x += dx;
-                    st.target_pan.y += dy;
+                    let dx = new_x + d.x - self.st.pan.x;
+                    let dy = new_y + d.y - self.st.pan.y;
+                    self.st.pan.x += dx;
+                    self.st.pan.y += dy;
+                    self.st.target_pan.x += dx;
+                    self.st.target_pan.y += dy;
                     if !keyboard_zoom {
-                        st.zoom_anchor = Some(a + d);
+                        self.st.zoom_anchor = Some(a + d);
                         if continuous_zoom {
                             // The drag anchor carries the drift into the next
                             // frame.
-                            f_zoom_anchor = st.zoom_anchor;
+                            self.f_zoom_anchor = self.st.zoom_anchor;
                         }
                     }
                     // Ride the pointer along with the drifted image point
@@ -2975,11 +3282,11 @@ fn main() -> Result<()> {
                     // leaves the cursor wherever it is).
                     // A continuous zoom keeps the pointer captured instead,
                     // so this never runs for it.
-                    if d != Vec2::ZERO && !keyboard_zoom && !pointer_captured {
-                        if debug {
+                    if d != Vec2::ZERO && !keyboard_zoom && !self.pointer_captured {
+                        if self.debug {
                             eprintln!("vv: zoom drift anchor to ({ax:.0},{ay:.0})");
                         }
-                        rl.set_mouse_position(st.zoom_anchor.unwrap());
+                        ui.set_mouse_position(self.st.zoom_anchor.unwrap());
                     }
                 }
 
@@ -2997,52 +3304,54 @@ fn main() -> Result<()> {
                 //
                 // A fresh open shows the top of the plane: the fit frames
                 // the opening box, and that box starts at the top.
-                st.align_open_box(win_h);
+                self.st.align_open_box(win_h);
                 // Shift+J/K or Page-down/Page-up: one spread per press, eased
                 // to the top of the window.
                 // The step runs after the align, and the align then sees a
                 // target that it did not write, so it stays out of the way and
                 // the view keeps the spread the step landed on.
                 if let Some(step) = spread_step
-                    && st.step_spread(step, win_h)
+                    && self.st.step_spread(step, win_h)
                 {
                     // The landing spread is known now, so its patch paints on a
                     // worker while the glide runs.
-                    st.prefetch_spread(Vec2::new(win_w, win_h));
+                    self.st
+                        .prefetch_spread(Vec2::new(win_w, win_h), &r.uploader());
                 }
                 // On a resize frame, snap pan too, so it does not glide after
                 // the new fit offset (matches the scale snap above).
                 if resized {
-                    st.pan = st.target_pan;
+                    self.st.pan = self.st.target_pan;
                 }
                 // While dragging, the image sticks to the cursor (only the
                 // zoom-anchor shift above touches pan).
                 if dragging {
-                    st.pan = st.target_pan;
+                    self.st.pan = self.st.target_pan;
                 }
                 // A spread step glides at [`SPREAD_EASE_TIME`].
                 // Any other motion of the target ends the glide, and the
                 // ordinary ease takes over again.
-                let gliding = st
+                let gliding = self
+                    .st
                     .spread_glide
-                    .is_some_and(|goal| (goal - st.target_pan).length() <= 0.5);
+                    .is_some_and(|goal| (goal - self.st.target_pan).length() <= 0.5);
                 if !gliding {
-                    st.spread_glide = None;
+                    self.st.spread_glide = None;
                 }
                 let ease_time = if gliding { SPREAD_EASE_TIME } else { EASE_TIME };
                 let pan_alpha = 1.0 - (-dt / ease_time).exp();
-                st.pan.x += (st.target_pan.x - st.pan.x) * pan_alpha;
-                st.pan.y += (st.target_pan.y - st.pan.y) * pan_alpha;
+                self.st.pan.x += (self.st.target_pan.x - self.st.pan.x) * pan_alpha;
+                self.st.pan.y += (self.st.target_pan.y - self.st.pan.y) * pan_alpha;
                 // Snap when the residual glide is sub-pixel.
-                if (st.target_pan.x - st.pan.x).abs() < 0.25 {
-                    st.pan.x = st.target_pan.x;
+                if (self.st.target_pan.x - self.st.pan.x).abs() < 0.25 {
+                    self.st.pan.x = self.st.target_pan.x;
                 }
-                if (st.target_pan.y - st.pan.y).abs() < 0.25 {
-                    st.pan.y = st.target_pan.y;
+                if (self.st.target_pan.y - self.st.pan.y).abs() < 0.25 {
+                    self.st.pan.y = self.st.target_pan.y;
                 }
                 // The step stops once the pan lands on the spread.
-                if st.pan == st.target_pan {
-                    st.spread_glide = None;
+                if self.st.pan == self.st.target_pan {
+                    self.st.spread_glide = None;
                 }
                 // `v` region selection: the press anchors at the picture point
                 // under the pointer, the pointer moves the opposite corner, and
@@ -3055,23 +3364,23 @@ fn main() -> Result<()> {
                 // The cursor stays free, and the rect lives in source units, so
                 // a pan, a zoom and a turn keep the region on the picture while
                 // the drag runs.
-                let img = Vec2::new(st.img.w, st.img.h);
-                let frame = st.frame(Vec2::new(win_w, win_h));
+                let img = Vec2::new(self.st.img.w, self.st.img.h);
+                let frame = self.st.frame(Vec2::new(win_w, win_h));
                 if v_key
-                    && region_drag.is_none()
-                    && !pointer_captured
+                    && self.region_drag.is_none()
+                    && !self.pointer_captured
                     && let Some(frame) = frame
                 {
-                    let mouse = rl.get_mouse_position().into();
+                    let mouse = ui.get_mouse_position();
                     let drag = region_sel::press(
                         frame.to_image(mouse),
                         mouse,
                         img,
-                        st.selection,
+                        self.st.selection,
                         v_square_edge,
                     );
-                    region_drag = Some(drag);
-                    if debug {
+                    self.region_drag = Some(drag);
+                    if self.debug {
                         eprintln!(
                             "vv: region grab at ({:.0},{:.0}) -> image ({:.0},{:.0}), {:?}",
                             mouse.x, mouse.y, drag.anchor.x, drag.anchor.y, drag.kind
@@ -3080,84 +3389,86 @@ fn main() -> Result<()> {
                 }
                 // `!is_key_down` also covers a press and release that land
                 // inside one frame, like the `f` and `r` halves.
-                if let Some(drag) = region_drag
-                    && !rl.is_key_down(KeyboardKey::KEY_V)
+                if let Some(drag) = self.region_drag
+                    && !ui.is_key_down(KeyCode::KeyV)
                 {
                     // The release reads the same rect the draw shows, so the
                     // committed region is the one on screen, and a tap commits
                     // nothing: it drops a span and keeps a moved rect.
-                    st.selection = selection_rect(
-                        st.frame(Vec2::new(win_w, win_h)),
+                    self.st.selection = selection_rect(
+                        self.st.frame(Vec2::new(win_w, win_h)),
                         None,
                         Some(drag),
-                        rl.get_mouse_position().into(),
+                        ui.get_mouse_position(),
                     );
-                    region_drag = None;
-                    if debug {
+                    self.region_drag = None;
+                    if self.debug {
                         eprintln!(
                             "vv: region release {:?}",
-                            st.selection.map(|r| (r.x, r.y, r.w, r.h))
+                            self.st.selection.map(|r| (r.x, r.y, r.w, r.h))
                         );
                     }
                 }
-            } // st.img.w > 0.0: fit/pan math needs known dimensions
+            } // self.st.img.w > 0.0: fit/pan math needs known dimensions
         }
 
         // The visible-region patch of a vector file: adopt a parsed source and
         // a finished paint, then repaint once the view holds still.
         // The upload needs the main thread, and the request reads the scale
         // and the pan of this frame.
-        if st.mode == Mode::Image {
-            st.drain_crops(&mut rl, &thread)?;
-            st.tick_crop(Instant::now(), Vec2::new(win_w, win_h));
+        if self.st.mode == Mode::Image {
+            self.st.drain_crops();
+            self.st
+                .tick_crop(Instant::now(), Vec2::new(win_w, win_h), &r.uploader());
         }
 
-        // VV_BLUR_BG in grid mode: the background follows the selected
-        // entry with a slow crossfade (starts as soon as the grid workers
+        // VV_BLUR_BG in self.grid mode: the background follows the selected
+        // entry with a slow crossfade (starts as soon as the self.grid workers
         // decode the blurred copy of the entry).
-        if st.mode == Mode::Grid
-            && let (Some(bg), Some(g)) = (st.blur_bg.as_mut(), grid.as_ref())
+        if self.st.mode == Mode::Grid
+            && let (Some(bg), Some(g)) = (self.st.blur_bg.as_mut(), self.grid.as_ref())
             && let Some(e) = g.entries.get(g.selected)
             && let Some(data) = &e.blur
         {
-            bg.transition(&mut rl, &thread, data, e.id);
+            bg.transition(&r.uploader(), data, e.id);
         }
 
         // The region the image view marks now, read before the draw borrows
         // `rl`.
         // A drag in flight answers a fresh rect from the pointer position, so
         // the veil and the border follow the cursor every frame.
-        let selection = if st.mode == Mode::Image {
+        let selection = if self.st.mode == Mode::Image {
             selection_rect(
-                st.frame(Vec2::new(win_w, win_h)),
-                st.selection,
-                region_drag,
-                rl.get_mouse_position().into(),
+                self.st.frame(Vec2::new(win_w, win_h)),
+                self.st.selection,
+                self.region_drag,
+                ui.get_mouse_position(),
             )
         } else {
             None
         };
 
-        let mut d = rl.begin_drawing(&thread);
-        d.clear_background(BACKGROUND);
+        ui.begin(r);
+        Ui::clear_background(r, BACKGROUND);
 
-        if st.mode == Mode::Grid {
+        if self.st.mode == Mode::Grid {
             // VV_BLUR_BG gimmick: the blurred background follows the
             // selection (crossfading, and a no-op when the gimmick is off).
-            // The code draws it before the grid, so the fades run under the
+            // The code draws it before the self.grid, so the fades run under the
             // thumbnails.
-            if let Some(bg) = &mut st.blur_bg {
-                bg.draw(&mut d, WinW::new(win_w), WinH::new(win_h));
+            if let Some(bg) = &mut self.st.blur_bg {
+                bg.draw(r, WinW::new(win_w), WinH::new(win_h));
             }
-            grid.as_ref()
+            self.grid
+                .as_ref()
                 .unwrap()
-                .draw(&mut d, (WinW::new(win_w), WinH::new(win_h)));
+                .draw(r, (WinW::new(win_w), WinH::new(win_h)));
         } else {
             // VV_BLUR_BG gimmick: blurred copy of the image, scaled to
             // cover the whole window (fit on the narrower side, with the other
             // axis overflowing and cropped) behind the sharp image.
-            if let Some(bg) = &mut st.blur_bg {
-                bg.draw(&mut d, WinW::new(win_w), WinH::new(win_h));
+            if let Some(bg) = &mut self.st.blur_bg {
+                bg.draw(r, WinW::new(win_w), WinH::new(win_h));
             }
             // The region patch covers the window on its own with the sharp
             // pixels of the visible part, so the whole-image texture draws only
@@ -3165,22 +3476,23 @@ fn main() -> Result<()> {
             // that outran the repaint.
             // Both over the same pixels would double the alpha of an
             // antialiased edge.
-            if !patch_covers(&st, win_w, win_h) {
-                if let Some(texture) = &st.view_tex {
+            if !patch_covers(&self.st, win_w, win_h) {
+                if let Some(texture) = &self.st.view_tex {
                     // The image turns around its own center on screen, which
                     // is the pan offset on top of the window middle.
-                    let center = Vec2::new(win_w / 2.0 + st.pan.x, win_h / 2.0 + st.pan.y);
+                    let center =
+                        Vec2::new(win_w / 2.0 + self.st.pan.x, win_h / 2.0 + self.st.pan.y);
                     draw_turned(
-                        &mut d,
+                        r,
                         texture,
-                        st.img,
-                        st.view_scale.unwrap(),
+                        self.st.img,
+                        self.st.view_scale.unwrap(),
                         center,
-                        st.angle,
+                        self.st.angle,
                     );
-                } else if st.img.w > 0.0
-                    && let Some(g) = grid.as_ref()
-                    && let Some(id) = st.open_id
+                } else if self.st.img.w > 0.0
+                    && let Some(g) = self.grid.as_ref()
+                    && let Some(id) = self.st.open_id
                     && let Some(i) = g.index_of(id)
                     && let Some(tex) = g
                         .entries
@@ -3195,11 +3507,13 @@ fn main() -> Result<()> {
                     // Both hold the whole image with the aspect preserved, so
                     // they map 1:1 onto the image rect and the later swap to
                     // the full-res texture is pixel-aligned.
-                    let scale = st
+                    let scale = self
+                        .st
                         .view_scale
-                        .unwrap_or((win_w / st.img.w).min(win_h / st.img.h));
-                    let center = Vec2::new(win_w / 2.0 + st.pan.x, win_h / 2.0 + st.pan.y);
-                    draw_turned(&mut d, tex, st.img, scale, center, st.angle);
+                        .unwrap_or((win_w / self.st.img.w).min(win_h / self.st.img.h));
+                    let center =
+                        Vec2::new(win_w / 2.0 + self.st.pan.x, win_h / 2.0 + self.st.pan.y);
+                    draw_turned(r, tex, self.st.img, scale, center, self.st.angle);
                 }
             }
             // The region patches draw turned and scaled like the image, so
@@ -3209,9 +3523,9 @@ fn main() -> Result<()> {
             // image loses its blur where the patch already reached.
             // A patch that still matches the view scale lands on whole
             // window pixels (see `draw_patch`), so its text stays sharp.
-            if let Some(frame) = st.frame(Vec2::new(win_w, win_h)) {
-                for patch in st.crop.iter().chain(st.prefetch.held()) {
-                    draw_patch(&mut d, patch, &frame);
+            if let Some(frame) = self.st.frame(Vec2::new(win_w, win_h)) {
+                for patch in self.st.crop.iter().chain(self.st.prefetch.held()) {
+                    draw_patch(r, patch, &frame);
                 }
             }
             // A region selection dims the picture outside it and marks the
@@ -3219,9 +3533,9 @@ fn main() -> Result<()> {
             // The bands draw over the whole image and the patches, so the dim
             // holds whatever the view paints below it.
             if let Some(selection) = selection
-                && let Some(frame) = st.frame(Vec2::new(win_w, win_h))
+                && let Some(frame) = self.st.frame(Vec2::new(win_w, win_h))
             {
-                draw_selection(&mut d, frame, selection);
+                draw_selection(r, frame, selection);
             }
             // VV_DEBUG: while the pointer is captured, draw a crosshair at
             // the virtual cursor position (clamped to the window).
@@ -3229,20 +3543,36 @@ fn main() -> Result<()> {
             // is.
             // The code also draws a ring at the grab point, so a wrong
             // restore is visible.
-            if debug && pointer_captured {
-                let vx = drag_virtual.x.clamp(0.0, win_w);
-                let vy = drag_virtual.y.clamp(0.0, win_h);
-                d.draw_circle_v(Vec2::new(grab_pos.x, grab_pos.y), 6.0, Color::SKYBLUE);
-                d.draw_line_v(
+            if self.debug && self.pointer_captured {
+                let vx = self.drag_virtual.x.clamp(0.0, win_w);
+                let vy = self.drag_virtual.y.clamp(0.0, win_h);
+                r.circle(
+                    Vec2::new(self.grab_pos.x, self.grab_pos.y),
+                    6.0,
+                    Color::SKYBLUE,
+                );
+                r.line_v(
                     Vec2::new(vx - 12.0, vy),
                     Vec2::new(vx + 12.0, vy),
                     Color::YELLOW,
                 );
-                d.draw_line_v(
+                r.line_v(
                     Vec2::new(vx, vy - 12.0),
                     Vec2::new(vx, vy + 12.0),
                     Color::YELLOW,
                 );
+            }
+        }
+        // Draw the batch and present it. A stale or lost swapchain skips this
+        // frame and asks for a new configuration, so a resize never kills the
+        // window.
+        if let Err(err) = ui.end(r) {
+            if err.needs_reconfigure() {
+                if let Some(gpu) = self.gpu.as_mut() {
+                    gpu.reconfigure();
+                }
+            } else if !matches!(err, FrameError::Occluded | FrameError::Timeout) {
+                eprintln!("vv: frame: {err}");
             }
         }
         if let Some(started) = frame_started {
@@ -3251,8 +3581,50 @@ fn main() -> Result<()> {
                 eprintln!("vv: slow frame {ms:.1} ms");
             }
         }
+        Ok(())
     }
-    Ok(())
+}
+
+impl App {
+    /// Take one keyboard event.
+    ///
+    /// A repeat is not an edge: the input layer keeps it apart, and a one-shot
+    /// key reads only the edge.
+    fn key(&mut self, event: &KeyEvent) {
+        let PhysicalKey::Code(code) = event.physical_key else {
+            return;
+        };
+        let text = event.text.as_ref().and_then(|text| text.chars().next());
+        self.input.key(code, event.state, event.repeat, text);
+    }
+}
+
+fn main() -> Result<()> {
+    // `--mcp` may come before or after the path, so the path is the first
+    // argument that is not the flag.
+    let mut mcp = false;
+    let mut args = env::args().skip(1);
+    let arg = loop {
+        match args.next() {
+            Some(flag) if flag == "--mcp" => mcp = true,
+            Some(path) => break path,
+            None => bail!("usage: vv [--mcp] <image-path-or-directory>"),
+        }
+    };
+    if mcp {
+        start_mcp()?;
+    }
+    let path = Path::new(&arg);
+    let launch = Launch::open(path)?;
+    let event_loop = EventLoop::new().context("cannot create the event loop")?;
+    let mut app = App::new(launch);
+    event_loop
+        .run_app(&mut app)
+        .context("the event loop failed")?;
+    match app.fatal.take() {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]

@@ -213,6 +213,8 @@ pub struct Renderer {
     insts: Vec<Inst>,
     calls: Vec<Call>,
     size: (u32, u32),
+    /// The color the frame clears to, which the view sets every frame.
+    clear: Color,
 }
 
 impl Renderer {
@@ -248,6 +250,7 @@ impl Renderer {
             insts: Vec::new(),
             calls: Vec::new(),
             size: (1, 1),
+            clear: Color::BLACK,
         }
     }
 
@@ -306,6 +309,14 @@ impl Renderer {
         );
     }
 
+    /// The color the next frame clears to.
+    ///
+    /// The view sets it once per frame, so the window background and the grid
+    /// gaps never disagree.
+    pub fn set_clear(&mut self, color: Color) {
+        self.clear = color;
+    }
+
     /// Draw a solid axis-aligned rectangle.
     pub fn fill_rect(&mut self, rect: Rect, color: Color) {
         self.fill(Quad::rect(rect), color);
@@ -316,7 +327,97 @@ impl Renderer {
         self.fill(Quad::line(a, b, thickness), color);
     }
 
-    /// Draw a texture over a quad.
+    /// Draw a hairline between two window points.
+    pub fn line_v(&mut self, a: Vec2, b: Vec2, color: Color) {
+        self.line(a, b, 1.0, color);
+    }
+
+    /// Draw the outline of a rectangle, `thickness` pixels wide.
+    ///
+    /// The four edges meet at the corners, so the ring closes with no notch.
+    pub fn stroke_rect(&mut self, rect: Rect, thickness: f32, color: Color) {
+        let (left, top) = (rect.x, rect.y);
+        let (right, bottom) = (rect.right(), rect.bottom());
+        self.line(
+            Vec2::new(left, top),
+            Vec2::new(right, top),
+            thickness,
+            color,
+        );
+        self.line(
+            Vec2::new(right, top),
+            Vec2::new(right, bottom),
+            thickness,
+            color,
+        );
+        self.line(
+            Vec2::new(right, bottom),
+            Vec2::new(left, bottom),
+            thickness,
+            color,
+        );
+        self.line(
+            Vec2::new(left, bottom),
+            Vec2::new(left, top),
+            thickness,
+            color,
+        );
+    }
+
+    /// Draw a filled triangle.
+    ///
+    /// The triangle rides the quad pipeline as a quad whose last corner repeats
+    /// the first, so the second triangle has no area and the call needs no
+    /// second primitive.
+    pub fn triangle(&mut self, a: Vec2, b: Vec2, c: Vec2, color: Color) {
+        self.fill(Quad::triangle(a, b, c), color);
+    }
+
+    /// Draw a filled circle of `radius` around `center`, as a fan of sixteen
+    /// triangles.
+    ///
+    /// The debug crosshair is the only caller, so sixteen sides read as round
+    /// at a six-pixel radius.
+    pub fn circle(&mut self, center: Vec2, radius: f32, color: Color) {
+        const SIDES: usize = 16;
+        for i in 0..SIDES {
+            let a = std::f32::consts::TAU * i as f32 / SIDES as f32;
+            let b = std::f32::consts::TAU * (i + 1) as f32 / SIDES as f32;
+            self.triangle(
+                center,
+                center + Vec2::new(a.cos(), a.sin()) * radius,
+                center + Vec2::new(b.cos(), b.sin()) * radius,
+                color,
+            );
+        }
+    }
+
+    /// Draw a texture over a rect, turned by `angle` degrees around the point
+    /// `origin` inside it.
+    ///
+    /// This is raylib's `DrawTexturePro` mapping, so a call site keeps the
+    /// geometry it had: `dest` names the rect, `origin` names the pivot inside
+    /// it, and a zero angle draws the plain rect.
+    pub fn texture_pro(
+        &mut self,
+        texture: &Texture,
+        src: Rect,
+        dest: Rect,
+        origin: Vec2,
+        angle: f32,
+        tint: Color,
+    ) {
+        let rect = Rect::new(
+            dest.x - origin.x,
+            dest.y - origin.y,
+            dest.width,
+            dest.height,
+        );
+        let quad = Quad::turned(rect, Vec2::new(dest.x, dest.y), angle);
+        self.texture(texture, src, quad, tint, Filter::Linear);
+    }
+
+    /// Draw a texture over a quad with one filter.
     pub fn texture(
         &mut self,
         texture: &Texture,
@@ -354,11 +455,11 @@ impl Renderer {
     ///
     /// Returns [`FrameError`] when no image came out of the swapchain, which the
     /// caller answers by skipping the frame.
-    pub fn flush(&mut self, gpu: &Gpu, clear: Color) -> Result<(), FrameError> {
+    pub fn flush(&mut self, gpu: &Gpu) -> Result<(), FrameError> {
         let frame = gpu.acquire();
         match frame {
             Ok(frame) => {
-                self.draw(gpu, &frame, clear);
+                self.draw(gpu, &frame);
                 // wgpu 30 hands the present to the queue, so the frame value
                 // travels here instead of presenting itself.
                 gpu.queue().present(frame);
@@ -375,14 +476,14 @@ impl Renderer {
     }
 
     /// Encode one clear plus one draw per texture run.
-    fn draw(&mut self, gpu: &Gpu, frame: &wgpu::SurfaceTexture, clear: Color) {
+    fn draw(&mut self, gpu: &Gpu, frame: &wgpu::SurfaceTexture) {
         // An empty batch still clears the window, so an occluded frame and a
         // blank one look the same.
         self.upload_instances(gpu);
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let clear = clear.to_unit();
+        let clear = self.clear.to_unit();
         let mut encoder = gpu
             .device()
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {

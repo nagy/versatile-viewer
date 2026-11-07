@@ -212,9 +212,9 @@ impl Color {
     pub const WHITE: Self = Self::new(255, 255, 255, 255);
     /// Opaque black, which hides what it covers.
     pub const BLACK: Self = Self::new(0, 0, 0, 255);
-    /// The yellow of the debug crosshair, the raylib value.
+    /// The yellow of the debug crosshair.
     pub const YELLOW: Self = Self::new(253, 249, 0, 255);
-    /// The sky blue of the debug grab ring, the raylib value.
+    /// The sky blue of the debug grab ring.
     pub const SKYBLUE: Self = Self::new(102, 191, 255, 255);
 
     /// This color multiplied by `tint`, channel by channel.
@@ -247,8 +247,7 @@ impl Color {
     /// The four channels as the 0..1 floats a swapchain clear takes.
     ///
     /// The values stay non-linear, because the swapchain format stays
-    /// non-sRGB: the bytes reach the screen as the decoder wrote them, which is
-    /// what the raylib path showed.
+    /// non-sRGB: the bytes reach the screen as the decoder wrote them.
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn to_unit(self) -> [f64; 4] {
@@ -258,35 +257,6 @@ impl Color {
             f64::from(self.b) / 255.0,
             f64::from(self.a) / 255.0,
         ]
-    }
-}
-
-/// The port's bridge into the raylib calls that still draw.
-///
-/// The renderer swap deletes these two `From` impls together with the raylib
-/// dependency, so no view code ever names a raylib type.
-impl From<Vec2> for raylib::ffi::Vector2 {
-    fn from(v: Vec2) -> Self {
-        Self { x: v.x, y: v.y }
-    }
-}
-
-/// The port's bridge into the raylib calls that still draw.
-impl From<Color> for raylib::ffi::Color {
-    fn from(c: Color) -> Self {
-        Self {
-            r: c.r,
-            g: c.g,
-            b: c.b,
-            a: c.a,
-        }
-    }
-}
-
-/// The port's bridge out of the raylib calls that still draw.
-impl From<raylib::ffi::Vector2> for Vec2 {
-    fn from(v: raylib::ffi::Vector2) -> Self {
-        Self::new(v.x, v.y)
     }
 }
 
@@ -375,7 +345,7 @@ impl Quad {
     }
 }
 
-/// One channel of a tint multiply, the raylib integer rule.
+/// One channel of a tint multiply, in integer arithmetic.
 #[allow(clippy::cast_possible_truncation)]
 const fn mul_channel(channel: u8, tint: u8) -> u8 {
     ((channel as u16 * tint as u16) / 255) as u8
@@ -408,7 +378,7 @@ mod tests {
         assert!(x.turned(360.0).is_within(x, 1e-5));
     }
 
-    /// A tint scales every channel and keeps the raylib rounding.
+    /// A tint scales every channel in integer arithmetic.
     #[test]
     fn a_tint_scales_each_channel() {
         let half = Color::new(128, 128, 128, 255);

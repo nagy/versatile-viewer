@@ -91,6 +91,17 @@ pub struct Uploader {
     shared: Arc<Shared>,
 }
 
+#[allow(clippy::missing_fields_in_debug)] // a wgpu handle prints as an opaque id
+impl std::fmt::Debug for Uploader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The device handle prints as an opaque id, so the limit is the fact a
+        // log line wants.
+        f.debug_struct("Uploader")
+            .field("max_side", &self.shared.max_side)
+            .finish()
+    }
+}
+
 impl Uploader {
     /// Build the shared samplers, the bind group layout and the uploader.
     ///
@@ -245,6 +256,15 @@ pub struct Texture {
     _view: wgpu::TextureView,
 }
 
+#[allow(clippy::missing_fields_in_debug)] // the bind groups print as opaque handles
+impl std::fmt::Debug for Texture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The wgpu handles print as opaque ids, so the size is the one fact a
+        // reader wants from a texture in a log line.
+        f.debug_struct("Texture").field("dims", &self.dims).finish()
+    }
+}
+
 impl Texture {
     /// The pixel size of the texture.
     #[must_use]
@@ -309,6 +329,74 @@ impl Texture {
             },
         );
         Ok(())
+    }
+}
+
+/// One rendered picture on its way to the window: pixels, or the texture they
+/// became.
+///
+/// A decode worker uploads its own frame when it holds an [`Uploader`], so
+/// production carries the texture and the pixels are freed on the worker.
+/// A test builds the same pipeline with no device, so the frame stays pixels
+/// and its dimensions can be asserted without a GPU.
+#[derive(Debug)]
+pub enum Ready {
+    /// Decoded pixels, for a caller with no device.
+    Pixels(DecodedImage),
+    /// The uploaded texture.
+    Texture(Texture),
+}
+
+impl Ready {
+    /// The pixel size of the frame, whichever form it holds.
+    #[must_use]
+    pub fn dims(&self) -> (u32, u32) {
+        match self {
+            Self::Pixels(image) => (image.width().raw(), image.height().raw()),
+            Self::Texture(texture) => texture.dims(),
+        }
+    }
+
+    /// The pixels, when this frame stayed on the CPU.
+    #[must_use]
+    pub fn pixels(&self) -> Option<&DecodedImage> {
+        match self {
+            Self::Pixels(image) => Some(image),
+            Self::Texture(_) => None,
+        }
+    }
+
+    /// The texture, when this frame was uploaded.
+    #[must_use]
+    pub fn texture(&self) -> Option<&Texture> {
+        match self {
+            Self::Pixels(_) => None,
+            Self::Texture(texture) => Some(texture),
+        }
+    }
+
+    /// Take the texture, when this frame was uploaded.
+    ///
+    /// A caller with no use for the pixels (the grid cell) moves the handle
+    /// and drops nothing else.
+    #[must_use]
+    pub fn into_texture(self) -> Option<Texture> {
+        match self {
+            Self::Texture(texture) => Some(texture),
+            Self::Pixels(_) => None,
+        }
+    }
+
+    /// Upload the frame when it is still pixels, and hand back its texture.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TextureError`] when the pixel buffer does not match its size.
+    pub fn upload(self, uploader: &Uploader) -> Result<Texture, TextureError> {
+        match self {
+            Self::Texture(texture) => Ok(texture),
+            Self::Pixels(image) => uploader.image(&image),
+        }
     }
 }
 

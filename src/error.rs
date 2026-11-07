@@ -1,7 +1,6 @@
-//! Errors for image decoding and texture upload.
+//! Errors for image decoding.
 //!
 //! [`DecodeError`] covers opening, sniffing and decoding a file.
-//! [`UploadError`] covers the GL texture upload.
 
 use derive_more::{Display, Error, From};
 
@@ -48,20 +47,6 @@ pub enum DecodeError {
     /// The RGBA buffer did not match its dimensions.
     /// [`crate::DecodedImage::new`] answers this instead of building an image
     /// whose pixel count and buffer disagree.
-    #[display("rgba buffer does not match its dimensions")]
-    Buffer,
-}
-
-/// A failed GL texture upload.
-#[derive(Debug, Display, Error, From)]
-pub enum UploadError {
-    /// The GL texture upload failed (no current context, driver refusal).
-    #[display("texture upload failed")]
-    Upload(#[from] raylib::core::error::LoadTextureError),
-    /// The in-place texture update failed.
-    #[display("texture update failed")]
-    Update(#[from] raylib::core::error::UpdateTextureError),
-    /// The RGBA buffer did not match its dimensions.
     #[display("rgba buffer does not match its dimensions")]
     Buffer,
 }

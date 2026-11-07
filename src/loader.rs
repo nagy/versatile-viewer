@@ -39,6 +39,7 @@ use crate::{
     error::DecodeError,
     fb_to_rgba,
     surface::{ChunkSource, Surface, SurfaceError, View},
+    texture::{Ready, Uploader},
 };
 
 /// A failed streaming load.
@@ -101,26 +102,41 @@ const SLOW_DRIBBLE_MAX: usize = 256 * 1024;
 /// [`Loader::try_recv`] can then return both as one
 /// `Result<DecodeMsg, LoadError>`.
 /// The `?` operator composes this result.
-#[derive(Debug)]
 pub enum DecodeMsg {
     /// The JXL header is parsed.
     /// The code knows the final dimensions, with the orientation applied.
     /// No pixel data arrives yet.
     Header { width: ImgW, height: ImgH },
     /// A progressive preview of the still-loading frame.
-    /// The buffer is full-size RGBA8 and stays blurry until the end.
+    /// The frame is full-size and stays blurry until the end.
     /// The worker sends a preview at most every `PREVIEW_INTERVAL`.
     /// `blur` is the tiny blurred copy for the `VV_BLUR_BG` gimmick.
     /// It is `None` when the gimmick is off.
     Preview {
-        image: DecodedImage,
+        frame: Ready,
+        /// The tiny blurred copy for the `VV_BLUR_BG` gimmick, which measures
+        /// `VV_BLUR_PX` on its long side and uploads in one cheap call.
         blur: Option<DecodedImage>,
     },
     /// The final full-quality image.
     Done {
-        image: DecodedImage,
+        frame: Ready,
         blur: Option<DecodedImage>,
     },
+}
+
+impl DecodeMsg {
+    /// The pixel size of the frame this message carries, when it carries one.
+    #[must_use]
+    pub fn dims(&self) -> Option<(ImgW, ImgH)> {
+        match self {
+            Self::Header { width, height } => Some((*width, *height)),
+            Self::Preview { frame, .. } | Self::Done { frame, .. } => {
+                let (w, h) = frame.dims();
+                Some((ImgW::new(w), ImgH::new(h)))
+            }
+        }
+    }
 }
 
 /// Handle for one surface load in flight.
@@ -137,16 +153,29 @@ impl Loader {
     /// The screen never shows more pixels than that.
     /// Full-size RGBA every `PREVIEW_INTERVAL` wastes allocations.
     #[must_use]
-    pub fn start(surface: Box<dyn Surface>, preview_px: PreviewPx) -> Loader {
-        Self::start_plane(surface.into(), 0, preview_px)
+    pub fn start(
+        surface: Box<dyn Surface>,
+        preview_px: PreviewPx,
+        uploader: &Option<Uploader>,
+    ) -> Loader {
+        Self::start_plane(surface.into(), 0, preview_px, uploader)
     }
 
     /// Start the worker for one plane of `surface`.
     /// [`Self::start`] is the plane-0 shorthand.
     /// Only plane 0 of a one-plane surface can stream: the progressive byte
     /// path renders the whole file into that plane.
+    ///
+    /// `uploader` turns every finished frame into a texture on this worker, so
+    /// the main thread only draws. A caller with no device (`None`, which is
+    /// what a test passes) receives pixels instead.
     #[must_use]
-    pub fn start_plane(surface: Arc<dyn Surface>, plane: usize, preview_px: PreviewPx) -> Loader {
+    pub fn start_plane(
+        surface: Arc<dyn Surface>,
+        plane: usize,
+        preview_px: PreviewPx,
+        uploader: &Option<Uploader>,
+    ) -> Loader {
         let (tx, rx) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
@@ -156,6 +185,7 @@ impl Loader {
         // The gimmick settings are parsed once per load, so a worker never
         // reads the environment.
         let blur = blurbg::Config::from_env();
+        let uploader = uploader.clone();
         std::thread::spawn(move || {
             match stream(
                 surface.as_ref(),
@@ -164,6 +194,7 @@ impl Loader {
                 &tx,
                 blur,
                 preview_px,
+                uploader.as_ref(),
             ) {
                 Ok(Some(msg)) => {
                     let _ = tx.send(Ok(msg));
@@ -205,13 +236,14 @@ fn stream(
     tx: &Sender<Result<DecodeMsg, LoadError>>,
     blur: Option<blurbg::Config>,
     preview_px: PreviewPx,
+    uploader: Option<&Uploader>,
 ) -> Result<Option<DecodeMsg>, LoadError> {
     if plane == 0
         && surface.plane_count() == 1
         && let Some(mut source) = surface.progressive()?
     {
         // JPEG XL: the byte stream carries progressive previews.
-        return stream_jxl(source.as_mut(), cancel, tx, blur, preview_px);
+        return stream_jxl(source.as_mut(), cancel, tx, blur, preview_px, uploader);
     }
 
     // Dimensions first, so the view fits the plane before the render lands.
@@ -232,7 +264,7 @@ fn stream(
         {
             let blur = blur.map(|config| config.blur(&preview));
             let _ = tx.send(Ok(DecodeMsg::Preview {
-                image: preview,
+                frame: ready(preview, uploader),
                 blur,
             }));
         }
@@ -240,7 +272,10 @@ fn stream(
 
     let image = surface.render(View::whole(plane, 1.0))?;
     let blur = blur.map(|config| config.blur(&image));
-    Ok(Some(DecodeMsg::Done { image, blur }))
+    Ok(Some(DecodeMsg::Done {
+        frame: ready(image, uploader),
+        blur,
+    }))
 }
 
 /// JPEG XL progressive decode.
@@ -254,6 +289,7 @@ fn stream_jxl(
     tx: &Sender<Result<DecodeMsg, LoadError>>,
     blur: Option<blurbg::Config>,
     preview_px: PreviewPx,
+    uploader: Option<&Uploader>,
 ) -> Result<Option<DecodeMsg>, LoadError> {
     let slow = std::env::var_os("VV_SLOW_STREAM").is_some();
     // `try_init` consumes the uninit image.
@@ -323,7 +359,10 @@ fn stream_jxl(
                     // allocate ~200 MB of RGBA per preview.
                     let image = downscale_rgba(image, LongSide::new(preview_px.raw()));
                     let blur = blur.map(|config| config.blur(&image));
-                    let _ = tx.send(Ok(DecodeMsg::Preview { image, blur }));
+                    let _ = tx.send(Ok(DecodeMsg::Preview {
+                        frame: ready(image, uploader),
+                        blur,
+                    }));
                     last_preview = Some(Instant::now());
                 }
             }
@@ -348,7 +387,30 @@ fn stream_jxl(
     // Cap here, on the worker: the main thread uploads the buffer as is.
     let image = cap_texture_side(image);
     let blur = blur.map(|config| config.blur(&image));
-    Ok(Some(DecodeMsg::Done { image, blur }))
+    Ok(Some(DecodeMsg::Done {
+        frame: ready(image, uploader),
+        blur,
+    }))
+}
+
+/// Upload a rendered frame when the worker holds a device, so the main thread
+/// only draws it.
+///
+/// A test passes no uploader, and the frame stays pixels.
+fn ready(image: DecodedImage, uploader: Option<&Uploader>) -> Ready {
+    match uploader {
+        Some(uploader) => match uploader.image(&image) {
+            Ok(texture) => Ready::Texture(texture),
+            Err(err) => {
+                // A buffer that does not match its size cannot be uploaded,
+                // and the pixels are still the picture: keep them rather than
+                // dropping the frame.
+                eprintln!("vv: upload: {err}");
+                Ready::Pixels(image)
+            }
+        },
+        None => Ready::Pixels(image),
+    }
 }
 
 /// Read up to `buf.len()` bytes from the stream.
@@ -411,7 +473,7 @@ mod tests {
         image::DynamicImage::new_rgb8(4, 3).save(&path).unwrap();
 
         let surface = crate::surface::open_surface(&path).unwrap();
-        let loader = Loader::start(surface, PreviewPx::new(512));
+        let loader = Loader::start(surface, PreviewPx::new(512), &None);
         let mut header = None;
         let done;
         loop {
@@ -419,8 +481,8 @@ mod tests {
                 .expect("loader timed out")
                 .expect("decode failed")
             {
-                DecodeMsg::Done { image, .. } => {
-                    done = image;
+                DecodeMsg::Done { frame, .. } => {
+                    done = frame;
                     break;
                 }
                 DecodeMsg::Header { width, height } => header = Some((width, height)),
@@ -428,8 +490,13 @@ mod tests {
             }
         }
         assert_eq!(header, Some((ImgW::new(4), ImgH::new(3))));
-        assert_eq!((done.width, done.height), (ImgW::new(4), ImgH::new(3)));
-        assert_eq!(done.data.len(), 4 * 3 * 4);
+        assert_eq!(
+            (ImgW::new(done.dims().0), ImgH::new(done.dims().1)),
+            (ImgW::new(4), ImgH::new(3))
+        );
+        // A test passes no uploader, so the frame stays pixels and its buffer
+        // is checked here.
+        assert_eq!(done.pixels().unwrap().as_rgba().len(), 4 * 3 * 4);
     }
 
     #[cfg(feature = "svg")]
@@ -450,7 +517,7 @@ mod tests {
         .unwrap();
 
         let surface = crate::surface::open_surface(&path).unwrap();
-        let loader = Loader::start(surface, PreviewPx::new(512));
+        let loader = Loader::start(surface, PreviewPx::new(512), &None);
         let mut header = None;
         let done;
         loop {
@@ -458,8 +525,8 @@ mod tests {
                 .expect("loader timed out")
                 .expect("decode failed")
             {
-                DecodeMsg::Done { image, .. } => {
-                    done = image;
+                DecodeMsg::Done { frame, .. } => {
+                    done = frame;
                     break;
                 }
                 DecodeMsg::Header { width, height } => header = Some((width, height)),
@@ -468,7 +535,7 @@ mod tests {
         }
         // The header carries the base raster size, and so does the render.
         assert_eq!(header, Some((ImgW::new(1024), ImgH::new(512))));
-        assert_eq!((done.width, done.height), (ImgW::new(1024), ImgH::new(512)));
+        assert_eq!(done.dims(), (1024, 512));
     }
 
     #[test]
@@ -482,7 +549,7 @@ mod tests {
         std::fs::write(&path, crate::pdf::tests::MINIMAL_PDF).unwrap();
 
         let surface = crate::surface::open_surface(&path).unwrap();
-        let loader = Loader::start(surface, PreviewPx::new(512));
+        let loader = Loader::start(surface, PreviewPx::new(512), &None);
         let mut header = None;
         let mut saw_preview = false;
         let done;
@@ -491,21 +558,22 @@ mod tests {
                 .expect("loader timed out")
                 .expect("decode failed")
             {
-                DecodeMsg::Done { image, .. } => {
-                    done = image;
+                DecodeMsg::Done { frame, .. } => {
+                    done = frame;
                     break;
                 }
                 DecodeMsg::Header { width, height } => header = Some((width, height)),
                 // The preview is capped at `preview_px` on the long side, so
                 // it arrives smaller than the page.
-                DecodeMsg::Preview { image, .. } => {
+                DecodeMsg::Preview { frame, .. } => {
                     saw_preview = true;
-                    assert!(image.width.raw() <= 512 && image.height.raw() <= 512);
+                    let (width, height) = frame.dims();
+                    assert!(width <= 512 && height <= 512);
                 }
             }
         }
         assert_eq!(header, Some((ImgW::new(612), ImgH::new(792))));
-        assert_eq!((done.width, done.height), (ImgW::new(612), ImgH::new(792)));
+        assert_eq!(done.dims(), (612, 792));
         assert!(saw_preview, "a slow rasterizer previews first");
     }
 
@@ -519,7 +587,7 @@ mod tests {
         std::fs::write(&path, b"not really jxl").unwrap();
 
         let surface = crate::surface::open_surface(&path).expect("the extension selects JXL");
-        let loader = Loader::start(surface, PreviewPx::new(512));
+        let loader = Loader::start(surface, PreviewPx::new(512), &None);
         loop {
             match wait(&loader, Duration::from_secs(10)).expect("loader timed out") {
                 Err(_) => break,
@@ -538,7 +606,7 @@ mod tests {
         std::fs::write(&path, [0xffu8, 0x0a, 0x01, 0x02]).unwrap();
 
         let surface = crate::surface::open_surface(&path).unwrap();
-        let loader = Loader::start(surface, PreviewPx::new(512));
+        let loader = Loader::start(surface, PreviewPx::new(512), &None);
         loop {
             match wait(&loader, Duration::from_secs(10)).expect("loader timed out") {
                 Err(_) => break,
@@ -560,7 +628,7 @@ mod tests {
         image::DynamicImage::new_rgb8(16, 16).save(&path).unwrap();
 
         let surface = crate::surface::open_surface(&path).unwrap();
-        let loader = Loader::start(surface, PreviewPx::new(512));
+        let loader = Loader::start(surface, PreviewPx::new(512), &None);
         drop(loader);
         std::thread::sleep(Duration::from_millis(50));
         // Nothing to assert beyond "no panic, no hang".

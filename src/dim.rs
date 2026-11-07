@@ -9,9 +9,6 @@
 //! [`Rect`] wraps an axis-aligned rectangle in window pixels.
 //! Each wrapper is a newtype over its primitive and costs nothing at runtime.
 //!
-//! [`Rect`] converts into a raylib `Rectangle` with `From`.
-//! Every raylib call that takes `impl Into<Rectangle>` accepts a `Rect`
-//! value directly, so the draw code never spells the four fields out.
 //! [`Rect::center_origin`] keeps a turned draw in place.
 
 use crate::draw::Vec2;
@@ -68,10 +65,7 @@ macro_rules! float_newtype {
 
 /// An axis-aligned rectangle in window pixels.
 ///
-/// The fields match a raylib `Rectangle`.
 /// `x` and `y` give the top-left corner, and `y` grows down.
-/// The code passes a value straight to any raylib call that takes
-/// `impl Into<Rectangle>`.
 ///
 /// # Examples
 ///
@@ -87,7 +81,6 @@ macro_rules! float_newtype {
 /// // The origin that keeps a turned rect on its own dest position.
 /// assert_eq!(r.center_origin(), Vec2::new(15.0, 20.0));
 /// ```
-#[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Rect {
     /// The left edge.
@@ -137,14 +130,12 @@ impl Rect {
         px >= self.x && py >= self.y && px <= self.right() && py <= self.bottom()
     }
 
-    /// The raylib `DrawTexturePro` origin that keeps a turned rect on its own
-    /// `dest.position`.
+    /// The origin that keeps a turned rect on its own `dest` position.
     ///
-    /// Raylib turns the quad around `dest.position`, and the origin pulls the
-    /// rect back by half its size.
-    /// A dest position at the image center with this origin therefore turns
-    /// the image in place, and the same call draws the plain rect at zero
-    /// degrees.
+    /// The draw turns the quad around the rect position, and this origin pulls
+    /// the rect back by half its size.
+    /// A position at the image center therefore turns the image in place, and
+    /// the same call draws the plain rect at zero degrees.
     #[must_use]
     pub fn center_origin(self) -> Vec2 {
         Vec2::new(self.width / 2.0, self.height / 2.0)
@@ -167,17 +158,6 @@ impl Rect {
     }
 }
 
-impl From<Rect> for raylib::ffi::Rectangle {
-    fn from(r: Rect) -> Self {
-        Self {
-            x: r.x,
-            y: r.y,
-            width: r.width,
-            height: r.height,
-        }
-    }
-}
-
 uint_newtype!(ImgW, "An image width, in pixels.");
 uint_newtype!(ImgH, "An image height, in pixels.");
 uint_newtype!(LongSide, "The longest side of an image, in pixels.");
@@ -186,11 +166,10 @@ uint_newtype!(
     "The longest side of a progressive preview, in pixels."
 );
 impl ImgW {
-    /// The width as a raylib texture dimension.
+    /// The width as an `i32` texture dimension.
     ///
-    /// raylib takes an `i32` where a texture dimension goes, and a width past
-    /// `i32::MAX` clamps instead of wrapping, so the comparison with a
-    /// texture never reads a negative size.
+    /// A width past `i32::MAX` clamps instead of wrapping, so a comparison with
+    /// a texture never reads a negative size.
     #[must_use]
     pub fn as_i32(self) -> i32 {
         i32::try_from(self.0).unwrap_or(i32::MAX)
@@ -198,11 +177,10 @@ impl ImgW {
 }
 
 impl ImgH {
-    /// The height as a raylib texture dimension.
+    /// The height as an `i32` texture dimension.
     ///
-    /// raylib takes an `i32` where a texture dimension goes, and a height past
-    /// `i32::MAX` clamps instead of wrapping, so the comparison with a
-    /// texture never reads a negative size.
+    /// A height past `i32::MAX` clamps instead of wrapping, so a comparison
+    /// with a texture never reads a negative size.
     #[must_use]
     pub fn as_i32(self) -> i32 {
         i32::try_from(self.0).unwrap_or(i32::MAX)

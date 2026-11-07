@@ -33,7 +33,7 @@
 //! backend, so it shows as one vector picture.
 //! Every showable source is a [`surface::Surface`], so the grid, the loader
 //! and the image view ask for a plane at a scale and never for a file format.
-//! [`downscale_rgba`], [`cap_texture_side`] and [`upload_rgba`] keep the
+//! [`downscale_rgba`] and [`cap_texture_side`] keep the
 //! pixel and texture budget.
 //! Decode workers cap the buffer, so the main thread never resizes a large
 //! image.
@@ -91,14 +91,10 @@ pub mod thumbcache;
 pub mod thumbcache;
 pub mod tween;
 pub mod typst;
-#[cfg(target_os = "linux")]
-pub mod wmclass;
 pub mod zoomkeys;
 use std::path::Path;
 
-use raylib::{consts::PixelFormat, prelude::*};
-
-pub use crate::error::{DecodeError, UploadError};
+pub use crate::error::DecodeError;
 use crate::{
     dim::{ImgH, ImgW, LongSide},
     draw::Color,
@@ -356,7 +352,7 @@ pub const MAX_TEXTURE_SIDE: u32 = 8192;
 /// Downscale an RGBA8 buffer to the uploadable [`MAX_TEXTURE_SIDE`].
 ///
 /// Run this function off the main thread, where the decode runs.
-/// [`upload_rgba`] then never resizes a big buffer on the main thread.
+/// A texture upload then never resizes a big buffer on the main thread.
 /// Below the limit the function returns the image unchanged, so no quality
 /// is lost and nothing is copied.
 ///
@@ -536,73 +532,6 @@ pub fn timing_enabled() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VV_TIMING").is_some())
-}
-
-/// Upload a raw RGBA8 buffer as a GPU texture.
-///
-/// Call this function on the main thread, where the GL context lives.
-/// The function only borrows the buffer for the upload.
-/// It forgets the `ffi::Image` wrapper, so raylib never frees the caller
-/// `Vec`.
-///
-/// The caller passes a buffer that already fits [`MAX_TEXTURE_SIDE`].
-/// Decode workers call [`cap_texture_side`], so this function only copies a
-/// buffer that skipped that step.
-/// A resize here blocks the main thread, and a large image then freezes the
-/// window for seconds.
-///
-/// # Errors
-///
-/// The function errors when the GL texture upload fails (no current context,
-/// driver refusal).
-pub fn upload_rgba(
-    rl: &mut RaylibHandle,
-    thread: &RaylibThread,
-    rgba: &[u8],
-    width: ImgW,
-    height: ImgH,
-) -> Result<Texture2D, UploadError> {
-    // Last-resort clamp: a caller that skipped `cap_texture_side` still
-    // uploads (huge panoramas would fail the GL upload otherwise).
-    // The decode path never reaches this branch.
-    let owned;
-    let (rgba, width, height) = if width.raw().max(height.raw()) > MAX_TEXTURE_SIDE {
-        owned = downscale_rgba(
-            DecodedImage::from_exact(width, height, rgba.to_vec()),
-            LongSide::new(MAX_TEXTURE_SIDE),
-        );
-        (owned.as_rgba(), owned.width(), owned.height())
-    } else {
-        (rgba, width, height)
-    };
-    // raylib reads `width * height` RGBA pixels from the pointer.
-    // The cast checks the buffer length, so a short or ragged buffer fails
-    // here instead of reading past the end.
-    let pixels: &[[u8; 4]] = bytemuck::try_cast_slice(rgba).map_err(|_| UploadError::Buffer)?;
-    if pixels.len() < (width.raw() as usize) * (height.raw() as usize) {
-        return Err(UploadError::Buffer);
-    }
-    let ffi_image = raylib::ffi::Image {
-        data: pixels.as_ptr() as *mut std::os::raw::c_void,
-        width: width.as_i32(),
-        height: height.as_i32(),
-        mipmaps: 1,
-        format: PixelFormat::PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 as i32,
-    };
-    let image = unsafe { Image::from_raw(ffi_image) };
-    let started = std::time::Instant::now();
-    let texture = rl.load_texture_from_image(thread, &image)?;
-    image.to_raw(); // forget: drop would MemFree our borrowed Vec
-    if timing_enabled() {
-        eprintln!(
-            "vv: upload {}x{} ({:.1} MB) in {:.1} ms",
-            width.raw(),
-            height.raw(),
-            rgba.len() as f64 / (1024.0 * 1024.0),
-            started.elapsed().as_secs_f64() * 1000.0
-        );
-    }
-    Ok(texture)
 }
 
 #[cfg(test)]
