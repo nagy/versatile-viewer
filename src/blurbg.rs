@@ -202,8 +202,9 @@ impl BlurBg {
         }
     }
 
-    /// Replace the background texture from a tiny blurred copy, or update
-    /// it in place.
+    /// Replace the background texture from a tiny blurred copy.
+    /// The copy measures `VV_BLUR_PX` on its long side, so a fresh upload costs
+    /// a few kilobytes and no in-place update is worth the extra handle.
     /// This path has no fade (same image: streaming previews).
     /// The code cuts a running crossfade short.
     /// Errors are non-fatal: the background just stays transparent, and the

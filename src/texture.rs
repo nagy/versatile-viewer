@@ -232,12 +232,13 @@ impl Uploader {
                 ],
             }))
         };
+        // The two bind groups hold the view, and the view holds the texture,
+        // so the allocation lives as long as this value does and no handle has
+        // to be kept beside them.
         Texture {
             dims: (width, height),
             linear: group(&self.shared.linear),
             nearest: group(&self.shared.nearest),
-            storage: texture,
-            _view: view,
         }
     }
 }
@@ -250,10 +251,6 @@ pub struct Texture {
     /// The nearest group: what `a` selects for the whole image and the region
     /// patches, and what a solid fill uses.
     nearest: Arc<wgpu::BindGroup>,
-    /// The texture itself, which `write` replaces the pixels of.
-    storage: wgpu::Texture,
-    /// The view the bind groups name.
-    _view: wgpu::TextureView,
 }
 
 #[allow(clippy::missing_fields_in_debug)] // the bind groups print as opaque handles
@@ -293,43 +290,6 @@ impl Texture {
         }
     }
 
-    /// Replace the pixels of a texture of the same size.
-    ///
-    /// A progressive preview keeps one allocation, so a stream of full-size
-    /// frames costs one texture instead of one per frame.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TextureError`] when the buffer does not hold exactly
-    /// `width * height * 4` bytes for this texture's size.
-    pub fn write(&self, queue: &wgpu::Queue, rgba: &[u8]) -> Result<(), TextureError> {
-        let (width, height) = self.dims;
-        // The decoded type already checked this pair, so the test is a guard
-        // for a hand-built buffer, not a hot path.
-        if rgba.len() != width as usize * height as usize * 4 {
-            return Err(TextureError::Buffer);
-        }
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.storage,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            rgba,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width * 4),
-                rows_per_image: Some(height),
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-        Ok(())
-    }
 }
 
 /// One rendered picture on its way to the window: pixels, or the texture they

@@ -344,7 +344,7 @@ A source that paints no paper carries it in its pixels, so no clear color ever h
   The rect lives in source units, so `region::Frame::to_screen` maps its corners through the same transform the picture uses, and a pan, a zoom and a turn all keep it on the picture.
   The free pointer converts back through `region::Frame::to_image`, and `selection_rect` (`main.rs`) owns that conversion for the frame draw and for the release, so the border, the veil and the committed rect never read the pointer in different units.
   `region_sel::around` answers the four bands of the plane outside the rect, `draw_selection` (`main.rs`) paints them with one `DIM_VEIL` and draws the bright `SELECTION_BORDER` around the rect.
-  The pipeline culls nothing (`cull_mode: None`), so a band draws in either winding and `region_sel::veil_triangles` is retired: `draw_selection` fills the four quads of `region_sel::around` directly.
+  The pipeline culls nothing (`cull_mode: None`), so a band draws in either winding and `draw_selection` fills the four quads of `region_sel::around` directly: the raylib triangle reversal is gone, and no helper splits a band.
   `DIM_VEIL` keeps the share of brightness that the grid's `DIM_TINT` keeps, because both read `DIM_LEVEL`, so the two views dim alike.
   The bands draw after the whole-image texture and the region patches, so the dim holds over whatever the view paints below it.
 - Shift at the `r` press edge turns the image around the mouse point (`ViewState::pivot`) instead of the image center.

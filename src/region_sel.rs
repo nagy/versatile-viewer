@@ -169,19 +169,6 @@ pub fn around(outer: Crop, inner: Crop) -> [[Vec2; 4]; 4] {
     ]
 }
 
-/// Split a band quad into the two triangles the draw sends.
-///
-/// raylib culls a back face and reads its front face as counter-clockwise in
-/// its own sense, which is a negative shoelace on a screen whose y grows
-/// down.
-/// A band arrives as `[top-left, top-right, bottom-right, bottom-left]`
-/// (clockwise there), so it goes out reversed.
-/// The other order draws nothing at all.
-#[must_use]
-pub fn veil_triangles(quad: [Vec2; 4]) -> [[Vec2; 3]; 2] {
-    [[quad[0], quad[3], quad[2]], [quad[0], quad[2], quad[1]]]
-}
-
 /// The rect that two opposite corners span, in any drag direction.
 fn span(a: Vec2, b: Vec2) -> Crop {
     Crop {
@@ -243,22 +230,6 @@ fn quad_area(quad: &[Vec2; 4]) -> f32 {
         sum += a.x * b.y - b.x * a.y;
     }
     (sum / 2.0).abs()
-}
-
-/// The signed area of a triangle, by the shoelace formula.
-///
-/// The value reads positive for a counter-clockwise winding with y growing
-/// up, so it reads positive for a clockwise winding on the screen, whose y
-/// grows down.
-#[cfg(test)]
-fn signed_area(tri: &[Vec2; 3]) -> f32 {
-    let mut sum = 0.0;
-    for i in 0..3 {
-        let a = tri[i];
-        let b = tri[(i + 1) % 3];
-        sum += a.x * b.y - b.x * a.y;
-    }
-    sum / 2.0
 }
 
 #[cfg(test)]
@@ -458,34 +429,6 @@ mod tests {
         assert_eq!(area, 0.0);
     }
 
-    #[test]
-    fn every_veil_triangle_faces_the_draw() {
-        let outer = Crop {
-            x: 0.0,
-            y: 0.0,
-            w: 1000.0,
-            h: 500.0,
-        };
-        let inner = Crop {
-            x: 100.0,
-            y: 50.0,
-            w: 200.0,
-            h: 100.0,
-        };
-        for band in around(outer, inner) {
-            // raylib's front face reads as a negative shoelace on a y-down
-            // screen, so a triangle that faces the other way draws nothing.
-            for tri in veil_triangles(band) {
-                assert!(signed_area(&tri) < 0.0, "{tri:?} faces away");
-            }
-            // The two halves still hold the whole band.
-            let split: f32 = veil_triangles(band)
-                .iter()
-                .map(|tri| signed_area(tri).abs())
-                .sum();
-            assert!((split - quad_area(&band)).abs() < 1e-3);
-        }
-    }
 }
 
 #[cfg(test)]
