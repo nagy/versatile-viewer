@@ -166,8 +166,28 @@ The host owes the pane two things.
 The pane claims no XEmbed support: it sets no `_XEMBED_INFO` and sends no XEMBED
 message, so a host that speaks the protocol must focus the pane itself.
 
-`cargo run --example embed_host -- <path>` is a working host to try this
-against. It creates a frame and a container under a bar, prints both window
+### As a library
+
+A host that already owns a `wgpu` device and a render target builds a
+`Viewer` instead of a process, which is also the Wayland-shaped path:
+
+```rust
+let launch = viewer::Launch::open(path, false)?;         // lists, decodes, sizes
+let window = host.create_window(launch.window_size());   // the host's own window
+let mut viewer = Viewer::new(device, queue, format, max_texture_side, launch, size);
+viewer.handle_event(viewer::Event::Key { .. }, &mut host);
+viewer.render(&mut host, &target_view, size, dt)?;       // paints the host's texture
+```
+
+The viewer owns the pipeline, the textures, the view state, the grid and the
+loaders; the host owns the window, the surface, the event loop, the clock and
+the present. Four window actions travel back through `viewer::Host` (`set_title`,
+`grab_pointer`, `release_pointer`, `place_pointer`), so the viewer never holds a
+window. `viewer::Event` is the input vocabulary: a host maps its own toolkit into
+it, and the held keys, the capture rule and the focus drop stay inside.
+
+`cargo run --example embed_host -- <path>` is a working host to try the
+`--wid` path against. It creates a frame and a container under a bar, prints both window
 ids, resizes the container with the frame, and takes or gives the keyboard on a
 click on the bar. `cargo run --example embed_host -- --child-size 640x480 <path>`
 scripts a resize. `xwininfo -tree -name "vv embed host"` shows the three levels
