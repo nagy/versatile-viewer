@@ -2067,6 +2067,12 @@ impl App {
         let Some(gpu) = self.gpu.take() else {
             return Ok(());
         };
+        // A dead device cannot draw again, and every later submit would fail
+        // silently. Stop with the reason the driver gave instead of showing a
+        // frozen picture.
+        if let Some(reason) = gpu.lost_reason() {
+            bail!("the GPU device was lost: {reason}");
+        }
         let mut input = std::mem::take(&mut self.input);
         let mut ui = Ui {
             input: &mut input,

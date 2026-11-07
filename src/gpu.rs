@@ -21,7 +21,7 @@
 //! reach the screen as they are, so a ported view draws the same pixels.
 //! [`Gpu::format`] answers the format the pipeline must target.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use derive_more::{Display, Error, From};
 use winit::window::Window;
@@ -148,6 +148,14 @@ pub struct Gpu {
     config: wgpu::SurfaceConfiguration,
     max_texture_side: u32,
     present: wgpu::PresentMode,
+    /// Why the device died, when it did.
+    ///
+    /// A driver reset, an OOM reset or a validation failure can take the whole
+    /// device down, and every later submit then fails. The callback records the
+    /// reason once, and [`Self::lost_reason`] hands it to the frame loop, which
+    /// stops with a readable error instead of drawing nothing forever.
+    /// The device's own `destroy` is not a loss: the process is on its way out.
+    lost: Arc<OnceLock<String>>,
 }
 
 impl Gpu {
@@ -182,6 +190,14 @@ impl Gpu {
                 required_limits: adapter.limits(),
                 ..Default::default()
             }))?;
+        let lost = Arc::new(OnceLock::new());
+        let lost_flag = Arc::clone(&lost);
+        device.set_device_lost_callback(move |reason, message| {
+            if reason == wgpu::DeviceLostReason::Destroyed {
+                return;
+            }
+            let _ = lost_flag.set(message);
+        });
 
         let caps = surface.get_capabilities(&adapter);
         let format = pick_format(&caps.formats);
@@ -227,6 +243,7 @@ impl Gpu {
             config,
             max_texture_side,
             present,
+            lost,
         })
     }
 
@@ -268,6 +285,18 @@ impl Gpu {
     #[must_use]
     pub fn max_texture_side(&self) -> u32 {
         self.max_texture_side
+    }
+
+    /// The reason the device died, when it did.
+    ///
+    /// A lost device cannot draw again: every resource of it is gone, and the
+    /// frame loop answers this with a readable error instead of a black window.
+    /// Recovering means building a new [`Gpu`] and a new [`crate::render::Renderer`]
+    /// plus every texture, which is the same work as a fresh open; that path is
+    /// not written yet.
+    #[must_use]
+    pub fn lost_reason(&self) -> Option<&str> {
+        self.lost.get().map(String::as_str)
     }
 
     /// Resize the swapchain to the window's new pixel pair.

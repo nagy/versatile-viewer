@@ -257,6 +257,9 @@ The binary name is `vv`.
 - The swapchain takes a non-sRGB format (`Bgra8Unorm` when the adapter offers it) and every texture is `Rgba8Unorm`, so the decoder's bytes reach the screen unchanged: the pixel math the raylib path had.
   Alpha stays straight (`SRC_ALPHA` over `ONE_MINUS_SRC_ALPHA`), so the decoders write what they decode and `svg.rs` keeps its un-premultiply pass.
   Do not mix: one color space, one alpha convention, from the decoder to the swapchain.
+- `Gpu::new` registers `Device::set_device_lost_callback`, and `Gpu::lost_reason` hands the driver's message to the frame loop, which stops with a readable error.
+  A lost device takes every resource with it, so drawing on would fail silently; a recovery path means a new `Gpu`, a new `Renderer` and every texture again, which is the same work as a fresh open and is not written yet.
+  The device's own `destroy` is not a loss, because the process is on its way out.
 - The present mode defaults to `Fifo`, which never tears and paces the loop to the refresh rate; `VV_PRESENT=fifo|relaxed|mailbox|immediate` picks another one.
   `desired_maximum_frame_latency` stays 1 (`gpu::DEFAULT_LATENCY`), the classic double buffer.
 - An instance is four window-space corners, a source rect and a tint (`render::Inst`).
