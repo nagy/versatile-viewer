@@ -60,6 +60,8 @@
 //! frame.
 //! [`pane`] names the X11 window a host hands over with `--wid`, so the viewer
 //! draws inside a host window without becoming a top-level one.
+//! [`view`] holds the image view: what it shows, how it frames it, the patch
+//! that refines a settled zoom, and the `Ui` of one frame.
 //! The binary in `main.rs` wires these pieces into the window and event loop.
 //! The unit tests and doctests here keep the pure helpers honest.
 
@@ -101,6 +103,7 @@ pub mod thumbcache;
 pub mod thumbcache;
 pub mod tween;
 pub mod typst;
+pub mod view;
 pub mod zoomkeys;
 use std::path::Path;
 

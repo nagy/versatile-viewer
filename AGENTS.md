@@ -251,6 +251,8 @@ The binary name is `vv`.
   `src/texture.rs` owns one uploaded picture and its two filter groups.
   `src/draw.rs` owns `Vec2`, `Color` and `Quad`, the CPU-side geometry.
   `src/input.rs` owns the held keys, the frame edges and the pointer.
+  `src/view.rs` owns the image view itself: `ViewState` (what it shows and how it frames it), the region patch, the spread column, the `v` selection drawing, and `Ui`, which bundles one frame's window, input and clock.
+  `main.rs` keeps the window, the event loop, the launch and the one-entry pass, so no view code reads a raw `winit` event.
   The decisions behind one pipeline are `docs/adr/0002-wgpu-renders-the-view.md`.
 - The backend is Vulkan only (`Backends::VULKAN`, features `vulkan` and `wgsl`), and the instance flags stay empty, so no DX12, Metal or GL instance exists and no library opens for one.
   Issue 94691ce measured the Vulkan loader alone at 28.9 ms of a 59.1 ms first frame, so the backend set is the one startup knob that matters.
