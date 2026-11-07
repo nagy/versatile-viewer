@@ -332,33 +332,42 @@ impl Renderer {
         self.line(a, b, 1.0, color);
     }
 
-    /// Draw the outline of a rectangle, `thickness` pixels wide.
+    /// Draw the outline of a rectangle, `thickness` pixels wide, inside it.
     ///
+    /// The ring covers the outer band of the rect, which is where raylib drew
+    /// its rectangle outline, so a cell ring never spills into the gap between
+    /// two cells.
     /// The four edges meet at the corners, so the ring closes with no notch.
     pub fn stroke_rect(&mut self, rect: Rect, thickness: f32, color: Color) {
-        let (left, top) = (rect.x, rect.y);
-        let (right, bottom) = (rect.right(), rect.bottom());
+        // A line of `thickness` sits centered on its segment. The top and the
+        // bottom run the whole width so they close both corners, and the two
+        // sides span only the gap between them, exactly like raylib's own
+        // outline.
+        let half = thickness / 2.0;
+        let (left, right) = (rect.x + half, rect.right() - half);
+        let (top, bottom) = (rect.y + half, rect.bottom() - half);
+        // The horizontal edges take the band's center line, from edge to edge.
+        self.line(
+            Vec2::new(rect.x, top),
+            Vec2::new(rect.right(), top),
+            thickness,
+            color,
+        );
+        self.line(
+            Vec2::new(rect.x, bottom),
+            Vec2::new(rect.right(), bottom),
+            thickness,
+            color,
+        );
         self.line(
             Vec2::new(left, top),
-            Vec2::new(right, top),
+            Vec2::new(left, bottom),
             thickness,
             color,
         );
         self.line(
             Vec2::new(right, top),
             Vec2::new(right, bottom),
-            thickness,
-            color,
-        );
-        self.line(
-            Vec2::new(right, bottom),
-            Vec2::new(left, bottom),
-            thickness,
-            color,
-        );
-        self.line(
-            Vec2::new(left, bottom),
-            Vec2::new(left, top),
             thickness,
             color,
         );

@@ -743,3 +743,27 @@ fn the_region_veil_dims_only_outside_the_selection() {
         );
     }
 }
+
+/// A rectangle outline covers the outer band of its rect, nothing outside.
+///
+/// This is raylib's `DrawRectangleLinesEx` placement, which the grid cursor ring
+/// and its visual-selection ring keep: a centered ring would spill into the gap
+/// between two cells.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_stroke_rect_stays_inside_its_rect() {
+    let mut canvas = canvas!(32, 32);
+    canvas.begin(Color::BLACK);
+    let rect = Rect::new(8.0, 8.0, 16.0, 16.0);
+    canvas.renderer.stroke_rect(rect, 4.0, Color::WHITE);
+    let pixels = canvas.print();
+    // The band: the four outer pixels of the rect on every side.
+    assert_eq!(pixels.at(8, 8), [255, 255, 255, 255], "the top-left corner");
+    assert_eq!(pixels.at(11, 8), [255, 255, 255, 255], "the top band");
+    assert_eq!(pixels.at(8, 20), [255, 255, 255, 255], "the bottom band");
+    assert_eq!(pixels.at(20, 11), [255, 255, 255, 255], "the right band");
+    // Nothing outside, and the middle stays hollow.
+    assert_eq!(pixels.at(7, 8), [0, 0, 0, 255], "outside the rect");
+    assert_eq!(pixels.at(8, 24), [0, 0, 0, 255], "below the rect");
+    assert_eq!(pixels.at(16, 16), [0, 0, 0, 255], "hollow middle");
+}
