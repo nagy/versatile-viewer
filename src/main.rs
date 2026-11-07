@@ -148,6 +148,15 @@ const SPREAD_EASE_TIME: f32 = 0.05 * 1.0;
 /// three seconds sits far past any paint the viewer has shown.
 const PREFETCH_GIVE_UP: Duration = Duration::from_secs(3);
 
+/// How long a frame sleeps when the swapchain has no image for the window.
+///
+/// A hidden or occluded window still receives `RedrawRequested`, because the
+/// loop asks for one after every frame. Fifo paces a visible window, and a
+/// skipped frame has nothing to pace, so without this pause the loop would spin
+/// on acquire errors and burn a core for a window nobody sees.
+/// Twenty wakeups a second keep the return of the window immediate.
+const OCCLUDED_PAUSE: Duration = Duration::from_millis(50);
+
 /// Target pan that centers the fill view on the image point under `mouse`.
 ///
 /// The code clamps both axes to `[-|offset|, |offset|]`.
@@ -1849,6 +1858,9 @@ struct App {
     spread_armed: bool,
     /// The previous frame's window size, for the resize detection.
     last_win: Option<(f32, f32)>,
+    /// The swapchain answered no image on the last frame, so the window is
+    /// hidden or occluded and the loop paces itself.
+    occluded: bool,
     /// True while an image-view drag holds the pointer.
     ///
     /// This is the view's latch; [`Input::capture`] carries the same fact to
@@ -1952,6 +1964,7 @@ impl App {
             timing: versatile_viewer::timing_enabled(),
             spread_armed: true,
             last_win: None,
+            occluded: false,
             pointer_captured: false,
             grab_pos: Vec2::ZERO,
             drag_virtual: Vec2::ZERO,
@@ -2140,6 +2153,11 @@ impl ApplicationHandler for App {
                     if self.quit {
                         event_loop.exit();
                     } else if let Some(window) = &self.window {
+                        // A hidden window skips every frame, so the loop sleeps
+                        // instead of spinning on a picture nobody sees.
+                        if self.occluded {
+                            std::thread::sleep(OCCLUDED_PAUSE);
+                        }
                         // A continuous loop, like the ramps and the eases need:
                         // a held key or a running ease draws the next frame.
                         window.request_redraw();
@@ -3607,12 +3625,17 @@ impl App {
         // Draw the batch and present it. A stale or lost swapchain skips this
         // frame and asks for a new configuration, so a resize never kills the
         // window.
+        self.occluded = false;
         if let Err(err) = ui.end(r) {
             if err.needs_reconfigure() {
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.reconfigure();
                 }
-            } else if !matches!(err, FrameError::Occluded | FrameError::Timeout) {
+            } else if matches!(err, FrameError::Occluded | FrameError::Timeout) {
+                // No image came out of the swapchain, so the window is hidden:
+                // the loop paces itself instead of spinning.
+                self.occluded = true;
+            } else {
                 eprintln!("vv: frame: {err}");
             }
         }

@@ -294,6 +294,7 @@ The binary name is `vv`.
   The launch lists the directory and decodes a single file before the event loop, because the title carries the image count and a picture sizes its own window.
   `App::resumed` creates the window, the GPU stack and the renderer, uploads the launch frame and starts the grid passes.
   A stale or lost swapchain reconfigures and skips the frame; it never kills the window.
+  A frame whose acquire answers no image (the window is hidden or occluded) is the one frame the loop cannot pace itself with, because Fifo has nothing to present, so `main.rs` sleeps `OCCLUDED_PAUSE` (50 ms) before it asks for the next one: twenty wakeups a second, and no core burned on a picture nobody sees.
 - The viewer carries no text layer.
   The grid draws nothing for an empty directory, because the title carries the count, and a failed cell shows an exclamation of two rectangles.
 
