@@ -284,7 +284,10 @@ The binary name is `vv`.
   `Input::capture` owns the swap: while a drag holds the pointer, the raw travel moves the logical pointer and `WindowEvent::CursorMoved` is ignored, because the grab keeps the real pointer in place.
   A free pointer is the opposite: the platform position is the truth and the raw travel only accumulates for a drag that starts inside the same frame.
   That rule lives in `src/input.rs`, so a hover point never drifts by the travel since the last `CursorMoved`.
-  The pan multiplies the travel by its own factor, so the drag speed is a host property and not a constant.
+  The pan multiplies the travel by `PAN_DRAG_SPEED` (`main.rs`, 1.0), and `VV_PAN_DRAG_SPEED` overrides it for one run.
+  The factor is a feel constant and not a geometry one: raw counts are units of the mouse, so their ratio to window pixels depends on the hardware DPI and on the desktop's pointer speed.
+  1.0 moves the picture one window pixel per count, which is the feel the spike at `~/agent/versatile-viewer-wgpu-spike` picked; the raylib path multiplied the same raw travel by 2.0 (see `git bug show 94691ce`), and issue 94691ce carries the history of that number.
+  `VV_DEBUG` prints the window scale factor at startup and, at every drag release, the `speed` in use and the `travel` the drag accumulated, so a feel report carries numbers and the input source can be checked without a rebuild.
   The release warps the pointer back to the grab point, and the warp sets the logical pointer too, so the next frame reads the spot it sent the pointer to.
 - winit 0.30.13 emits one `DeviceEvent::MouseMotion` per XI2 raw motion event, with the device's raw axis values as the delta (see `xinput2_raw_mouse_motion` in its X11 backend), so no per-event guard belongs here.
   A virtual X server (XTEST) reports the absolute pointer position as those raw values instead, sometimes twice, which looks like a double-speed drag; that is an injection artifact of the test harness and not a real event pair, so do not add a delta sanity clamp for it.

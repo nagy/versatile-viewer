@@ -189,7 +189,7 @@ spread, and the step ends on the first and the last spread. `Page-down` and
 
 |variable          |effect                                                                 |
 |------------------|-----------------------------------------------------------------------|
-|`VV_DEBUG=1`      |trace grid open/return events and raw key events to stderr             |
+|`VV_DEBUG=1`      |trace grid open/return events, key events and the drag travel to stderr|
 |`VV_TIMING=1`     |print the GPU stack at startup and every slow frame to stderr          |
 |`VV_SLOW_STREAM=1`|dribble 4 KB chunks with 1 s pauses until the first preview renders    |
 |`VV_BLUR_BG=1`    |image-view background is a tiny blurred copy of the viewed image       |
@@ -197,6 +197,7 @@ spread, and the step ends on the first and the last spread. `Page-down` and
 |`VV_BLUR_PX=<n>`  |long side of the blur texture, 8..=1024 (default 128; fewer = blurrier)|
 |`VV_CACHE=0`      |do not read or write the thumbnail cache under `$XDG_CACHE_HOME`      |
 |`VV_PRESENT=`     |swapchain present mode: `fifo` (default), `relaxed`, `mailbox`, `immediate`|
+|`VV_PAN_DRAG_SPEED=`|picture pixels per unit of drag travel (default 1.0, range 0.05..=16)|
 
 ## Development
 

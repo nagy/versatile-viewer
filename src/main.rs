@@ -98,6 +98,41 @@ const ZOOM_ANCHOR_DRIFT: f32 = 0.25;
 /// over it.
 const RAMP_TIME: RampTime = RampTime::new(0.36);
 
+/// How far one unit of raw device travel moves the picture during a drag.
+///
+/// A grab drag reads the raw device deltas of `DeviceEvent::MouseMotion`, which
+/// are counts of the mouse, not window pixels, so this factor is a feel
+/// constant and not a geometry one.
+/// 1.0 moves the picture one window pixel per count: the spike at
+/// `~/agent/versatile-viewer-wgpu-spike` picked it by feel and the viewer's own
+/// author confirmed that feel, so it is the default here.
+/// The raylib path multiplied the same raw travel by 2.0, and `git bug show
+/// 94691ce` records that history.
+/// `VV_PAN_DRAG_SPEED` overrides it, so a feel comparison needs no rebuild, and
+/// `VV_DEBUG` prints the travel a drag accumulated (see the release line).
+const PAN_DRAG_SPEED: f32 = 1.0;
+
+/// The accepted `VV_PAN_DRAG_SPEED` range.
+///
+/// Zero would freeze a drag and a huge value would throw the picture out of the
+/// window on the first event, so the parser clamps instead of trusting the
+/// value.
+const PAN_DRAG_SPEED_RANGE: std::ops::RangeInclusive<f32> = 0.05..=16.0;
+
+/// The drag factor for this run, from `VV_PAN_DRAG_SPEED` or the default.
+///
+/// The environment is read here, once, at the boundary, and the app carries the
+/// value afterwards.
+fn pan_drag_speed() -> f32 {
+    std::env::var("VV_PAN_DRAG_SPEED")
+        .ok()
+        .and_then(|value| value.parse::<f32>().ok())
+        .filter(|value| value.is_finite())
+        .map_or(PAN_DRAG_SPEED, |value| {
+            value.clamp(*PAN_DRAG_SPEED_RANGE.start(), *PAN_DRAG_SPEED_RANGE.end())
+        })
+}
+
 /// The pan cruise speed, in window long sides per second.
 /// 0.9 suits a deliberate scan of the image.
 /// The ramp scales it down near the press and the release.
@@ -1869,6 +1904,10 @@ struct App {
     /// together, and only through [`Ui::grab_pointer`], [`Ui::release_pointer`]
     /// or the lost-focus arm.
     pointer_captured: bool,
+    /// How far one unit of raw device travel moves the picture in a drag.
+    ///
+    /// `VV_PAN_DRAG_SPEED` sets it once at launch (see [`pan_drag_speed`]).
+    pan_drag_speed: f32,
     /// The window point where the current drag grabbed the pointer.
     grab_pos: Vec2,
     /// The pointer position while captured: the grab point plus the raw travel.
@@ -1967,6 +2006,7 @@ impl App {
             last_win: None,
             occluded: false,
             pointer_captured: false,
+            pan_drag_speed: pan_drag_speed(),
             grab_pos: Vec2::ZERO,
             drag_virtual: Vec2::ZERO,
             pending_restore: None,
@@ -2144,6 +2184,15 @@ impl ApplicationHandler for App {
         self.window = Some(Arc::clone(&window));
         self.gpu = Some(gpu);
         self.renderer = Some(renderer);
+        if self.debug {
+            // The content scale is the one display fact a drag can read, and a
+            // feel report needs it next to the travel the release prints.
+            eprintln!(
+                "vv: window scale factor {}, pan drag speed {}",
+                window.scale_factor(),
+                self.pan_drag_speed
+            );
+        }
         self.started = true;
         self.started_at = Instant::now();
         self.last_frame = Instant::now();
@@ -2726,15 +2775,21 @@ impl App {
                     self.r_capture = false;
                 }
                 if self.debug {
+                    // The accumulated travel is the number a feel report needs:
+                    // a 100 px drag that reads 200 says the input source counts
+                    // twice, whatever the factor is.
+                    let travel = self.drag_virtual - self.grab_pos;
                     eprintln!(
-                        "vv: hold release: grab ({:.0},{:.0}), virtual ({:.0},{:.0}), dragged {}, \
-                         angle {}",
+                        "vv: hold release: grab ({:.0},{:.0}), virtual ({:.0},{:.0}), speed {}, \
+                         dragged {f_dragged}, angle {}, travel ({:.0},{:.0})",
                         self.grab_pos.x,
                         self.grab_pos.y,
                         self.drag_virtual.x,
                         self.drag_virtual.y,
-                        f_dragged,
-                        self.st.angle
+                        self.pan_drag_speed,
+                        self.st.angle,
+                        travel.x,
+                        travel.y
                     );
                 }
             }
@@ -3227,15 +3282,19 @@ impl App {
                     && !self.r_capture
                 {
                     if self.debug {
+                        let travel = self.drag_virtual - self.grab_pos;
                         eprintln!(
-                            "vv: drag release: grab ({:.0},{:.0}), virtual ({:.0},{:.0}), rl pos \
-                             ({:.0},{:.0})",
+                            "vv: drag release: grab ({:.0},{:.0}), virtual ({:.0},{:.0}), speed \
+                             {}, pointer ({:.0},{:.0}), travel ({:.0},{:.0})",
                             self.grab_pos.x,
                             self.grab_pos.y,
                             self.drag_virtual.x,
                             self.drag_virtual.y,
+                            self.pan_drag_speed,
                             ui.pointer().x,
-                            ui.pointer().y
+                            ui.pointer().y,
+                            travel.x,
+                            travel.y
                         );
                     }
                     ui.release_pointer();
@@ -3257,10 +3316,10 @@ impl App {
                     // crosshair).
                     self.drag_virtual.x += delta.x;
                     self.drag_virtual.y += delta.y;
-                    // The pan gets the 2x speedup.
+                    // The pan follows the travel at the run's own factor.
                     if !self.f_zoom_capture && !self.r_capture {
-                        self.st.target_pan.x += delta.x * 2.0;
-                        self.st.target_pan.y += delta.y * 2.0;
+                        self.st.target_pan.x += delta.x * self.pan_drag_speed;
+                        self.st.target_pan.y += delta.y * self.pan_drag_speed;
                     }
                 }
 
