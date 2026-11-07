@@ -61,6 +61,7 @@ pub mod draw;
 pub mod error;
 pub mod gpu;
 pub mod grid;
+pub mod input;
 pub mod keyrepeat;
 pub mod loader;
 pub mod mcp;
