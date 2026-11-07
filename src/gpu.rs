@@ -218,6 +218,11 @@ impl Gpu {
             wgpu::PresentMode::Fifo
         };
         config.desired_maximum_frame_latency = settings.latency.max(1);
+        // A host that composites a picture of its own copies it into the
+        // swapchain image (`examples/viewer_host.rs` paints a `Viewer` texture
+        // and carries it here), so the image accepts a copy as well as a
+        // render pass. Both uses cost nothing on a compositor.
+        config.usage |= wgpu::TextureUsages::COPY_DST;
         surface.configure(&device, &config);
         let present = config.present_mode;
 

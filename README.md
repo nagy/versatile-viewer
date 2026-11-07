@@ -186,6 +186,11 @@ the present. Four window actions travel back through `viewer::Host` (`set_title`
 window. `viewer::Event` is the input vocabulary: a host maps its own toolkit into
 it, and the held keys, the capture rule and the focus drop stay inside.
 
+`cargo run --example viewer_host -- <path>` is a working host for the library
+path: it owns the window, the surface and the swapchain, gives the viewer a
+texture and copies that texture into the swapchain image each frame, which is
+the shape a Wayland host takes.
+
 `cargo run --example embed_host -- <path>` is a working host to try the
 `--wid` path against. It creates a frame and a container under a bar, prints both window
 ids, resizes the container with the frame, and takes or gives the keyboard on a

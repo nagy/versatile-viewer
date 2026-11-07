@@ -408,6 +408,10 @@ A source that paints no paper carries it in its pixels, so no clear color ever h
   A host that expects the protocol focuses the pane itself.
 - `examples/embed_host.rs` is the demo host: a frame window, a container child inset under a bar, `vv --wid <container> <path>`, a frame resize that the container follows, a click on the bar that toggles focus onto the pane's own window, and a reap of the child on exit.
   It shows the two duties a host owes, and it uses only `x11rb`.
+- `examples/viewer_host.rs` is the stage-2 demo host: it owns the window, the surface, the swapchain and the event loop, builds a `Viewer` on its own device, gives it a texture, and copies that texture into the swapchain image each frame.
+  A host with a scene of its own samples the same texture with its own pipeline instead, and the example shows the minimum: one `copy_texture_to_texture`.
+  `Gpu` keeps `COPY_DST` on its swapchain configuration for exactly that.
+  Run it with `cargo run --example viewer_host -- <path>`.
 - Stage 2 is the library value: `viewer::Viewer` in `src/viewer.rs`.
   A host builds one on its own `wgpu::Device` and `Queue`, so vv needs no window, no surface and no swapchain: `Viewer::new(device, queue, format, max_texture_side, launch, size)` builds the pipeline and uploads the launch frame.
   `Viewer::render(host, target, size, dt)` fills one frame's batch and paints it into the host's `wgpu::TextureView` through `Renderer::render_into`, so `render_into` stays the only encoder and the host presents.
