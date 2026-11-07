@@ -60,6 +60,12 @@ winit = { version = "0.30.13", default-features = false, features = [
   "x11",
   "rwh_06",
 ] }
+# The X protocol, pure Rust (MIT OR Apache-2.0, no C and no bindgen).
+# An embedded pane reads the size of the host window it fills: a host resizes
+# the container it created, never the child, so the child hears nothing.
+# `mpv --wid` reads the same geometry, and `winio` above opens no seam for it.
+# The default feature set is empty, so no `libxcb` and no `libc` shim arrives.
+x11rb = "0.13.2"
 # Block on the two async wgpu calls of startup (adapter, device).
 pollster = "1.0.1"
 # Work pool for parallel background decodes (grid prefetch); jxl-oxide also

@@ -380,6 +380,30 @@ A source that paints no paper carries it in its pixels, so no clear color ever h
 - X11 WM_CLASS is `vv` (res_name and res_class), which the window name sets (`.with_name("vv", "vv")`).
   The build carries the `x11` feature of winit only, so one display path ships.
 
+## Embed
+
+- `vv --wid <id> <path>` shows the picture inside a host window, the way `mpv --wid` does.
+  The id reads as decimal or `0x` hex, before or after the path, and `--wid` composes with `--mcp`.
+  `parse_args` (`main.rs`) is pure and takes an iterator, so a test never reads `std::env::args`.
+  A second path, an unknown option, an id that is not a number and the id `0` are usage errors that name the flag.
+- `pane::Wid` (`src/pane.rs`) is the parsed id: it is the one place a bare window number becomes a value with a meaning, and `raw()` is the only way back.
+- One `Pane` (`main.rs`) carries the policy: `Window` or `Embedded(Wid)`.
+  Every site reads it once, and no view code carries an `if embedded` test.
+  `Pane::shows_grid` answers the whole difference: an embedded pane draws the image view only, so `ESC` and `Enter` never leave the picture, the title stays untouched, `open_initial` opens entry 0 of a directory, and a failed open bails with the reason instead of falling back to a grid that nothing draws.
+  The grid stays alive as data: `n`/`p` step it, the prefetch reads it, and a book's spread count comes from the surface.
+- The child window is created with `WindowAttributesExtX11::with_embed_parent_window`, so `XCreateWindow` runs with the host window as parent.
+  The child never becomes a top-level window: no window manager frames it and no `WM_CLASS` or title is set on it.
+  `Gpu` needs no change, because winit's window carries the X11 handle.
+- The pane follows the host size itself (`pane::PaneGeometry`, `PANE_POLL` 50 ms), because a host resizes the container it created and X sends that `ConfigureNotify` to the container alone.
+  The poll reads the parent geometry with `x11rb` (pure Rust, the default feature set is empty) and asks for that size through `request_inner_size`, so the swapchain reconfigures and the picture refits on the `Resized` that comes back, exactly like `mpv --wid`.
+  A zero side (a collapsed pane) answers nothing, so no 0x0 swapchain is configured.
+  A display that cannot be reached leaves the pane at its launch size and prints one line.
+- The host owns focus. vv sends no `XSetInputFocus`, so the pane receives keys only while the host focuses it.
+  A host calls `XSetInputFocus` on the child of the container it handed over: keys go to the focus window, and vv's window is a child of the container, not the container.
+  A lost focus already drops every held key, the pointer grab and every drag latch.
+- vv claims no XEmbed support: winit sets an atom it names `_XEMBED` to `[0, 1]`, not the spec's `_XEMBED_INFO`, and it speaks no XEMBED message.
+  A host that expects the protocol focuses the pane itself.
+
 ## MCP
 
 - `vv --mcp <path>` also serves the Model Context Protocol on stdio, from `src/mcp.rs`.

@@ -5689,6 +5689,7 @@ dependencies = [
  "usvg 0.49.0",
  "wgpu",
  "winit",
+ "x11rb",
  "xdg",
 ]
 

@@ -56,7 +56,9 @@ use versatile_viewer::{
     grid::{DecodeFailure, EntrySource, Grid, GridAction, LoadPlan},
     input::Input,
     loader::{DecodeMsg, Loader},
-    mcp, region, region_sel,
+    mcp,
+    pane::{PaneGeometry, Wid},
+    region, region_sel,
     render::Renderer,
     rotate,
     surface::{Size, Surface, View, open_book_surface, open_surface},
@@ -246,6 +248,34 @@ impl ZoomMode {
             Self::Free(scale) => scale,
             _ => fit,
         }
+    }
+}
+
+/// What kind of window this process draws into.
+///
+/// A host application that wants the picture inside a window of its own passes
+/// that window with `--wid`, and the viewer then shows the image view inside it.
+/// Every policy that differs between the two kinds reads this one value, so no
+/// view code carries an `if embedded` test of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pane {
+    /// A top-level window of our own: grid, title and `WM_CLASS`.
+    Window,
+    /// A child window inside a host: image view only, and the host owns the
+    /// size and the keyboard focus.
+    Embedded(Wid),
+}
+
+impl Pane {
+    /// May the view fall back to the grid?
+    ///
+    /// A standalone window shows the grid, so `ESC` and `Enter` toggle between
+    /// the two views and a failed open leaves that grid on screen.
+    /// A host pane draws the image view only, so there is nothing to fall back
+    /// to: `ESC` and `Enter` never leave the picture, and a failed open ends the
+    /// process with the reason.
+    const fn shows_grid(self) -> bool {
+        matches!(self, Self::Window)
     }
 }
 
@@ -1389,6 +1419,23 @@ fn put_back_view(
     *view_tex = None;
 }
 
+/// The entry a launch opens before the user presses anything, if any.
+///
+/// A standalone window opens the only entry of a one-image directory and shows
+/// the grid otherwise, so `ESC` has somewhere to go.
+/// A host pane draws the image view only, so it opens the first entry of a
+/// directory and never waits on a grid that nothing can show.
+/// A document launch already carries its picture, so it opens nothing.
+const fn open_initial(pane: Pane, single_plane: bool, entries: usize) -> Option<usize> {
+    if single_plane || entries == 0 {
+        return None;
+    }
+    if pane.shows_grid() && entries != 1 {
+        return None;
+    }
+    Some(0)
+}
+
 /// Make the entry at index `idx` the open image.
 /// Three paths share this code: grid-open, prev/next navigation and the
 /// decode-landed takeover.
@@ -1739,6 +1786,8 @@ impl Ui<'_> {
 /// window. The GPU work waits for [`App::resumed`], because a surface needs a
 /// window.
 struct Launch {
+    /// The window kind this launch draws into.
+    pane: Pane,
     /// The grid of a directory launch, or the one-cell grid behind a document.
     grid: Option<Grid>,
     /// The decoded picture of a single-file launch.
@@ -1759,7 +1808,7 @@ struct Launch {
 
 impl Launch {
     /// Read the command line and open the path.
-    fn open(path: &Path) -> Result<Self> {
+    fn open(path: &Path, pane: Pane) -> Result<Self> {
         // Directory launch: list the directory before opening the window (the
         // title shows the image count).
         // Single-file launch: open the surface now.
@@ -1833,6 +1882,7 @@ impl Launch {
             });
         let title = window_title(path, grid.as_ref().filter(|_| !single_plane));
         Ok(Self {
+            pane,
             grid,
             decoded,
             source,
@@ -1854,6 +1904,13 @@ struct App {
     gpu: Option<Gpu>,
     renderer: Option<Renderer>,
     input: Input,
+    /// What kind of window this process draws into.
+    pane: Pane,
+    /// The host window an embedded pane fills, so the pane follows its size.
+    ///
+    /// None for a top-level window, and None for a pane whose display could not
+    /// be reached, which then keeps the size it launched with.
+    pane_geometry: Option<PaneGeometry>,
     /// The swapchain arrived and the launch frame uploaded.
     started: bool,
     /// The window size of this frame, in physical pixels.
@@ -1944,6 +2001,8 @@ impl App {
             gpu: None,
             renderer: None,
             input: Input::default(),
+            pane: launch.pane,
+            pane_geometry: None,
             started: false,
             size: launch.win0,
             last_frame: Instant::now(),
@@ -2063,7 +2122,13 @@ impl App {
         }
         // A one-image directory skips the grid: jump straight into that image
         // (ESC still returns to the grid view).
-        if !self.single_plane && self.grid.as_ref().is_some_and(|g| g.entries.len() == 1) {
+        // A host pane draws no grid at all, so it opens the first entry.
+        let open = open_initial(
+            self.pane,
+            self.single_plane,
+            self.grid.as_ref().map_or(0, |grid| grid.entries.len()),
+        );
+        if let Some(index) = open {
             let ui = Ui {
                 input: &mut self.input,
                 window,
@@ -2075,13 +2140,41 @@ impl App {
             let win = (WinW::new(self.size.0 as f32), WinH::new(self.size.1 as f32));
             show_entry(
                 &mut self.st,
-                self.grid.as_mut().unwrap(),
-                0,
+                self.grid.as_mut().expect("a grid with entries"),
+                index,
                 &ui,
                 renderer,
                 win,
                 true,
             );
+        }
+    }
+
+    /// Ask for the size of the host window an embedded pane fills.
+    ///
+    /// The host resizes the container it created and never the child this
+    /// process draws into, so X sends the `ConfigureNotify` to the container
+    /// alone. The pane therefore reads the parent geometry itself and asks for
+    /// the same size, the way `mpv --wid` does. The swapchain reconfigures and
+    /// the picture refits on the `Resized` that comes back, so this frame still
+    /// draws at the size it already had.
+    fn follow_pane(&mut self, ui: &Ui) {
+        let Some(geometry) = self.pane_geometry.as_mut() else {
+            return;
+        };
+        match geometry.poll() {
+            Ok(Some((width, height))) => {
+                let _ = ui
+                    .window
+                    .request_inner_size(winit::dpi::PhysicalSize::new(width, height));
+            }
+            Ok(None) => {}
+            Err(err) => {
+                // A host window that went away ends the poll instead of
+                // printing on every frame, and the pane keeps its size.
+                eprintln!("vv: {err}");
+                self.pane_geometry = None;
+            }
         }
     }
 
@@ -2145,17 +2238,33 @@ impl ApplicationHandler for App {
             }
             return;
         }
-        let attributes = Window::default_attributes()
-            .with_title(self.launch_title.clone())
-            // WM_CLASS on X11, which replaces `src/wmclass.rs`: the class and
-            // the instance name are both `vv`.
-            .with_name("vv", "vv")
+        // A host window is the parent of the child this process draws into, so
+        // `XCreateWindow` runs with that parent and the child never becomes a
+        // top-level window: no window manager frames it, and the host decides
+        // where it sits.
+        // A child window carries no decoration to name and no `WM_CLASS` to
+        // read, so neither is set.
+        let mut attributes = Window::default_attributes()
             .with_inner_size(winit::dpi::PhysicalSize::new(self.win0.0, self.win0.1))
             .with_resizable(true);
+        attributes = match self.pane {
+            Pane::Window => attributes
+                .with_title(self.launch_title.clone())
+                // WM_CLASS on X11, which replaces `src/wmclass.rs`: the class
+                // and the instance name are both `vv`.
+                .with_name("vv", "vv"),
+            Pane::Embedded(wid) => attributes.with_embed_parent_window(wid.raw()),
+        };
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
             Err(err) => {
-                self.fatal = Some(anyhow::anyhow!("cannot create the window: {err}"));
+                let reason = match self.pane {
+                    Pane::Window => format!("cannot create the window: {err}"),
+                    Pane::Embedded(_) => {
+                        format!("cannot create the embedded child window: {err}")
+                    }
+                };
+                self.fatal = Some(anyhow::anyhow!(reason));
                 event_loop.exit();
                 return;
             }
@@ -2184,6 +2293,20 @@ impl ApplicationHandler for App {
         self.window = Some(Arc::clone(&window));
         self.gpu = Some(gpu);
         self.renderer = Some(renderer);
+        // A host pane follows the container it fills, because the host resizes
+        // that container and never the child.
+        // A display that cannot be reached leaves the pane at the size it
+        // launched with instead of failing the run.
+        self.pane_geometry = match self.pane {
+            Pane::Window => None,
+            Pane::Embedded(wid) => match PaneGeometry::new(wid) {
+                Ok(geometry) => Some(geometry),
+                Err(err) => {
+                    eprintln!("vv: {err}");
+                    None
+                }
+            },
+        };
         if self.debug {
             // The content scale is the one display fact a drag can read, and a
             // feel report needs it next to the travel the release prints.
@@ -2285,6 +2408,9 @@ impl App {
     /// the draw calls fill.
     #[allow(clippy::too_many_lines)]
     fn body(&mut self, ui: &mut Ui, r: &mut Renderer) -> Result<()> {
+        // A host pane follows the size of the window it fills, at the top of the
+        // frame so a resize lands before the fit reads the window.
+        self.follow_pane(ui);
         // VV_TIMING: the frame started now.
         // The code reports it at the end of the frame when it ran long.
         let frame_started = self.timing.then(std::time::Instant::now);
@@ -2335,7 +2461,9 @@ impl App {
 
         // Dynamic window title: follow the open image in image view.
         // Back to the launch title in the grid mode.
-        if self.st.open_id != self.title_open_id {
+        // A host pane owns no title: its `WM_NAME` is not a decoration that a
+        // window manager reads, and the host may clear it.
+        if self.pane.shows_grid() && self.st.open_id != self.title_open_id {
             self.title_open_id = self.st.open_id;
             // A the grid title is the launch title already, so the borrow costs
             // no allocation.
@@ -2414,7 +2542,7 @@ impl App {
         // Image mode: drain the streaming loader first.
         // Texture uploads need the main thread.
         if self.st.mode == Mode::Image {
-            let mut open_failed = false;
+            let mut open_failed: Option<String> = None;
             // Waiting on a the grid decode (no streaming loader for this open).
             // When its texture lands, the code takes it over as the view.
             if self.st.view_tex.is_none() && self.st.loader.is_none() && self.st.open_id.is_some() {
@@ -2453,7 +2581,7 @@ impl App {
                         // The thumb placeholder covers the wait and the
                         // decode-landed takeover swaps it in.
                     }
-                    None => open_failed = true, // entry vanished (decode failed)
+                    None => open_failed = Some("the image is no longer in the grid".to_string()),
                 }
             }
             // One message at a time: the borrow of the loader field ends
@@ -2500,11 +2628,17 @@ impl App {
                     }
                     Err(err) => {
                         eprintln!("vv: {err}");
-                        open_failed = true;
+                        open_failed = Some(err.to_string());
                     }
                 }
             }
-            if open_failed {
+            if let Some(reason) = open_failed {
+                // A host pane has no grid to fall back to, and the picture is
+                // its whole contract, so the process stops with the reason
+                // instead of leaving an empty window behind.
+                if !self.pane.shows_grid() {
+                    bail!("{reason}");
+                }
                 self.st.loader = None; // cancel the worker
                 self.st.close_crop();
                 // Keep the entry: mark it as failed, so its cell stays
@@ -2941,7 +3075,9 @@ impl App {
             if f_open_grid {
                 enter = true;
             }
-            if self.grid.is_some() && enter {
+            // A host pane draws no grid, so `Enter` and `ESC` stay in the image
+            // view and never take the picture off screen.
+            if self.pane.shows_grid() && self.grid.is_some() && enter {
                 return_to_grid = true;
             }
             if return_to_grid {
@@ -3729,23 +3865,76 @@ impl App {
     }
 }
 
-fn main() -> Result<()> {
-    // `--mcp` may come before or after the path, so the path is the first
-    // argument that is not the flag.
+/// The command line of one run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Cli {
+    /// `--mcp`: serve the Model Context Protocol on stdio.
+    mcp: bool,
+    /// `--wid`: the window a host handed over, so the picture draws inside it.
+    wid: Option<Wid>,
+    /// The image file or the directory to show.
+    path: PathBuf,
+}
+
+/// The shape of the command line, printed beside a usage error.
+const USAGE: &str = "usage: vv [--mcp] [--wid <id>] <image-path-or-directory>";
+
+/// Read the command line.
+///
+/// `--mcp` and `--wid` may come before or after the path.
+/// `--wid` takes its value apart (`--wid 74`) or joined (`--wid=74`), because a
+/// wrapper script and a `.desktop` file usually write the joined form.
+/// Every other argument is the path, and a second path is an error: the argv
+/// loop this replaces kept the first one and silently dropped the rest.
+fn parse_args<I: Iterator<Item = String>>(args: I) -> Result<Cli, String> {
     let mut mcp = false;
-    let mut args = env::args().skip(1);
-    let arg = loop {
-        match args.next() {
-            Some(flag) if flag == "--mcp" => mcp = true,
-            Some(path) => break path,
-            None => bail!("usage: vv [--mcp] <image-path-or-directory>"),
+    let mut wid = None;
+    let mut path: Option<PathBuf> = None;
+    let mut args = args;
+    while let Some(arg) = args.next() {
+        if arg == "--mcp" {
+            mcp = true;
+        } else if arg == "--wid" {
+            let Some(value) = args.next() else {
+                return Err("--wid needs a window id".to_string());
+            };
+            wid = Some(parse_wid(&value)?);
+        } else if let Some(value) = arg.strip_prefix("--wid=") {
+            wid = Some(parse_wid(value)?);
+        } else if arg.starts_with("--") {
+            return Err(format!("unknown option {arg}"));
+        } else if path.is_some() {
+            return Err(format!("a second path: {arg}"));
+        } else {
+            path = Some(PathBuf::from(arg));
         }
+    }
+    match path {
+        Some(path) => Ok(Cli { mcp, wid, path }),
+        None => Err("no image path given".to_string()),
+    }
+}
+
+/// Read the `--wid` value, naming the flag when it is not a window id.
+fn parse_wid(value: &str) -> Result<Wid, String> {
+    Wid::parse(value).ok_or_else(|| format!("--wid needs a window id, not {value:?}"))
+}
+
+fn main() -> Result<()> {
+    let cli = match parse_args(env::args().skip(1)) {
+        Ok(cli) => cli,
+        Err(err) => bail!("{err}\n{USAGE}"),
     };
-    if mcp {
+    if cli.mcp {
         start_mcp()?;
     }
-    let path = Path::new(&arg);
-    let launch = Launch::open(path)?;
+    // A host that passes `--wid` shows the picture inside its own window, and
+    // every policy that differs between the two kinds reads this one value.
+    let pane = match cli.wid {
+        Some(wid) => Pane::Embedded(wid),
+        None => Pane::Window,
+    };
+    let launch = Launch::open(&cli.path, pane)?;
     let event_loop = EventLoop::new().context("cannot create the event loop")?;
     let mut app = App::new(launch);
     event_loop
@@ -3761,6 +3950,95 @@ fn main() -> Result<()> {
 #[allow(clippy::float_cmp)] // the asserted values are exact window arithmetic
 mod tests {
     use super::*;
+
+    /// The parsed command line of an argv list.
+    fn parsed(args: &[&str]) -> Result<Cli, String> {
+        parse_args(args.iter().map(|arg| (*arg).to_string()))
+    }
+
+    /// The path of a parsed command line, for a test that cares about it.
+    fn parsed_path(args: &[&str]) -> PathBuf {
+        parsed(args).expect("the argv parses").path
+    }
+
+    #[test]
+    fn the_window_id_reads_before_or_after_the_path() {
+        let before = parsed(&["--wid", "0x4a00007", "pic.jpg"]).expect("parses");
+        assert_eq!(before.wid, Wid::parse("0x4a00007"));
+        assert_eq!(before.path, PathBuf::from("pic.jpg"));
+        assert!(!before.mcp);
+        // The joined form, which a wrapper script writes.
+        let joined = parsed(&["--wid=74", "pic.jpg"]).expect("parses");
+        assert_eq!(joined.wid, Wid::parse("74"));
+        // The path first, the flag after.
+        let after = parsed(&["pic.jpg", "--wid", "74"]).expect("parses");
+        assert_eq!(after.wid, Wid::parse("74"));
+        // No window: a top-level launch keeps no id.
+        assert_eq!(parsed_path(&["pic.jpg"]), PathBuf::from("pic.jpg"));
+        assert_eq!(parsed(&["pic.jpg"]).expect("parses").wid, None);
+    }
+
+    #[test]
+    fn the_mcp_flag_reads_before_or_after_the_path() {
+        for args in [["--mcp", "pics"], ["pics", "--mcp"]] {
+            let cli = parsed(&args).expect("parses");
+            assert!(cli.mcp, "{args:?}");
+            assert_eq!(cli.path, PathBuf::from("pics"));
+        }
+        // Both flags, so an agent path and a display path may run at once.
+        let cli = parsed(&["--mcp", "--wid", "0x4a00007", "pics"]).expect("parses");
+        assert!(cli.mcp);
+        assert_eq!(cli.wid, Wid::parse("0x4a00007"));
+        assert_eq!(cli.path, PathBuf::from("pics"));
+    }
+
+    #[test]
+    fn a_bad_window_id_names_the_flag() {
+        for args in [
+            vec!["--wid"],
+            vec!["--wid", "zz", "pic.jpg"],
+            vec!["--wid", "0", "pic.jpg"],
+            vec!["--wid=", "pic.jpg"],
+        ] {
+            let err = parsed(&args).expect_err("no window id");
+            assert!(err.contains("--wid"), "{args:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_second_path_or_an_unknown_option_is_an_error() {
+        assert!(parsed(&["a.jpg", "b.jpg"]).is_err());
+        assert!(parsed(&[]).is_err());
+        let err = parsed(&["--nope", "pic.jpg"]).expect_err("unknown option");
+        assert!(err.contains("--nope"), "{err}");
+    }
+
+    #[test]
+    fn a_host_pane_falls_back_to_no_grid() {
+        // A standalone window toggles between the grid and the image view, and
+        // its failed open leaves the grid on screen.
+        assert!(Pane::Window.shows_grid());
+        // A child window inside a host draws the image view only.
+        let wid = Wid::parse("0x4a00007").expect("a window id");
+        assert!(!Pane::Embedded(wid).shows_grid());
+    }
+
+    #[test]
+    fn a_host_pane_opens_the_first_entry_of_a_directory() {
+        let wid = Wid::parse("0x4a00007").expect("a window id");
+        // A host pane draws no grid, so a directory opens its first entry.
+        assert_eq!(open_initial(Pane::Embedded(wid), false, 12), Some(0));
+        assert_eq!(open_initial(Pane::Embedded(wid), false, 1), Some(0));
+        // Nothing to open in an empty directory or in a document launch.
+        assert_eq!(open_initial(Pane::Embedded(wid), false, 0), None);
+        assert_eq!(open_initial(Pane::Embedded(wid), true, 1), None);
+        // A standalone window shows the grid, except for a one-image
+        // directory, which it opens at once.
+        assert_eq!(open_initial(Pane::Window, false, 12), None);
+        assert_eq!(open_initial(Pane::Window, false, 1), Some(0));
+        assert_eq!(open_initial(Pane::Window, false, 0), None);
+        assert_eq!(open_initial(Pane::Window, true, 1), None);
+    }
 
     #[test]
     fn a_patch_that_matches_the_view_lands_on_whole_pixels() {

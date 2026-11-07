@@ -58,6 +58,8 @@
 //! [`gpu`] owns the device and the swapchain behind them.
 //! [`input`] holds the held keys, the frame edges and the pointer of one
 //! frame.
+//! [`pane`] names the X11 window a host hands over with `--wid`, so the viewer
+//! draws inside a host window without becoming a top-level one.
 //! The binary in `main.rs` wires these pieces into the window and event loop.
 //! The unit tests and doctests here keep the pure helpers honest.
 
@@ -77,6 +79,7 @@ pub mod mermaid;
 #[cfg(not(feature = "mermaid"))]
 #[path = "mermaid_off.rs"]
 pub mod mermaid;
+pub mod pane;
 pub mod pdf;
 pub mod placeholder;
 pub mod region;
