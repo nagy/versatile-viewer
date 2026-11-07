@@ -452,7 +452,10 @@ impl Renderer {
         let frame = gpu.acquire();
         match frame {
             Ok(frame) => {
-                self.draw(gpu, &frame);
+                let view = frame
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
+                self.render_into(gpu.device(), gpu.queue(), &view);
                 // wgpu 30 hands the present to the queue, so the frame value
                 // travels here instead of presenting itself.
                 gpu.queue().present(frame);
@@ -468,25 +471,29 @@ impl Renderer {
         }
     }
 
-    /// Encode one clear plus one draw per texture run.
-    fn draw(&mut self, gpu: &Gpu, frame: &wgpu::SurfaceTexture) {
-        // An empty batch still clears the window, so an occluded frame and a
-        // blank one look the same.
-        self.upload_instances(gpu);
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+    /// Paint the batch into any texture view and submit it.
+    ///
+    /// This is the one place that encodes the frame: [`Self::flush`] passes the
+    /// swapchain image of the window, and a host with no window passes a texture
+    /// of its own, so a test can read the pixels back without a display.
+    /// An empty batch still clears the target, so a blank frame and an occluded
+    /// one look the same.
+    pub fn render_into(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+    ) {
+        self.upload_instances(device, queue);
         let clear = self.clear.to_unit();
-        let mut encoder = gpu
-            .device()
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("vv encoder"),
-            });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("vv encoder"),
+        });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("vv frame"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -514,21 +521,20 @@ impl Renderer {
                 }
             }
         }
-        gpu.queue().submit(Some(encoder.finish()));
+        queue.submit(Some(encoder.finish()));
     }
 
     /// Write this frame's instances, growing the buffer first when it is
     /// short.
-    fn upload_instances(&mut self, gpu: &Gpu) {
+    fn upload_instances(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
         let count = u32::try_from(self.insts.len()).unwrap_or(u32::MAX);
         if count > self.capacity {
             let capacity = count.next_power_of_two();
-            self.instances = instance_buffer(gpu.device(), capacity);
+            self.instances = instance_buffer(device, capacity);
             self.capacity = capacity;
         }
         if !self.insts.is_empty() {
-            gpu.queue()
-                .write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.insts));
+            queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.insts));
         }
     }
 }

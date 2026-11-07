@@ -275,6 +275,10 @@ The binary name is `vv`.
   `texture::Ready` is the one frame type: `Texture` in production, `Pixels` for a caller with no device, which is what a test builds.
   Never move a pixel copy back to the main thread: that is the funnel this port deleted.
 - `MAX_TEXTURE_SIDE` (8192) stays the decode policy, and `Uploader` clamps every upload to `Gpu::max_texture_side()`, so a smaller adapter takes a smaller texture and the decoded size never depends on the host.
+- `Renderer::render_into` paints the batch into any texture view, and `Renderer::flush` passes the swapchain image of the window.
+  A host with no window passes a texture of its own, which is how `tests/gpu_offscreen.rs` reads the pixels back with no display.
+  Those paints are `#[ignore]`d, because the gate has no display and no adapter: a host with Vulkan runs them by hand (`MESA` store path, `VK_DRIVER_FILES`, `cargo test --test gpu_offscreen -- --ignored`), and they cover the clear, a fill, a source rect, straight alpha, a turn, the texel grid of a 1:1 patch, and the SVG, PDF, Typst, Mermaid and book planes end to end.
+  The gate still compiles them, so the seam never rots.
 - A captured drag grabs the pointer (`CursorGrabMode::Locked`, falling back to `Confined`, which is all X11 allows) and reads the raw device deltas of `DeviceEvent::MouseMotion`.
   The pan multiplies them by its own factor, so the drag speed is a host property and not a constant.
   `WindowEvent::CursorMoved` keeps the pointer position for every free-cursor action, and it is ignored while a drag holds the grab.
