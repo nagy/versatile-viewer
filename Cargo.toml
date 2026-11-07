@@ -44,6 +44,23 @@ image = { version = "0.25.10", default-features = false, features = [
   "tiff",
   "webp",
 ] }
+# The renderer: device, swapchain and one instanced-quad pipeline.
+# Pure Rust (wgpu-core, wgpu-hal, naga), so no C toolchain comes back.
+# `default-features = false` with only `vulkan` + `wgsl`: no DX12, Metal or GL
+# instance exists, so no library is opened for one. Issue 94691ce measured the
+# Vulkan loader alone at 28.9 ms of a 59.1 ms first frame.
+wgpu = { version = "30.0.1", default-features = false, features = [
+  "vulkan",
+  "wgsl",
+] }
+# The window, the event loop, the keyboard and the pointer.
+# X11 only in this build: one display path, tested on the development host.
+winit = { version = "0.30.13", default-features = false, features = [
+  "x11",
+  "rwh_06",
+] }
+# Block on the two async wgpu calls of startup (adapter, device).
+pollster = "1.0.1"
 raylib = "6.0.0"
 # Work pool for parallel background decodes (grid prefetch); jxl-oxide also
 # uses rayon internally for single-image decode (its default feature).
