@@ -73,6 +73,7 @@ pub mod pdf;
 pub mod placeholder;
 pub mod region;
 pub mod region_sel;
+pub mod render;
 pub mod rotate;
 pub mod sign;
 pub mod surface;
@@ -81,6 +82,7 @@ pub mod svg;
 #[cfg(not(feature = "svg"))]
 #[path = "svg_off.rs"]
 pub mod svg;
+pub mod texture;
 #[cfg(feature = "cache")]
 pub mod thumbcache;
 #[cfg(not(feature = "cache"))]

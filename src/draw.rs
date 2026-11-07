@@ -11,6 +11,8 @@
 
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
+use crate::dim::Rect;
+
 /// A point or a size in a two-axis unit, as an `f32` pair.
 ///
 /// The fields are public because the draw code reads a coordinate by name, and
@@ -235,6 +237,13 @@ impl Color {
         [self.r, self.g, self.b, self.a]
     }
 
+    /// The four channels as 0..1 floats, which a vertex tint and a shader
+    /// constant take.
+    #[must_use]
+    pub fn to_f32(self) -> [f32; 4] {
+        self.to_unit().map(|channel| channel as f32)
+    }
+
     /// The four channels as the 0..1 floats a swapchain clear takes.
     ///
     /// The values stay non-linear, because the swapchain format stays
@@ -278,6 +287,91 @@ impl From<Color> for raylib::ffi::Color {
 impl From<raylib::ffi::Vector2> for Vec2 {
     fn from(v: raylib::ffi::Vector2) -> Self {
         Self::new(v.x, v.y)
+    }
+}
+
+/// Four corners of one quad, in perimeter order.
+///
+/// The renderer splits a quad into the two triangles `p0 p1 p2` and
+/// `p0 p2 p3`, so the order goes around the shape and never crosses itself.
+/// A triangle is a quad whose last corner repeats the first: the second
+/// triangle then has no area and draws nothing.
+///
+/// # Examples
+///
+/// ```
+/// # use versatile_viewer::dim::Rect;
+/// # use versatile_viewer::draw::{Quad, Vec2};
+/// let quad = Quad::rect(Rect::new(10.0, 20.0, 30.0, 40.0));
+/// assert_eq!(quad.p[0], Vec2::new(10.0, 20.0));
+/// assert_eq!(quad.p[2], Vec2::new(40.0, 60.0));
+/// // A triangle repeats its first corner, so its second triangle is empty.
+/// let tri = Quad::triangle(Vec2::ZERO, Vec2::new(4.0, 0.0), Vec2::new(0.0, 4.0));
+/// assert_eq!(tri.p[3], tri.p[0]);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Quad {
+    /// The corners, around the perimeter.
+    pub p: [Vec2; 4],
+}
+
+impl Quad {
+    /// A quad from its four corners, around the perimeter.
+    #[must_use]
+    pub const fn new(p: [Vec2; 4]) -> Self {
+        Self { p }
+    }
+
+    /// The quad of an axis-aligned rectangle.
+    #[must_use]
+    pub fn rect(rect: Rect) -> Self {
+        let (x, y) = (rect.x, rect.y);
+        let (right, bottom) = (rect.right(), rect.bottom());
+        Self::new([
+            Vec2::new(x, y),
+            Vec2::new(right, y),
+            Vec2::new(right, bottom),
+            Vec2::new(x, bottom),
+        ])
+    }
+
+    /// The quad of a rectangle turned `degrees` clockwise around `pivot`.
+    ///
+    /// Raylib turned the quad around its destination position and pulled the
+    /// rect back by half its size, which is a turn around the rect center.
+    /// This call names the pivot, so the image turn and the Shift+R turn
+    /// around the pointer are the same helper.
+    #[must_use]
+    pub fn turned(rect: Rect, pivot: Vec2, degrees: f32) -> Self {
+        let axis = Self::rect(rect);
+        if degrees == 0.0 {
+            return axis;
+        }
+        Self::new(
+            axis.p
+                .map(|corner| pivot + (corner - pivot).turned(degrees)),
+        )
+    }
+
+    /// The quad of a triangle, with the last corner repeated.
+    #[must_use]
+    pub const fn triangle(a: Vec2, b: Vec2, c: Vec2) -> Self {
+        Self::new([a, b, c, a])
+    }
+
+    /// The quad of a straight line of `thickness`, from `a` to `b`.
+    ///
+    /// A zero-length line answers an empty quad at `a`, so the draw skips it
+    /// instead of dividing by zero.
+    #[must_use]
+    pub fn line(a: Vec2, b: Vec2, thickness: f32) -> Self {
+        let along = b - a;
+        let length = along.length();
+        if length == 0.0 {
+            return Self::new([a, a, a, a]);
+        }
+        let normal = Vec2::new(-along.y, along.x) * (thickness / 2.0 / length);
+        Self::new([a + normal, b + normal, b - normal, a - normal])
     }
 }
 
