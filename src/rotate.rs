@@ -19,7 +19,7 @@
 //! [`pivot`] moves the pan so that point keeps its window spot.
 //! The pivot stays a draw transform: no pixel moves.
 
-use raylib::prelude::Vector2;
+use crate::draw::Vec2;
 
 /// The largest distance, in degrees, that the stored angle may sit from the
 /// nearest quarter turn before a release stops snapping it.
@@ -138,24 +138,24 @@ pub fn snap_deg(deg: f32) -> f32 {
 /// # Examples
 ///
 /// ```
-/// # use raylib::prelude::Vector2;
+/// # use versatile_viewer::draw::Vec2;
 /// # use versatile_viewer::rotate::pivot;
-/// let c = Vector2::new(50.0, 50.0);
-/// let pan = Vector2::new(10.0, -10.0);
+/// let c = Vec2::new(50.0, 50.0);
+/// let pan = Vec2::new(10.0, -10.0);
 /// // A zero turn keeps the pan, whatever the pivot.
-/// let same = pivot(Vector2::new(60.0, 50.0), c, 42.0, 42.0, pan);
+/// let same = pivot(Vec2::new(60.0, 50.0), c, 42.0, 42.0, pan);
 /// assert!((same.x - pan.x).abs() < 1e-3 && (same.y - pan.y).abs() < 1e-3);
 /// // A pivot left of the middle pulls the pan left as the turn grows.
-/// let next = pivot(Vector2::new(30.0, 50.0), c, 0.0, 90.0, Vector2::ZERO);
+/// let next = pivot(Vec2::new(30.0, 50.0), c, 0.0, 90.0, Vec2::ZERO);
 /// assert!((next.x + 20.0).abs() < 1e-3 && (next.y - 20.0).abs() < 1e-3);
 /// ```
 #[must_use]
-pub fn pivot(pivot: Vector2, center: Vector2, from_deg: f32, to_deg: f32, pan: Vector2) -> Vector2 {
+pub fn pivot(pivot: Vec2, center: Vec2, from_deg: f32, to_deg: f32, pan: Vec2) -> Vec2 {
     let (sin, cos) = (to_deg - from_deg).to_radians().sin_cos();
     // The offset from the drawn center to the pivot, in window pixels.
     let off = pivot - center - pan;
     // A plain turn sweeps that offset around, so the pan pulls it back.
-    let swept = Vector2::new(off.x * cos - off.y * sin, off.x * sin + off.y * cos);
+    let swept = Vec2::new(off.x * cos - off.y * sin, off.x * sin + off.y * cos);
     pan + off - swept
 }
 
@@ -167,16 +167,16 @@ pub fn pivot(pivot: Vector2, center: Vector2, from_deg: f32, to_deg: f32, pan: V
 /// # Examples
 ///
 /// ```
-/// # use raylib::prelude::Vector2;
+/// # use versatile_viewer::draw::Vec2;
 /// # use versatile_viewer::rotate::turn_point;
-/// let p = turn_point(Vector2::new(10.0, 0.0), Vector2::ZERO, 90.0);
+/// let p = turn_point(Vec2::new(10.0, 0.0), Vec2::ZERO, 90.0);
 /// assert!(p.x.abs() < 1e-3 && (p.y - 10.0).abs() < 1e-3);
 /// ```
 #[must_use]
-pub fn turn_point(p: Vector2, origin: Vector2, deg: f32) -> Vector2 {
+pub fn turn_point(p: Vec2, origin: Vec2, deg: f32) -> Vec2 {
     let (sin, cos) = deg.to_radians().sin_cos();
     let (dx, dy) = (p.x - origin.x, p.y - origin.y);
-    Vector2::new(
+    Vec2::new(
         origin.x + dx * cos - dy * sin,
         origin.y + dx * sin + dy * cos,
     )
@@ -194,20 +194,20 @@ pub fn turn_point(p: Vector2, origin: Vector2, deg: f32) -> Vector2 {
 ///
 /// # Examples
 /// ```
-/// # use raylib::prelude::Vector2;
+/// # use versatile_viewer::draw::Vec2;
 /// # use versatile_viewer::rotate::unrotate_point;
-/// let c = Vector2::new(50.0, 50.0);
+/// let c = Vec2::new(50.0, 50.0);
 /// // A quarter turn leaves a point on the vertical axis on the horizontal
 /// // axis.
-/// let p = unrotate_point(Vector2::new(60.0, 50.0), c, 90.0);
+/// let p = unrotate_point(Vec2::new(60.0, 50.0), c, 90.0);
 /// assert!((p.x - 50.0).abs() < 1e-3 && (p.y - 40.0).abs() < 1e-3);
 /// ```
 #[must_use]
-pub fn unrotate_point(p: Vector2, center: Vector2, deg: f32) -> Vector2 {
+pub fn unrotate_point(p: Vec2, center: Vec2, deg: f32) -> Vec2 {
     let (sin, cos) = deg.to_radians().sin_cos();
     let (dx, dy) = (p.x - center.x, p.y - center.y);
     // The inverse of the clockwise turn that the draw applies.
-    Vector2::new(
+    Vec2::new(
         center.x + dx * cos + dy * sin,
         center.y - dx * sin + dy * cos,
     )
@@ -216,12 +216,12 @@ pub fn unrotate_point(p: Vector2, center: Vector2, deg: f32) -> Vector2 {
 #[cfg(test)]
 mod tests {
     use proptest::prop_assert;
-    use raylib::prelude::Vector2;
 
     use super::{
         SNAP_DEGREES, apply_turn, normalize_deg, pivot, snap_deg, turn_deg, turn_point,
         unrotate_point,
     };
+    use crate::draw::Vec2;
 
     #[test]
     fn apply_turn_continues_from_the_current_angle() {
@@ -247,11 +247,11 @@ mod tests {
     #[test]
     fn unrotate_turns_backwards() {
         // A clockwise drawn turn comes back as a counter-clockwise one.
-        let c = Vector2::new(0.0, 0.0);
-        let p = unrotate_point(Vector2::new(10.0, 0.0), c, 90.0);
+        let c = Vec2::new(0.0, 0.0);
+        let p = unrotate_point(Vec2::new(10.0, 0.0), c, 90.0);
         assert!(p.x.abs() < 1e-3 && (p.y + 10.0).abs() < 1e-3);
         // A round trip over four quarter turns comes back to the start.
-        let mut q = Vector2::new(7.0, 3.0);
+        let mut q = Vec2::new(7.0, 3.0);
         for _ in 0..4 {
             q = unrotate_point(q, c, 90.0);
         }
@@ -263,14 +263,14 @@ mod tests {
         // A pixel at the upright offset `u` from the image middle lands at
         // `center + pan + R(deg) u`. The pivot pan must keep the pixel under
         // the pivot at the pivot window point.
-        let c = Vector2::new(100.0, 80.0);
-        let pan = Vector2::new(12.0, -7.0);
-        let p = Vector2::new(140.0, 55.0);
+        let c = Vec2::new(100.0, 80.0);
+        let pan = Vec2::new(12.0, -7.0);
+        let p = Vec2::new(140.0, 55.0);
         for (from, to) in [(0.0, 90.0), (30.0, 210.0), (350.0, 10.0), (0.0, 180.0)] {
             let u = unrotate_point(p, c + pan, from) - (c + pan);
             let next = pivot(p, c, from, to, pan);
-            let before = c + pan + turn_point(u, Vector2::ZERO, from);
-            let after = c + next + turn_point(u, Vector2::ZERO, to);
+            let before = c + pan + turn_point(u, Vec2::ZERO, from);
+            let after = c + next + turn_point(u, Vec2::ZERO, to);
             assert!(
                 (before.x - after.x).abs() < 1e-2 && (before.y - after.y).abs() < 1e-2,
                 "{from}->{to}: {before:?} against {after:?}"
@@ -305,14 +305,14 @@ mod tests {
             panx in -2000.0f32..2000.0,
             pany in -2000.0f32..2000.0,
         ) {
-            let c = Vector2::new(640.0, 480.0);
-            let p = Vector2::new(px, py);
-            let pan = Vector2::new(panx, pany);
+            let c = Vec2::new(640.0, 480.0);
+            let p = Vec2::new(px, py);
+            let pan = Vec2::new(panx, pany);
             let to = from + delta;
             let u = unrotate_point(p, c + pan, from) - (c + pan);
             let next = pivot(p, c, from, to, pan);
-            let before = c + pan + turn_point(u, Vector2::ZERO, from);
-            let after = c + next + turn_point(u, Vector2::ZERO, to);
+            let before = c + pan + turn_point(u, Vec2::ZERO, from);
+            let after = c + next + turn_point(u, Vec2::ZERO, to);
             // The angles reach thousands of degrees and the offsets thousands
             // of pixels, so a f32 radian loses a fraction of a pixel.
             let slack = 0.001 * (1.0 + u.length());

@@ -22,9 +22,9 @@ use std::{
 };
 
 use derive_more::{Display, Error, From};
-#[cfg(feature = "svg")]
-use raylib::color::Color;
 
+#[cfg(feature = "svg")]
+use crate::draw::Color;
 use crate::{
     DecodedImage,
     dim::{ImgH, ImgW},

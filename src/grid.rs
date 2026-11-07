@@ -63,12 +63,13 @@ use std::{
 };
 
 use derive_more::{Display, Error, From};
-use raylib::{color::Color, prelude::*};
+use raylib::prelude::*;
 
 use crate::{
     DIM_TINT, DecodedImage, UploadError,
     blurbg::{self},
     dim::{ImgH, ImgW, LongSide, Rect, WinH, WinW},
+    draw::{Color, Vec2},
     surface::{Surface, SurfaceError, View, open_book_surface, open_surface},
     thumbcache::Cache,
 };
@@ -1392,7 +1393,7 @@ impl Grid {
             self.drag = None;
         }
         if rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT)
-            && let Some(idx) = self.cell_at(mouse, win.0, win.1)
+            && let Some(idx) = self.cell_at(mouse.into(), win.0, win.1)
         {
             self.drag = Some(Drag { anchor: idx });
             if idx == self.selected {
@@ -1402,7 +1403,7 @@ impl Grid {
             self.ensure_visible(win.0, win.1);
         }
         if let Some(drag) = self.drag
-            && let Some(idx) = self.cell_at(mouse, win.0, win.1)
+            && let Some(idx) = self.cell_at(mouse.into(), win.0, win.1)
             && idx != drag.anchor
         {
             // The press already selected the anchor cell, so a travel to a
@@ -1415,7 +1416,9 @@ impl Grid {
             self.ensure_visible(win.0, win.1);
         }
 
-        if open_at_cursor && let Some(idx) = self.cell_at(rl.get_mouse_position(), win.0, win.1) {
+        if open_at_cursor
+            && let Some(idx) = self.cell_at(rl.get_mouse_position().into(), win.0, win.1)
+        {
             self.selected = idx;
             self.ensure_visible(win.0, win.1);
             return Some(GridAction::Open(idx));
@@ -1424,7 +1427,7 @@ impl Grid {
     }
 
     /// The grid cell under the window-space point, if any.
-    fn cell_at(&self, m: Vector2, win_w: WinW, win_h: WinH) -> Option<usize> {
+    fn cell_at(&self, m: Vec2, win_w: WinW, win_h: WinH) -> Option<usize> {
         let l = self.layout(win_w, win_h);
         let (cw, ch) = (l.cell_w, l.cell_h);
         // Grid coordinates: the code draws content at MARGIN + col*(cw+GAP)
@@ -1480,7 +1483,7 @@ impl Grid {
                 // The square cell shows its center crop (draw-time crop, so a
                 // resize never needs a re-decode).
                 let src = Rect::sized(tex.width() as f32, tex.height() as f32).center_square();
-                d.draw_texture_pro(tex, src, thumb, Vector2::ZERO, 0.0, tint);
+                d.draw_texture_pro(tex, src, thumb, Vec2::ZERO, 0.0, tint);
             } else if e.cell.is_failed() {
                 // Decode failed: dim red placeholder with an error mark.
                 // The file stays visible instead of vanishing silently.
@@ -1491,7 +1494,7 @@ impl Grid {
                 // lands.
                 // It holds the whole image, so the draw crops it like a thumb.
                 let src = Rect::sized(tex.width() as f32, tex.height() as f32).center_square();
-                d.draw_texture_pro(tex, src, thumb, Vector2::ZERO, 0.0, tint);
+                d.draw_texture_pro(tex, src, thumb, Vec2::ZERO, 0.0, tint);
             } else {
                 // Still decoding: placeholder square.
                 d.draw_rectangle_rec(thumb, Color::new(28, 28, 28, 255).tint(tint));

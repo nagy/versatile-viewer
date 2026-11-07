@@ -22,13 +22,12 @@
 //! # Examples
 //!
 //! ```
-//! use raylib::prelude::Vector2;
-//! use versatile_viewer::region;
+//! use versatile_viewer::{draw::Vec2, region};
 //!
 //! let frame = |scale| region::Frame {
-//!     img: Vector2::new(1024.0, 512.0),
-//!     win: Vector2::new(800.0, 600.0),
-//!     pan: Vector2::ZERO,
+//!     img: Vec2::new(1024.0, 512.0),
+//!     win: Vec2::new(800.0, 600.0),
+//!     pan: Vec2::ZERO,
 //!     scale,
 //!     angle: 0.0,
 //! };
@@ -44,7 +43,7 @@
 
 use std::time::Duration;
 
-use raylib::prelude::Vector2;
+use crate::draw::Vec2;
 
 /// The fraction of the window each side adds to the painted region.
 ///
@@ -117,7 +116,7 @@ impl Crop {
     ///
     /// The edges count as inside, so a press on the border grabs the rect.
     #[must_use]
-    pub fn contains_point(&self, point: Vector2) -> bool {
+    pub fn contains_point(&self, point: Vec2) -> bool {
         point.x >= self.x
             && point.y >= self.y
             && point.x <= self.right()
@@ -141,12 +140,12 @@ impl Crop {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Frame {
     /// The plane size, in source pixels.
-    pub img: Vector2,
+    pub img: Vec2,
     /// The window size, in window pixels.
-    pub win: Vector2,
+    pub win: Vec2,
     /// The offset of the plane center from the window middle, in window
     /// pixels.
-    pub pan: Vector2,
+    pub pan: Vec2,
     /// Output pixels per source pixel.
     pub scale: f32,
     /// The clockwise turn, in degrees.
@@ -159,11 +158,11 @@ impl Frame {
     /// The image center sits at the window middle plus the pan, the image
     /// scales around that point, and a positive `angle` turns it clockwise.
     #[must_use]
-    pub fn to_screen(&self, point: Vector2) -> Vector2 {
+    pub fn to_screen(&self, point: Vec2) -> Vec2 {
         let (sin, cos) = self.angle.to_radians().sin_cos();
         let dx = (point.x - self.img.x / 2.0) * self.scale;
         let dy = (point.y - self.img.y / 2.0) * self.scale;
-        Vector2::new(
+        Vec2::new(
             self.win.x / 2.0 + self.pan.x + dx * cos - dy * sin,
             self.win.y / 2.0 + self.pan.y + dx * sin + dy * cos,
         )
@@ -175,7 +174,7 @@ impl Frame {
     /// A zero or non-finite `scale` reads as one, so the mapping never divides
     /// by zero.
     #[must_use]
-    pub fn to_image(&self, point: Vector2) -> Vector2 {
+    pub fn to_image(&self, point: Vec2) -> Vec2 {
         let scale = if self.scale.is_finite() && self.scale > 0.0 {
             self.scale
         } else {
@@ -184,7 +183,7 @@ impl Frame {
         let (sin, cos) = self.angle.to_radians().sin_cos();
         let dx = point.x - self.win.x / 2.0 - self.pan.x;
         let dy = point.y - self.win.y / 2.0 - self.pan.y;
-        Vector2::new(
+        Vec2::new(
             self.img.x / 2.0 + (dx * cos + dy * sin) / scale,
             self.img.y / 2.0 + (-dx * sin + dy * cos) / scale,
         )
@@ -218,14 +217,14 @@ impl Frame {
         let (x0, y0) = (-margin * self.win.x, -margin * self.win.y);
         let (x1, y1) = (self.win.x * (1.0 + margin), self.win.y * (1.0 + margin));
         let corners = [
-            Vector2::new(x0, y0),
-            Vector2::new(x1, y0),
-            Vector2::new(x1, y1),
-            Vector2::new(x0, y1),
+            Vec2::new(x0, y0),
+            Vec2::new(x1, y0),
+            Vec2::new(x1, y1),
+            Vec2::new(x0, y1),
         ];
         let (mut min, mut max) = (
-            Vector2::new(f32::INFINITY, f32::INFINITY),
-            Vector2::new(f32::NEG_INFINITY, f32::NEG_INFINITY),
+            Vec2::new(f32::INFINITY, f32::INFINITY),
+            Vec2::new(f32::NEG_INFINITY, f32::NEG_INFINITY),
         );
         for corner in corners {
             let point = self.to_image(corner);
@@ -308,10 +307,10 @@ mod tests {
     use super::*;
 
     /// A frame over a 1024x512 plane inside an 800x600 window.
-    fn frame(pan: Vector2, scale: f32, angle: f32) -> Frame {
+    fn frame(pan: Vec2, scale: f32, angle: f32) -> Frame {
         Frame {
-            img: Vector2::new(1024.0, 512.0),
-            win: Vector2::new(800.0, 600.0),
+            img: Vec2::new(1024.0, 512.0),
+            win: Vec2::new(800.0, 600.0),
             pan,
             scale,
             angle,
@@ -320,7 +319,7 @@ mod tests {
 
     #[test]
     fn a_fit_scale_covers_the_whole_document() {
-        let whole = frame(Vector2::ZERO, 600.0 / 1024.0, 0.0).crop(0.0);
+        let whole = frame(Vec2::ZERO, 600.0 / 1024.0, 0.0).crop(0.0);
         assert!((whole.w - 1024.0).abs() < 1.0);
         assert!((whole.h - 512.0).abs() < 1.0);
         assert!(whole.x.abs() < 1.0 && whole.y.abs() < 1.0);
@@ -328,7 +327,7 @@ mod tests {
 
     #[test]
     fn a_zoomed_crop_covers_about_one_window() {
-        let zoomed = frame(Vector2::ZERO, 4.0, 0.0).crop(0.0);
+        let zoomed = frame(Vec2::ZERO, 4.0, 0.0).crop(0.0);
         // 800/4 by 600/4 source pixels, centered.
         assert!((zoomed.w - 200.0).abs() < 1e-3);
         assert!((zoomed.h - 150.0).abs() < 1e-3);
@@ -338,12 +337,12 @@ mod tests {
 
     #[test]
     fn the_margin_grows_the_rect_and_the_clip_bounds_it() {
-        let plain = frame(Vector2::ZERO, 4.0, 0.0).crop(0.0);
-        let grown = frame(Vector2::ZERO, 4.0, 0.0).crop(MARGIN);
+        let plain = frame(Vec2::ZERO, 4.0, 0.0).crop(0.0);
+        let grown = frame(Vec2::ZERO, 4.0, 0.0).crop(MARGIN);
         assert!(grown.contains(&plain));
         assert!(grown.w > plain.w && grown.h > plain.h);
         // A pan far outside the document still clips to it.
-        let out = frame(Vector2::new(9000.0, 9000.0), 1.0, 0.0).crop(MARGIN);
+        let out = frame(Vec2::new(9000.0, 9000.0), 1.0, 0.0).crop(MARGIN);
         assert!(out.w <= 1024.0 && out.h <= 512.0);
         assert!(out.x >= 0.0 && out.y >= 0.0);
     }
@@ -353,21 +352,21 @@ mod tests {
         // A plane the view cannot draw, and a window with no pixels, both
         // answer an empty rect instead of a division by zero.
         let flat = Frame {
-            img: Vector2::ZERO,
-            ..frame(Vector2::ZERO, 1.0, 0.0)
+            img: Vec2::ZERO,
+            ..frame(Vec2::ZERO, 1.0, 0.0)
         };
         assert!(flat.crop(0.0).is_empty());
         let blind = Frame {
-            win: Vector2::ZERO,
-            ..frame(Vector2::ZERO, 1.0, 0.0)
+            win: Vec2::ZERO,
+            ..frame(Vec2::ZERO, 1.0, 0.0)
         };
         assert!(blind.crop(0.0).is_empty());
     }
 
     #[test]
     fn the_paint_rule_covers_scale_and_coverage() {
-        let needed = Patch::new(frame(Vector2::ZERO, 4.0, 0.0).crop(0.0), 4.0);
-        let painted = Patch::new(frame(Vector2::ZERO, 4.0, 0.0).crop(MARGIN), 4.0);
+        let needed = Patch::new(frame(Vec2::ZERO, 4.0, 0.0).crop(0.0), 4.0);
+        let painted = Patch::new(frame(Vec2::ZERO, 4.0, 0.0).crop(MARGIN), 4.0);
         // A fresh region and a covered one.
         assert!(worth_painting(&needed, None));
         assert!(!worth_painting(&needed, Some(&painted)));
@@ -395,7 +394,7 @@ mod tests {
                 ..painted
             })
         ));
-        let far = Patch::new(frame(Vector2::new(300.0, 0.0), 4.0, 0.0).crop(0.0), 4.0);
+        let far = Patch::new(frame(Vec2::new(300.0, 0.0), 4.0, 0.0).crop(0.0), 4.0);
         assert!(worth_painting(&far, Some(&painted)));
         // An empty need never pays.
         let none = Patch::new(
@@ -412,8 +411,8 @@ mod tests {
 
     #[test]
     fn a_patch_covers_the_region_it_holds() {
-        let needed = Patch::new(frame(Vector2::ZERO, 4.0, 0.0).crop(0.0), 4.0);
-        let painted = Patch::new(frame(Vector2::ZERO, 4.0, 0.0).crop(MARGIN), 4.0);
+        let needed = Patch::new(frame(Vec2::ZERO, 4.0, 0.0).crop(0.0), 4.0);
+        let painted = Patch::new(frame(Vec2::ZERO, 4.0, 0.0).crop(MARGIN), 4.0);
         // The margin holds the window at the same scale.
         assert!(covers(&needed, &painted));
         // A scale past the slack, and a rect that misses the window, fail.
@@ -424,7 +423,7 @@ mod tests {
                 ..painted
             }
         ));
-        let far = Patch::new(frame(Vector2::new(300.0, 0.0), 4.0, 0.0).crop(MARGIN), 4.0);
+        let far = Patch::new(frame(Vec2::new(300.0, 0.0), 4.0, 0.0).crop(MARGIN), 4.0);
         assert!(!covers(&needed, &far));
         // The test and the paint rule never both fire.
         assert!(!(covers(&needed, &painted) && worth_painting(&needed, Some(&painted))));
@@ -447,10 +446,10 @@ mod property_tests {
     }
 
     /// A frame over a 1024x512 plane inside an 800x600 window.
-    fn frame(pan: Vector2, scale: f32, angle: f32) -> Frame {
+    fn frame(pan: Vec2, scale: f32, angle: f32) -> Frame {
         Frame {
-            img: Vector2::new(1024.0, 512.0),
-            win: Vector2::new(800.0, 600.0),
+            img: Vec2::new(1024.0, 512.0),
+            win: Vec2::new(800.0, 600.0),
             pan,
             scale,
             angle,
@@ -466,8 +465,8 @@ mod property_tests {
             x in 0.0f32..1024.0,
             y in 0.0f32..512.0,
         ) {
-            let frame = frame(Vector2::new(px, py), scale, angle);
-            let point = Vector2::new(x, y);
+            let frame = frame(Vec2::new(px, py), scale, angle);
+            let point = Vec2::new(x, y);
             let back = frame.to_image(frame.to_screen(point));
             prop_assert!((back.x - point.x).abs() < 1e-2);
             prop_assert!((back.y - point.y).abs() < 1e-2);
@@ -477,7 +476,7 @@ mod property_tests {
         /// patch always covers the screen.
         #[test]
         fn the_crop_covers_the_window((scale, angle, px, py) in view()) {
-            let frame = frame(Vector2::new(px, py), scale, angle);
+            let frame = frame(Vec2::new(px, py), scale, angle);
             let painted = frame.crop(MARGIN);
             let needed = frame.crop(0.0);
             prop_assert!(painted.contains(&needed));
@@ -490,7 +489,7 @@ mod property_tests {
         /// costs no more pixels than a shallow one.
         #[test]
         fn the_paint_area_stays_bounded((scale, angle, px, py) in view()) {
-            let frame = frame(Vector2::new(px, py), scale, angle);
+            let frame = frame(Vec2::new(px, py), scale, angle);
             let painted = frame.crop(MARGIN);
             // A turned rect grows its bounding box by at most its own
             // diagonal, so that diagonal bounds both axes.

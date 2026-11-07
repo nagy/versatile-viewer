@@ -60,9 +60,11 @@ use merman::{
         export::{NativeFontContext, NativeFontLimits, NativeFontOptions},
     },
 };
-use raylib::color::Color;
 
-use crate::surface::{Surface, SurfaceError, VectorSurface};
+use crate::{
+    draw::Color,
+    surface::{Surface, SurfaceError, VectorSurface},
+};
 
 /// The color a diagram paints on.
 ///

@@ -46,7 +46,6 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use raylib::{
-    color::Color,
     consts::{KeyboardKey, MouseCursor, TextureFilter},
     prelude::*,
     texture::RaylibTexture2D,
@@ -58,6 +57,7 @@ use versatile_viewer::{
     blurbg::{self, BlurBg},
     book::BookSurface,
     dim::{ImgH, ImgW, PreviewPx, RampTime, Rect, WinH, WinW},
+    draw::{Color, Vec2},
     grid::{DecodeFailure, EntrySource, Grid, GridAction, LoadPlan},
     keyrepeat,
     loader::{DecodeMsg, Loader},
@@ -149,7 +149,7 @@ const PREFETCH_GIVE_UP: Duration = Duration::from_secs(3);
 /// Outside that interval a window edge exposes background.
 /// A cursor near the image edge therefore pans only as far as coverage
 /// allows.
-fn aim_fill_pan(st: &ViewState, mouse: Vector2, win_w: f32, win_h: f32) -> Vector2 {
+fn aim_fill_pan(st: &ViewState, mouse: Vec2, win_w: f32, win_h: f32) -> Vec2 {
     let target = (win_w / st.img.w).max(win_h / st.img.h);
     let cur = st.view_scale.unwrap_or(target);
     // Mouse position in image coordinates at the current scale.
@@ -158,7 +158,7 @@ fn aim_fill_pan(st: &ViewState, mouse: Vector2, win_w: f32, win_h: f32) -> Vecto
     let img_y = (mouse.y - (win_h - st.img.h * cur) / 2.0 - st.pan.y) / cur;
     let off_x = (win_w - st.img.w * target) / 2.0;
     let off_y = (win_h - st.img.h * target) / 2.0;
-    Vector2 {
+    Vec2 {
         x: (win_w / 2.0 - off_x - img_x * target).clamp(-off_x.abs(), off_x.abs()),
         y: (win_h / 2.0 - off_y - img_y * target).clamp(-off_y.abs(), off_y.abs()),
     }
@@ -229,8 +229,8 @@ struct ViewState {
     img: Size,
     zoom: ZoomMode,
     /// The on-screen pan offset, eased toward `target_pan` each frame.
-    pan: Vector2,
-    target_pan: Vector2,
+    pan: Vec2,
+    target_pan: Vec2,
     /// The on-screen scale, eased toward the target scale each frame.
     view_scale: Option<f32>,
     /// The held-key ramps that drive continuous motion.
@@ -241,7 +241,7 @@ struct ViewState {
     /// (+/- or wheel).
     /// None falls back to the window center, for example when an ease still
     /// runs from an earlier step.
-    zoom_anchor: Option<Vector2>,
+    zoom_anchor: Option<Vec2>,
     /// The image rotation, in degrees clockwise.
     /// A held `r` drags it, and the code keeps it across a reload of the same
     /// image.
@@ -253,7 +253,7 @@ struct ViewState {
     /// None turns around the image center, which is what plain `r` does.
     /// The hold moves the pan through `rotate::pivot`, so the point stays on
     /// its window spot at every angle.
-    pivot: Option<Vector2>,
+    pivot: Option<Vec2>,
     /// The region the user selected with `v`, in source units (the units of
     /// [`region`]).
     /// A pan, a zoom and a turn keep it on the picture, because the draw maps
@@ -298,7 +298,7 @@ struct ViewState {
     /// pan ease, so the glide reads as a scroll of one spread.
     /// The field clears itself when the pan lands or the target moves away
     /// from it, so any other motion uses the ordinary ease again.
-    spread_glide: Option<Vector2>,
+    spread_glide: Option<Vec2>,
     /// The prefetch of a spread step: the patch a worker paints, or the patch
     /// that landed and draws in place until the glide does.
     ///
@@ -358,7 +358,7 @@ enum OpenAlign {
     /// align turns [`OpenAlign::Free`].
     Holding {
         /// The pan the align wrote.
-        pan: Vector2,
+        pan: Vec2,
     },
 }
 
@@ -439,8 +439,8 @@ impl ViewState {
         // and the cover page shows whole.
         self.zoom = ZoomMode::FitAll;
         self.align_open_box_again();
-        self.pan = Vector2::ZERO;
-        self.target_pan = Vector2::ZERO;
+        self.pan = Vec2::ZERO;
+        self.target_pan = Vec2::ZERO;
         self.zoom_anchor = None;
         self.spread_glide = None;
         self.view_scale = None;
@@ -458,9 +458,9 @@ impl ViewState {
     ///
     /// One frame answers a screen point for the draw, the `f` hit test and the
     /// `v` region drag, so no caller re-derives the transform on its own.
-    fn frame(&self, win: Vector2) -> Option<region::Frame> {
+    fn frame(&self, win: Vec2) -> Option<region::Frame> {
         Some(region::Frame {
-            img: Vector2::new(self.img.w, self.img.h),
+            img: Vec2::new(self.img.w, self.img.h),
             win,
             pan: self.pan,
             scale: self.view_scale?,
@@ -474,9 +474,9 @@ impl ViewState {
     /// [`Self::frame`] answers the same mapping for the pan and the scale on
     /// screen; a caller that aims elsewhere (the target pan of a glide) asks
     /// here, so it never assembles the five numbers itself.
-    fn frame_at(&self, win: Vector2, pan: Vector2, scale: f32) -> region::Frame {
+    fn frame_at(&self, win: Vec2, pan: Vec2, scale: f32) -> region::Frame {
         region::Frame {
-            img: Vector2::new(self.img.w, self.img.h),
+            img: Vec2::new(self.img.w, self.img.h),
             win,
             pan,
             scale,
@@ -490,8 +490,8 @@ impl ViewState {
     /// the top shows it first.
     fn refit_open(&mut self) {
         self.zoom = ZoomMode::FitAll;
-        self.pan = Vector2::ZERO;
-        self.target_pan = Vector2::ZERO;
+        self.pan = Vec2::ZERO;
+        self.target_pan = Vec2::ZERO;
         self.align_open_box_again();
         self.spread_glide = None;
         // The frame computes the scale from the fit mode.
@@ -533,7 +533,7 @@ impl ViewState {
             self.open_align = OpenAlign::Free;
             return;
         }
-        let top = Vector2::new(0.0, Column::new(self.img, scale, win_h).top_pan());
+        let top = Vec2::new(0.0, Column::new(self.img, scale, win_h).top_pan());
         self.pan = top;
         self.target_pan = top;
         self.open_align = OpenAlign::Holding { pan: top };
@@ -576,7 +576,7 @@ impl ViewState {
         let Some(target) = source.spread_box(next as usize) else {
             return false;
         };
-        self.target_pan = Vector2::new(0.0, column.pan_of(target.y));
+        self.target_pan = Vec2::new(0.0, column.pan_of(target.y));
         self.spread_glide = Some(self.target_pan);
         true
     }
@@ -590,7 +590,7 @@ impl ViewState {
     /// it, and the result lands in [`ViewState::prefetch`] instead of replacing
     /// the patch on screen.
     /// A step that misses a spread calls nothing, because it moves nothing.
-    fn prefetch_spread(&mut self, win: Vector2) {
+    fn prefetch_spread(&mut self, win: Vec2) {
         if self.source.is_none() || self.img.w <= 0.0 || self.view_loading {
             return;
         }
@@ -703,7 +703,7 @@ impl ViewState {
     /// A spread step paints its landing region before the glide ends, so a
     /// patch that already covers the window replaces the one on screen here and
     /// skips the debounce and the paint.
-    fn tick_crop(&mut self, now: Instant, win: Vector2) {
+    fn tick_crop(&mut self, now: Instant, win: Vec2) {
         if self.source.is_none() || self.crop_pending || self.img.w <= 0.0 || self.view_loading {
             return;
         }
@@ -923,7 +923,7 @@ impl Ramps {
         // A frame with no zoom key held answers `None`, so no caller reads a
         // sentinel factor of 1.0 and has to ask a second flag what it means.
         Motion {
-            pan: Vector2 {
+            pan: Vec2 {
                 x: pan_speed * (l - r),
                 y: pan_speed * (u - d),
             },
@@ -936,7 +936,7 @@ impl Ramps {
 #[derive(Debug, Clone, Copy)]
 struct Motion {
     /// The pan delta for this frame, in window pixels.
-    pan: Vector2,
+    pan: Vec2,
     /// The free-zoom factor for this frame, or `None` when no zoom key ramps.
     zoom: Option<f32>,
 }
@@ -1061,7 +1061,7 @@ fn draw_turned(
     texture: &Texture2D,
     img: Size,
     scale: f32,
-    center: Vector2,
+    center: Vec2,
     angle: f32,
 ) {
     let src = Rect::sized(texture.width() as f32, texture.height() as f32);
@@ -1151,7 +1151,7 @@ impl Column {
 /// across it, and only the position snaps.
 /// A turned patch has no pixel grid to land on, so the caller keeps the free
 /// draw.
-fn patch_dest(center: Vector2, dw: f32, dh: f32, tw: f32, th: f32, angle: f32) -> Option<Rect> {
+fn patch_dest(center: Vec2, dw: f32, dh: f32, tw: f32, th: f32, angle: f32) -> Option<Rect> {
     if angle != 0.0 || !(dw > 0.0 && dh > 0.0) {
         return None;
     }
@@ -1186,7 +1186,7 @@ fn patch_dest(center: Vector2, dw: f32, dh: f32, tw: f32, th: f32, angle: f32) -
 fn draw_patch(d: &mut impl RaylibDraw, patch: &CropState, frame: &region::Frame) {
     let rect = patch.patch.rect;
     let (scale, angle) = (frame.scale, frame.angle);
-    let middle = Vector2::new(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+    let middle = Vec2::new(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
     let center = frame.to_screen(middle);
     let tw = patch.texture.width() as f32;
     let th = patch.texture.height() as f32;
@@ -1195,7 +1195,7 @@ fn draw_patch(d: &mut impl RaylibDraw, patch: &CropState, frame: &region::Frame)
             &patch.texture,
             Rect::sized(tw, th),
             dest,
-            Vector2::ZERO,
+            Vec2::ZERO,
             0.0,
             Color::WHITE,
         ),
@@ -1229,7 +1229,7 @@ fn selection_rect(
     frame: Option<region::Frame>,
     kept: Option<region::Crop>,
     drag: Option<region_sel::Drag>,
-    mouse: Vector2,
+    mouse: Vec2,
 ) -> Option<region::Crop> {
     let frame = frame.filter(region::Frame::drawable)?;
     let Some(drag) = drag else {
@@ -1306,7 +1306,7 @@ fn patch_covers(st: &ViewState, win_w: f32, win_h: f32) -> bool {
     if st.img.w <= 0.0 || !(scale.is_finite() && scale > 0.0) {
         return false;
     }
-    let Some(frame) = st.frame(Vector2::new(win_w, win_h)) else {
+    let Some(frame) = st.frame(Vec2::new(win_w, win_h)) else {
         return false;
     };
     frame.crop(0.0).contains(&crop.patch.rect)
@@ -1322,7 +1322,7 @@ fn keep_pivot(st: &mut ViewState, from: f32, win_w: f32, win_h: f32) {
     let Some(pivot) = st.pivot else {
         return;
     };
-    let center = Vector2::new(win_w / 2.0, win_h / 2.0);
+    let center = Vec2::new(win_w / 2.0, win_h / 2.0);
     let pan = rotate::pivot(pivot, center, from, st.angle, st.pan);
     let shift = pan - st.pan;
     st.pan = pan;
@@ -1712,8 +1712,8 @@ fn main() -> Result<()> {
         view_loading: false,
         img: Size { w: 0.0, h: 0.0 },
         zoom: ZoomMode::FitDown,
-        pan: Vector2::ZERO,
-        target_pan: Vector2::ZERO,
+        pan: Vec2::ZERO,
+        target_pan: Vec2::ZERO,
         view_scale: None,
         zoom_anchor: None,
         angle: 0.0,
@@ -1820,16 +1820,16 @@ fn main() -> Result<()> {
     // Window position where the current (or last) drag grabbed the pointer.
     // The raylib EnableCursor does not reliably restore it, so the code warps
     // back explicitly on release.
-    let mut grab_pos = Vector2::ZERO;
+    let mut grab_pos = Vec2::ZERO;
     // Virtual cursor position while captured (grab_pos + accumulated raw
     // deltas).
     // The raylib virtual position is unreliable to interpret.
-    let mut drag_virtual = Vector2::ZERO;
+    let mut drag_virtual = Vec2::ZERO;
     // Post-drag pointer restore, re-checked for a few frames: X11 warps are
     // async, and the GLFW EnableCursor re-warp can land after ours and
     // recenter the cursor.
     // The code warps again until the position sticks.
-    let mut pending_restore: Option<Vector2> = None;
+    let mut pending_restore: Option<Vec2> = None;
     let mut restore_tries = 0u32;
     // `f` held captures the pointer like a left-drag (hold = pan, cursor
     // hidden).
@@ -1854,7 +1854,7 @@ fn main() -> Result<()> {
     // is what slides toward the center on screen.
     // A switch from the pan hold anchors at the window center instead (see
     // the switch below).
-    let mut f_zoom_anchor: Option<Vector2> = None;
+    let mut f_zoom_anchor: Option<Vec2> = None;
     // `r` held captures the pointer like the `f` hold, and the vertical mouse
     // travel turns the image: down turns it clockwise and up turns it
     // counter-clockwise.
@@ -2295,9 +2295,9 @@ fn main() -> Result<()> {
             // `!pointer_captured && !f_capture` guard.
             // The same guard covers the `r` rotation hold, which grabs the
             // pointer the same way.
-            let mut f_click: Option<Vector2> = None;
+            let mut f_click: Option<Vec2> = None;
             if (f_key || r_key) && !pointer_captured && !f_capture && !r_capture {
-                grab_pos = rl.get_mouse_position();
+                grab_pos = rl.get_mouse_position().into();
                 drag_virtual = grab_pos;
                 rl.disable_cursor();
                 pointer_captured = true;
@@ -2332,7 +2332,7 @@ fn main() -> Result<()> {
             if f_capture && shift != f_zoom_capture {
                 f_zoom_capture = shift;
                 // Forget the distance the tap test and the pan measured.
-                grab_pos = rl.get_mouse_position();
+                grab_pos = rl.get_mouse_position().into();
                 drag_virtual = grab_pos;
                 // A zoom from here on anchors on the view center: the image
                 // point the window shows at its middle.
@@ -2341,7 +2341,7 @@ fn main() -> Result<()> {
                 // spot away from the middle.
                 // The anchor is the middle of the window, so the ease needs no
                 // drift toward it.
-                f_zoom_anchor = f_zoom_capture.then_some(Vector2 {
+                f_zoom_anchor = f_zoom_capture.then_some(Vec2 {
                     x: win_w / 2.0,
                     y: win_h / 2.0,
                 });
@@ -2523,7 +2523,7 @@ fn main() -> Result<()> {
                 && st.img.w > 0.0
                 && let Some(scale) = st.view_scale
             {
-                let center = Vector2::new(win_w / 2.0 + st.pan.x, win_h / 2.0 + st.pan.y);
+                let center = Vec2::new(win_w / 2.0 + st.pan.x, win_h / 2.0 + st.pan.y);
                 // A turned image must hit-test its own outline, so the point
                 // goes back into the unrotated image space first.
                 let m = rotate::unrotate_point(m, center, st.angle);
@@ -2541,7 +2541,7 @@ fn main() -> Result<()> {
                     f_open_grid = grid.is_some();
                 } else if filled {
                     st.zoom = ZoomMode::FitAll;
-                    st.target_pan = Vector2::ZERO;
+                    st.target_pan = Vec2::ZERO;
                 } else {
                     f_zoom = true;
                 }
@@ -2623,14 +2623,14 @@ fn main() -> Result<()> {
                 } else {
                     ZoomMode::FitDown
                 };
-                st.target_pan = Vector2::ZERO;
+                st.target_pan = Vec2::ZERO;
             } else if rl.is_key_pressed(KeyboardKey::KEY_E) {
                 st.zoom = if shift {
                     ZoomMode::FitHeight
                 } else {
                     ZoomMode::FitWidth
                 };
-                st.target_pan = Vector2::ZERO;
+                st.target_pan = Vec2::ZERO;
             } else if rl.is_key_pressed(KeyboardKey::KEY_T) || f_zoom {
                 // t: two-state toggle, whole image visible (fit-all) against
                 // window completely covered (fill).
@@ -2650,9 +2650,9 @@ fn main() -> Result<()> {
                 // background.
                 // Zoom-out recentres.
                 if st.zoom == ZoomMode::Fill && st.img.w > 0.0 && st.view_scale.is_some() {
-                    st.target_pan = aim_fill_pan(&st, rl.get_mouse_position(), win_w, win_h);
+                    st.target_pan = aim_fill_pan(&st, rl.get_mouse_position().into(), win_w, win_h);
                 } else {
-                    st.target_pan = Vector2::ZERO;
+                    st.target_pan = Vec2::ZERO;
                 }
             }
 
@@ -2833,7 +2833,7 @@ fn main() -> Result<()> {
                 if wheel != 0.0 {
                     let factor = 1.25f32.powf(wheel);
                     st.zoom = ZoomMode::Free((target_scale * factor).clamp(0.01, 100.0));
-                    st.zoom_anchor = Some(rl.get_mouse_position());
+                    st.zoom_anchor = Some(rl.get_mouse_position().into());
                 }
                 // Left-drag pans: the image follows the cursor (grab-style).
                 // No easing while the cursor drives the pan.
@@ -2854,7 +2854,7 @@ fn main() -> Result<()> {
                 let drag_pressed = rl.is_mouse_button_pressed(MouseButton::MOUSE_BUTTON_LEFT);
                 let drag_released = rl.is_mouse_button_released(MouseButton::MOUSE_BUTTON_LEFT);
                 if drag_pressed && !pointer_captured && !r_capture {
-                    grab_pos = rl.get_mouse_position();
+                    grab_pos = rl.get_mouse_position().into();
                     drag_virtual = grab_pos;
                     rl.disable_cursor();
                     pointer_captured = true;
@@ -2927,7 +2927,7 @@ fn main() -> Result<()> {
                     && (scale - s_old).abs() > f32::EPSILON
                     && s_old > 0.0
                 {
-                    let center = Vector2 {
+                    let center = Vec2 {
                         x: win_w / 2.0,
                         y: win_h / 2.0,
                     };
@@ -2945,7 +2945,7 @@ fn main() -> Result<()> {
                     // center: the drift can only move it away from there.
                     let centered = a == center;
                     let d = if zoom_step.is_some() || centered {
-                        Vector2::ZERO
+                        Vec2::ZERO
                     } else {
                         // The drift shares the exponential time constant of
                         // the ease: by the time the scale covers its remaining
@@ -2975,7 +2975,7 @@ fn main() -> Result<()> {
                     // leaves the cursor wherever it is).
                     // A continuous zoom keeps the pointer captured instead,
                     // so this never runs for it.
-                    if d != Vector2::ZERO && !keyboard_zoom && !pointer_captured {
+                    if d != Vec2::ZERO && !keyboard_zoom && !pointer_captured {
                         if debug {
                             eprintln!("vv: zoom drift anchor to ({ax:.0},{ay:.0})");
                         }
@@ -3008,7 +3008,7 @@ fn main() -> Result<()> {
                 {
                     // The landing spread is known now, so its patch paints on a
                     // worker while the glide runs.
-                    st.prefetch_spread(Vector2::new(win_w, win_h));
+                    st.prefetch_spread(Vec2::new(win_w, win_h));
                 }
                 // On a resize frame, snap pan too, so it does not glide after
                 // the new fit offset (matches the scale snap above).
@@ -3055,14 +3055,14 @@ fn main() -> Result<()> {
                 // The cursor stays free, and the rect lives in source units, so
                 // a pan, a zoom and a turn keep the region on the picture while
                 // the drag runs.
-                let img = Vector2::new(st.img.w, st.img.h);
-                let frame = st.frame(Vector2::new(win_w, win_h));
+                let img = Vec2::new(st.img.w, st.img.h);
+                let frame = st.frame(Vec2::new(win_w, win_h));
                 if v_key
                     && region_drag.is_none()
                     && !pointer_captured
                     && let Some(frame) = frame
                 {
-                    let mouse = rl.get_mouse_position();
+                    let mouse = rl.get_mouse_position().into();
                     let drag = region_sel::press(
                         frame.to_image(mouse),
                         mouse,
@@ -3087,10 +3087,10 @@ fn main() -> Result<()> {
                     // committed region is the one on screen, and a tap commits
                     // nothing: it drops a span and keeps a moved rect.
                     st.selection = selection_rect(
-                        st.frame(Vector2::new(win_w, win_h)),
+                        st.frame(Vec2::new(win_w, win_h)),
                         None,
                         Some(drag),
-                        rl.get_mouse_position(),
+                        rl.get_mouse_position().into(),
                     );
                     region_drag = None;
                     if debug {
@@ -3109,7 +3109,7 @@ fn main() -> Result<()> {
         // and the pan of this frame.
         if st.mode == Mode::Image {
             st.drain_crops(&mut rl, &thread)?;
-            st.tick_crop(Instant::now(), Vector2::new(win_w, win_h));
+            st.tick_crop(Instant::now(), Vec2::new(win_w, win_h));
         }
 
         // VV_BLUR_BG in grid mode: the background follows the selected
@@ -3129,10 +3129,10 @@ fn main() -> Result<()> {
         // the veil and the border follow the cursor every frame.
         let selection = if st.mode == Mode::Image {
             selection_rect(
-                st.frame(Vector2::new(win_w, win_h)),
+                st.frame(Vec2::new(win_w, win_h)),
                 st.selection,
                 region_drag,
-                rl.get_mouse_position(),
+                rl.get_mouse_position().into(),
             )
         } else {
             None
@@ -3169,7 +3169,7 @@ fn main() -> Result<()> {
                 if let Some(texture) = &st.view_tex {
                     // The image turns around its own center on screen, which
                     // is the pan offset on top of the window middle.
-                    let center = Vector2::new(win_w / 2.0 + st.pan.x, win_h / 2.0 + st.pan.y);
+                    let center = Vec2::new(win_w / 2.0 + st.pan.x, win_h / 2.0 + st.pan.y);
                     draw_turned(
                         &mut d,
                         texture,
@@ -3198,7 +3198,7 @@ fn main() -> Result<()> {
                     let scale = st
                         .view_scale
                         .unwrap_or((win_w / st.img.w).min(win_h / st.img.h));
-                    let center = Vector2::new(win_w / 2.0 + st.pan.x, win_h / 2.0 + st.pan.y);
+                    let center = Vec2::new(win_w / 2.0 + st.pan.x, win_h / 2.0 + st.pan.y);
                     draw_turned(&mut d, tex, st.img, scale, center, st.angle);
                 }
             }
@@ -3209,7 +3209,7 @@ fn main() -> Result<()> {
             // image loses its blur where the patch already reached.
             // A patch that still matches the view scale lands on whole
             // window pixels (see `draw_patch`), so its text stays sharp.
-            if let Some(frame) = st.frame(Vector2::new(win_w, win_h)) {
+            if let Some(frame) = st.frame(Vec2::new(win_w, win_h)) {
                 for patch in st.crop.iter().chain(st.prefetch.held()) {
                     draw_patch(&mut d, patch, &frame);
                 }
@@ -3219,7 +3219,7 @@ fn main() -> Result<()> {
             // The bands draw over the whole image and the patches, so the dim
             // holds whatever the view paints below it.
             if let Some(selection) = selection
-                && let Some(frame) = st.frame(Vector2::new(win_w, win_h))
+                && let Some(frame) = st.frame(Vec2::new(win_w, win_h))
             {
                 draw_selection(&mut d, frame, selection);
             }
@@ -3232,15 +3232,15 @@ fn main() -> Result<()> {
             if debug && pointer_captured {
                 let vx = drag_virtual.x.clamp(0.0, win_w);
                 let vy = drag_virtual.y.clamp(0.0, win_h);
-                d.draw_circle_v(Vector2::new(grab_pos.x, grab_pos.y), 6.0, Color::SKYBLUE);
+                d.draw_circle_v(Vec2::new(grab_pos.x, grab_pos.y), 6.0, Color::SKYBLUE);
                 d.draw_line_v(
-                    Vector2::new(vx - 12.0, vy),
-                    Vector2::new(vx + 12.0, vy),
+                    Vec2::new(vx - 12.0, vy),
+                    Vec2::new(vx + 12.0, vy),
                     Color::YELLOW,
                 );
                 d.draw_line_v(
-                    Vector2::new(vx, vy - 12.0),
-                    Vector2::new(vx, vy + 12.0),
+                    Vec2::new(vx, vy - 12.0),
+                    Vec2::new(vx, vy + 12.0),
                     Color::YELLOW,
                 );
             }
@@ -3264,7 +3264,7 @@ mod tests {
     fn a_patch_that_matches_the_view_lands_on_whole_pixels() {
         // A patch of 1532x1180 px whose screen center falls between pixels.
         let (cx, cy) = (512.32f32, 384.68f32);
-        let dest = patch_dest(Vector2::new(cx, cy), 1532.0, 1180.0, 1532.0, 1180.0, 0.0).unwrap();
+        let dest = patch_dest(Vec2::new(cx, cy), 1532.0, 1180.0, 1532.0, 1180.0, 0.0).unwrap();
         // The corner snaps to the nearest whole pixel, and the patch keeps the
         // pixel size it was painted at.
         assert_eq!(
@@ -3283,7 +3283,7 @@ mod tests {
     fn a_patch_rounds_into_the_painted_pixel_size() {
         // The paint rounds its buffer, so a screen size within a pixel takes
         // the painted size instead of resampling the whole patch.
-        let center = Vector2::new(400.0, 300.0);
+        let center = Vec2::new(400.0, 300.0);
         let dest = patch_dest(center, 800.6, 600.4, 801.0, 600.0, 0.0).unwrap();
         assert_eq!((dest.width, dest.height), (801.0, 600.0));
         assert_eq!((dest.x, dest.y), (0.0, 0.0));
@@ -3294,7 +3294,7 @@ mod tests {
         // A zoom past the slack leaves the patch stretched, so its pixel size
         // is not the screen size: the size follows the view, and the position
         // still snaps so sampling stays stable.
-        let center = Vector2::new(400.4, 300.6);
+        let center = Vec2::new(400.4, 300.6);
         assert_eq!(
             patch_dest(center, 1200.0, 900.0, 800.0, 600.0, 0.0),
             Some(Rect::new(-200.0, -149.0, 1200.0, 900.0))
@@ -3360,9 +3360,9 @@ mod tests {
         // The window holds the plane one to one, so the pointer and the source
         // units agree here and the test reads the region alone.
         let frame = region::Frame {
-            img: Vector2::new(1000.0, 500.0),
-            win: Vector2::new(1000.0, 500.0),
-            pan: Vector2::ZERO,
+            img: Vec2::new(1000.0, 500.0),
+            win: Vec2::new(1000.0, 500.0),
+            pan: Vec2::ZERO,
             scale: 1.0,
             angle: 0.0,
         };
@@ -3372,22 +3372,17 @@ mod tests {
             w: 100.0,
             h: 100.0,
         };
-        let drag = region_sel::Drag::new(Vector2::new(200.0, 100.0), Vector2::ZERO, false);
-        let still = region_sel::Drag::new(Vector2::ZERO, Vector2::ZERO, false);
+        let drag = region_sel::Drag::new(Vec2::new(200.0, 100.0), Vec2::ZERO, false);
+        let still = region_sel::Drag::new(Vec2::ZERO, Vec2::ZERO, false);
         // A press that has not left the tap slack spans no rect, so the old
         // region keeps its place on screen.
         assert_eq!(
-            selection_rect(Some(frame), Some(kept), Some(still), Vector2::ZERO),
+            selection_rect(Some(frame), Some(kept), Some(still), Vec2::ZERO),
             Some(kept)
         );
         // Any travel replaces it with the fresh rect.
         assert_eq!(
-            selection_rect(
-                Some(frame),
-                Some(kept),
-                Some(drag),
-                Vector2::new(500.0, 400.0)
-            ),
+            selection_rect(Some(frame), Some(kept), Some(drag), Vec2::new(500.0, 400.0)),
             Some(region::Crop {
                 x: 200.0,
                 y: 100.0,
@@ -3396,7 +3391,7 @@ mod tests {
             })
         );
         // A plane with no size and no drag marks nothing.
-        assert_eq!(selection_rect(None, Some(kept), None, Vector2::ZERO), None);
+        assert_eq!(selection_rect(None, Some(kept), None, Vec2::ZERO), None);
     }
 
     #[test]
@@ -3405,18 +3400,18 @@ mod tests {
         // middle sits on the plane middle, one window pixel spans two source
         // pixels, and the pan moves the picture the other way.
         let frame = region::Frame {
-            img: Vector2::new(1000.0, 500.0),
-            win: Vector2::new(800.0, 600.0),
-            pan: Vector2::new(100.0, 0.0),
+            img: Vec2::new(1000.0, 500.0),
+            win: Vec2::new(800.0, 600.0),
+            pan: Vec2::new(100.0, 0.0),
             scale: 0.5,
             angle: 0.0,
         };
-        let drag = region_sel::Drag::new(Vector2::new(500.0, 250.0), Vector2::ZERO, false);
+        let drag = region_sel::Drag::new(Vec2::new(500.0, 250.0), Vec2::ZERO, false);
         // The pointer at (600, 200) lands on the source point (700, 50), so the
         // rect runs from the anchor to there.
         // A raw window reading would answer (500, 200, 100, 50) instead.
         assert_eq!(
-            selection_rect(Some(frame), None, Some(drag), Vector2::new(600.0, 200.0)),
+            selection_rect(Some(frame), None, Some(drag), Vec2::new(600.0, 200.0)),
             Some(region::Crop {
                 x: 500.0,
                 y: 50.0,
@@ -3426,11 +3421,7 @@ mod tests {
         );
         // A press that has not left the tap slack keeps the old region, so a
         // `v` click never flashes a sliver rect.
-        let tap = region_sel::Drag::new(
-            Vector2::new(500.0, 250.0),
-            Vector2::new(600.0, 200.0),
-            false,
-        );
+        let tap = region_sel::Drag::new(Vec2::new(500.0, 250.0), Vec2::new(600.0, 200.0), false);
         let kept = region::Crop {
             x: 10.0,
             y: 10.0,
@@ -3438,18 +3429,13 @@ mod tests {
             h: 100.0,
         };
         assert_eq!(
-            selection_rect(
-                Some(frame),
-                Some(kept),
-                Some(tap),
-                Vector2::new(601.0, 200.0)
-            ),
+            selection_rect(Some(frame), Some(kept), Some(tap), Vec2::new(601.0, 200.0)),
             Some(kept)
         );
         // The release reads the same call, so a tap answers no region and
         // drops the kept one.
         assert_eq!(
-            selection_rect(Some(frame), None, Some(tap), Vector2::new(601.0, 200.0)),
+            selection_rect(Some(frame), None, Some(tap), Vec2::new(601.0, 200.0)),
             None
         );
     }

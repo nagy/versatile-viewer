@@ -14,7 +14,7 @@
 //! value directly, so the draw code never spells the four fields out.
 //! [`Rect::center_origin`] keeps a turned draw in place.
 
-use raylib::prelude::Vector2;
+use crate::draw::Vec2;
 
 macro_rules! uint_newtype {
     ($name:ident, $doc:literal) => {
@@ -76,7 +76,7 @@ macro_rules! float_newtype {
 /// # Examples
 ///
 /// ```
-/// # use raylib::prelude::Vector2;
+/// # use versatile_viewer::draw::Vec2;
 /// # use versatile_viewer::dim::Rect;
 /// let r = Rect::new(10.0, 20.0, 30.0, 40.0);
 /// assert_eq!((r.right(), r.bottom()), (40.0, 60.0));
@@ -85,7 +85,7 @@ macro_rules! float_newtype {
 /// assert!(r.contains(25.0, 40.0));
 /// assert!(!r.contains(41.0, 40.0));
 /// // The origin that keeps a turned rect on its own dest position.
-/// assert_eq!(r.center_origin(), Vector2::new(15.0, 20.0));
+/// assert_eq!(r.center_origin(), Vec2::new(15.0, 20.0));
 /// ```
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -146,8 +146,8 @@ impl Rect {
     /// the image in place, and the same call draws the plain rect at zero
     /// degrees.
     #[must_use]
-    pub fn center_origin(self) -> Vector2 {
-        Vector2::new(self.width / 2.0, self.height / 2.0)
+    pub fn center_origin(self) -> Vec2 {
+        Vec2::new(self.width / 2.0, self.height / 2.0)
     }
 
     /// The largest square centered inside the rectangle.

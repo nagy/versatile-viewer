@@ -57,6 +57,7 @@
 pub mod blurbg;
 pub mod book;
 pub mod dim;
+pub mod draw;
 pub mod error;
 pub mod grid;
 pub mod keyrepeat;
@@ -93,8 +94,11 @@ use std::path::Path;
 
 use raylib::{consts::PixelFormat, prelude::*};
 
-use crate::dim::{ImgH, ImgW, LongSide};
 pub use crate::error::{DecodeError, UploadError};
+use crate::{
+    dim::{ImgH, ImgW, LongSide},
+    draw::Color,
+};
 
 /// The speed multiplier while Shift is held.
 ///

@@ -19,9 +19,7 @@
 //! view darkens the rest of the picture with one veil, and [`corners`] draws
 //! the bright border of the rect itself.
 
-use raylib::prelude::Vector2;
-
-use crate::{TAP_SLACK, region::Crop};
+use crate::{TAP_SLACK, draw::Vec2, region::Crop};
 
 /// What a `v` press does with the region.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -45,9 +43,9 @@ pub enum Kind {
 pub struct Drag {
     /// The press point in source units: the anchor of a span, and the point the
     /// move carries.
-    pub anchor: Vector2,
+    pub anchor: Vec2,
     /// The same point on screen, in window pixels, for the click test.
-    pub grab: Vector2,
+    pub grab: Vec2,
     /// Whether the press spans a fresh rect or carries the kept one.
     pub kind: Kind,
 }
@@ -56,7 +54,7 @@ impl Drag {
     /// Start a span at `anchor`, which the caller already clamped into the
     /// plane.
     #[must_use]
-    pub fn new(anchor: Vector2, grab: Vector2, square: bool) -> Self {
+    pub fn new(anchor: Vec2, grab: Vec2, square: bool) -> Self {
         Self {
             anchor,
             grab,
@@ -66,7 +64,7 @@ impl Drag {
 
     /// Start a move of `from`, grabbed at `anchor`.
     #[must_use]
-    pub fn moving(anchor: Vector2, grab: Vector2, from: Crop) -> Self {
+    pub fn moving(anchor: Vec2, grab: Vec2, from: Crop) -> Self {
         Self {
             anchor,
             grab,
@@ -84,7 +82,7 @@ impl Drag {
     /// the region never leaves the picture and never stops being square.
     /// A move keeps the size of the grabbed rect and stops at the picture edge.
     #[must_use]
-    pub fn rect(&self, corner: Vector2, img: Vector2) -> Crop {
+    pub fn rect(&self, corner: Vec2, img: Vec2) -> Crop {
         let anchor = clamp(self.anchor, img);
         let corner = clamp(corner, img);
         match self.kind {
@@ -107,7 +105,7 @@ impl Drag {
     /// Whether the pointer stayed close enough to the press point to count as a
     /// click, which commits nothing.
     #[must_use]
-    pub fn tapped(&self, cursor: Vector2) -> bool {
+    pub fn tapped(&self, cursor: Vec2) -> bool {
         (cursor - self.grab).length() <= TAP_SLACK
     }
 }
@@ -119,13 +117,7 @@ impl Drag {
 /// Shift only shapes a span: a move keeps the sides the rect already has, so
 /// the Shift state changes nothing inside the region.
 #[must_use]
-pub fn press(
-    point: Vector2,
-    grab: Vector2,
-    img: Vector2,
-    kept: Option<Crop>,
-    square: bool,
-) -> Drag {
+pub fn press(point: Vec2, grab: Vec2, img: Vec2, kept: Option<Crop>, square: bool) -> Drag {
     let anchor = clamp(point, img);
     match kept.filter(|rect| rect.contains_point(anchor)) {
         Some(from) => Drag::moving(anchor, grab, from),
@@ -135,8 +127,8 @@ pub fn press(
 
 /// Clamp a source point into the plane.
 #[must_use]
-pub fn clamp(point: Vector2, img: Vector2) -> Vector2 {
-    Vector2::new(
+pub fn clamp(point: Vec2, img: Vec2) -> Vec2 {
+    Vec2::new(
         point.x.clamp(0.0, img.x.max(0.0)),
         point.y.clamp(0.0, img.y.max(0.0)),
     )
@@ -144,12 +136,12 @@ pub fn clamp(point: Vector2, img: Vector2) -> Vector2 {
 
 /// The four corners of a rect, clockwise from the top-left.
 #[must_use]
-pub fn corners(rect: Crop) -> [Vector2; 4] {
+pub fn corners(rect: Crop) -> [Vec2; 4] {
     [
-        Vector2::new(rect.x, rect.y),
-        Vector2::new(rect.right(), rect.y),
-        Vector2::new(rect.right(), rect.bottom()),
-        Vector2::new(rect.x, rect.bottom()),
+        Vec2::new(rect.x, rect.y),
+        Vec2::new(rect.right(), rect.y),
+        Vec2::new(rect.right(), rect.bottom()),
+        Vec2::new(rect.x, rect.bottom()),
     ]
 }
 
@@ -166,7 +158,7 @@ pub fn corners(rect: Crop) -> [Vector2; 4] {
 /// `inner` clamps into `outer`, so a drag that ran past the picture still
 /// answers bands that stay on it.
 #[must_use]
-pub fn around(outer: Crop, inner: Crop) -> [[Vector2; 4]; 4] {
+pub fn around(outer: Crop, inner: Crop) -> [[Vec2; 4]; 4] {
     let o = corners(outer);
     let i = corners(inside(inner, outer));
     [
@@ -186,12 +178,12 @@ pub fn around(outer: Crop, inner: Crop) -> [[Vector2; 4]; 4] {
 /// (clockwise there), so it goes out reversed.
 /// The other order draws nothing at all.
 #[must_use]
-pub fn veil_triangles(quad: [Vector2; 4]) -> [[Vector2; 3]; 2] {
+pub fn veil_triangles(quad: [Vec2; 4]) -> [[Vec2; 3]; 2] {
     [[quad[0], quad[3], quad[2]], [quad[0], quad[2], quad[1]]]
 }
 
 /// The rect that two opposite corners span, in any drag direction.
-fn span(a: Vector2, b: Vector2) -> Crop {
+fn span(a: Vec2, b: Vec2) -> Crop {
     Crop {
         x: a.x.min(b.x),
         y: a.y.min(b.y),
@@ -202,7 +194,7 @@ fn span(a: Vector2, b: Vector2) -> Crop {
 
 /// The square that two opposite corners span, shrunk to the room the plane
 /// leaves past the anchor.
-fn square(anchor: Vector2, corner: Vector2, img: Vector2) -> Crop {
+fn square(anchor: Vec2, corner: Vec2, img: Vec2) -> Crop {
     let dx = corner.x - anchor.x;
     let dy = corner.y - anchor.y;
     let sx = if dx < 0.0 { -1.0 } else { 1.0 };
@@ -212,7 +204,7 @@ fn square(anchor: Vector2, corner: Vector2, img: Vector2) -> Crop {
     let side = dx.abs().max(dy.abs()).min(room_x).min(room_y).max(0.0);
     span(
         anchor,
-        Vector2::new(anchor.x + side * sx, anchor.y + side * sy),
+        Vec2::new(anchor.x + side * sx, anchor.y + side * sy),
     )
 }
 
@@ -220,7 +212,7 @@ fn square(anchor: Vector2, corner: Vector2, img: Vector2) -> Crop {
 ///
 /// The rect keeps its size, so a move that reaches an edge stops there and
 /// never shrinks.
-fn shift(rect: Crop, delta: Vector2, img: Vector2) -> Crop {
+fn shift(rect: Crop, delta: Vec2, img: Vec2) -> Crop {
     Crop {
         x: (rect.x + delta.x).clamp(0.0, (img.x - rect.w).max(0.0)),
         y: (rect.y + delta.y).clamp(0.0, (img.y - rect.h).max(0.0)),
@@ -243,7 +235,7 @@ fn inside(rect: Crop, outer: Crop) -> Crop {
 
 /// The area of a quad, by the shoelace formula.
 #[cfg(test)]
-fn quad_area(quad: &[Vector2; 4]) -> f32 {
+fn quad_area(quad: &[Vec2; 4]) -> f32 {
     let mut sum = 0.0;
     for i in 0..4 {
         let a = quad[i];
@@ -259,7 +251,7 @@ fn quad_area(quad: &[Vector2; 4]) -> f32 {
 /// up, so it reads positive for a clockwise winding on the screen, whose y
 /// grows down.
 #[cfg(test)]
-fn signed_area(tri: &[Vector2; 3]) -> f32 {
+fn signed_area(tri: &[Vec2; 3]) -> f32 {
     let mut sum = 0.0;
     for i in 0..3 {
         let a = tri[i];
@@ -274,50 +266,50 @@ fn signed_area(tri: &[Vector2; 3]) -> f32 {
 mod tests {
     use super::*;
 
-    fn plane() -> Vector2 {
-        Vector2::new(1000.0, 500.0)
+    fn plane() -> Vec2 {
+        Vec2::new(1000.0, 500.0)
     }
 
-    fn drag(anchor: Vector2) -> Drag {
-        Drag::new(anchor, Vector2::ZERO, false)
+    fn drag(anchor: Vec2) -> Drag {
+        Drag::new(anchor, Vec2::ZERO, false)
     }
 
     #[test]
     fn a_drag_spans_its_corners_in_any_direction() {
-        let a = Vector2::new(200.0, 100.0);
-        let out = drag(a).rect(Vector2::new(500.0, 400.0), plane());
+        let a = Vec2::new(200.0, 100.0);
+        let out = drag(a).rect(Vec2::new(500.0, 400.0), plane());
         assert_eq!((out.x, out.y), (200.0, 100.0));
         assert_eq!((out.w, out.h), (300.0, 300.0));
         // A drag that runs up and to the left reads the same way.
-        let back = drag(a).rect(Vector2::new(50.0, 20.0), plane());
+        let back = drag(a).rect(Vec2::new(50.0, 20.0), plane());
         assert_eq!((back.x, back.y), (50.0, 20.0));
         assert_eq!((back.w, back.h), (150.0, 80.0));
     }
 
     #[test]
     fn a_drag_clamps_to_the_plane() {
-        let a = Vector2::new(200.0, 100.0);
-        let r = drag(a).rect(Vector2::new(5000.0, -80.0), plane());
+        let a = Vec2::new(200.0, 100.0);
+        let r = drag(a).rect(Vec2::new(5000.0, -80.0), plane());
         assert_eq!((r.x, r.y), (200.0, 0.0));
         assert_eq!((r.w, r.h), (800.0, 100.0));
         // An anchor that a resize pushed past the plane clamps too.
-        let past = Drag::new(Vector2::new(2000.0, 900.0), Vector2::ZERO, false);
-        let r = past.rect(Vector2::new(2000.0, 900.0), plane());
+        let past = Drag::new(Vec2::new(2000.0, 900.0), Vec2::ZERO, false);
+        let r = past.rect(Vec2::new(2000.0, 900.0), plane());
         assert!(r.is_empty());
         assert_eq!((r.x, r.y), (1000.0, 500.0));
     }
 
     #[test]
     fn a_square_drag_takes_the_longer_side() {
-        let a = Vector2::new(200.0, 100.0);
-        let square = Drag::new(a, Vector2::ZERO, true);
-        let r = square.rect(Vector2::new(500.0, 200.0), plane());
+        let a = Vec2::new(200.0, 100.0);
+        let square = Drag::new(a, Vec2::ZERO, true);
+        let r = square.rect(Vec2::new(500.0, 200.0), plane());
         assert_eq!((r.w, r.h), (300.0, 300.0));
         // The taller travel wins the same way.
-        let r = square.rect(Vector2::new(260.0, 400.0), plane());
+        let r = square.rect(Vec2::new(260.0, 400.0), plane());
         assert_eq!((r.w, r.h), (300.0, 300.0));
         // A corner past the plane still lands inside it.
-        let r = square.rect(Vector2::new(900.0, 400.0), plane());
+        let r = square.rect(Vec2::new(900.0, 400.0), plane());
         assert_eq!((r.x, r.y), (200.0, 100.0));
         assert_eq!((r.w, r.h), (400.0, 400.0));
     }
@@ -326,26 +318,22 @@ mod tests {
     fn a_square_drag_shrinks_to_the_room_past_the_anchor() {
         // The anchor sits 10 px from the right edge, so a square that grows
         // rightward cannot pass it.
-        let square = Drag::new(Vector2::new(990.0, 10.0), Vector2::ZERO, true);
-        let r = square.rect(Vector2::new(1500.0, 400.0), plane());
+        let square = Drag::new(Vec2::new(990.0, 10.0), Vec2::ZERO, true);
+        let r = square.rect(Vec2::new(1500.0, 400.0), plane());
         assert_eq!((r.w, r.h), (10.0, 10.0));
         assert_eq!((r.x, r.y), (990.0, 10.0));
         // The same anchor growing leftward keeps the room the left side has.
-        let r = square.rect(Vector2::new(0.0, 400.0), plane());
+        let r = square.rect(Vec2::new(0.0, 400.0), plane());
         assert_eq!((r.w, r.h), (490.0, 490.0));
         assert_eq!((r.x, r.y), (500.0, 10.0));
     }
 
     #[test]
     fn a_tap_counts_up_to_the_slack() {
-        let d = Drag::new(
-            Vector2::new(100.0, 100.0),
-            Vector2::new(400.0, 300.0),
-            false,
-        );
-        assert!(d.tapped(Vector2::new(400.0, 300.0)));
-        assert!(d.tapped(Vector2::new(403.0, 300.0)));
-        assert!(!d.tapped(Vector2::new(405.0, 300.0)));
+        let d = Drag::new(Vec2::new(100.0, 100.0), Vec2::new(400.0, 300.0), false);
+        assert!(d.tapped(Vec2::new(400.0, 300.0)));
+        assert!(d.tapped(Vec2::new(403.0, 300.0)));
+        assert!(!d.tapped(Vec2::new(405.0, 300.0)));
     }
 
     #[test]
@@ -358,34 +346,16 @@ mod tests {
             h: 100.0,
         };
         // A press on the border counts as inside, so the edge still moves it.
-        let inside = press(
-            Vector2::new(300.0, 150.0),
-            Vector2::ZERO,
-            img,
-            Some(kept),
-            false,
-        );
+        let inside = press(Vec2::new(300.0, 150.0), Vec2::ZERO, img, Some(kept), false);
         assert!(matches!(inside.kind, Kind::Move { .. }));
         // Shift only shapes a span, so a move reads the same with it.
-        let shifted = press(
-            Vector2::new(300.0, 150.0),
-            Vector2::ZERO,
-            img,
-            Some(kept),
-            true,
-        );
+        let shifted = press(Vec2::new(300.0, 150.0), Vec2::ZERO, img, Some(kept), true);
         assert_eq!(shifted.kind, inside.kind);
         // A press outside the region still spans a fresh rect.
-        let outside = press(
-            Vector2::new(10.0, 10.0),
-            Vector2::ZERO,
-            img,
-            Some(kept),
-            false,
-        );
+        let outside = press(Vec2::new(10.0, 10.0), Vec2::ZERO, img, Some(kept), false);
         assert!(matches!(outside.kind, Kind::Span { square: false }));
         // With no kept region every press spans.
-        let fresh = press(Vector2::new(10.0, 10.0), Vector2::ZERO, img, None, true);
+        let fresh = press(Vec2::new(10.0, 10.0), Vec2::ZERO, img, None, true);
         assert!(matches!(fresh.kind, Kind::Span { square: true }));
     }
 
@@ -398,22 +368,22 @@ mod tests {
             w: 200.0,
             h: 100.0,
         };
-        let grab = Vector2::new(150.0, 150.0);
-        let d = press(grab, Vector2::ZERO, img, Some(kept), false);
+        let grab = Vec2::new(150.0, 150.0);
+        let d = press(grab, Vec2::ZERO, img, Some(kept), false);
         // The rect follows the pointer and keeps its size.
-        let moved = d.rect(Vector2::new(250.0, 250.0), img);
+        let moved = d.rect(Vec2::new(250.0, 250.0), img);
         assert_eq!(
             (moved.x, moved.y, moved.w, moved.h),
             (200.0, 200.0, 200.0, 100.0)
         );
         // A move past the edge stops there and never shrinks.
-        let far = d.rect(Vector2::new(5000.0, 5000.0), img);
+        let far = d.rect(Vec2::new(5000.0, 5000.0), img);
         assert_eq!((far.right(), far.bottom()), (img.x, img.y));
         assert_eq!((far.w, far.h), (200.0, 100.0));
         // A tap keeps the rect the move grabbed, and a span tap commits
         // nothing.
         assert_eq!(d.tap_rect(), Some(kept));
-        assert_eq!(Drag::new(grab, Vector2::ZERO, false).tap_rect(), None);
+        assert_eq!(Drag::new(grab, Vec2::ZERO, false).tap_rect(), None);
     }
 
     #[test]
@@ -435,19 +405,19 @@ mod tests {
         assert_eq!(
             bands[0],
             [
-                Vector2::new(0.0, 0.0),
-                Vector2::new(1000.0, 0.0),
-                Vector2::new(300.0, 50.0),
-                Vector2::new(100.0, 50.0),
+                Vec2::new(0.0, 0.0),
+                Vec2::new(1000.0, 0.0),
+                Vec2::new(300.0, 50.0),
+                Vec2::new(100.0, 50.0),
             ]
         );
         assert_eq!(
             bands[1],
             [
-                Vector2::new(1000.0, 0.0),
-                Vector2::new(1000.0, 500.0),
-                Vector2::new(300.0, 150.0),
-                Vector2::new(300.0, 50.0),
+                Vec2::new(1000.0, 0.0),
+                Vec2::new(1000.0, 500.0),
+                Vec2::new(300.0, 150.0),
+                Vec2::new(300.0, 50.0),
             ]
         );
     }
@@ -576,15 +546,15 @@ mod property_tests {
             px in -500.0f32..1500.0,
             py in -500.0f32..1000.0,
         ) {
-            let img = Vector2::new(1000.0, 500.0);
+            let img = Vec2::new(1000.0, 500.0);
             let rect = Crop {
                 x,
                 y,
                 w: w.min(img.x - x),
                 h: h.min(img.y - y),
             };
-            let grab = Vector2::new(x + rect.w / 2.0, y + rect.h / 2.0);
-            let moved = Drag::moving(grab, Vector2::ZERO, rect).rect(Vector2::new(px, py), img);
+            let grab = Vec2::new(x + rect.w / 2.0, y + rect.h / 2.0);
+            let moved = Drag::moving(grab, Vec2::ZERO, rect).rect(Vec2::new(px, py), img);
             prop_assert!((moved.w - rect.w).abs() < 1e-3);
             prop_assert!((moved.h - rect.h).abs() < 1e-3);
             prop_assert!(moved.x >= -1e-3 && moved.y >= -1e-3);
@@ -602,9 +572,9 @@ mod property_tests {
             y in -500.0f32..1000.0,
             square in any::<bool>(),
         ) {
-            let img = Vector2::new(1000.0, 500.0);
-            let d = Drag::new(Vector2::new(ax, ay), Vector2::ZERO, square);
-            let r = d.rect(Vector2::new(x, y), img);
+            let img = Vec2::new(1000.0, 500.0);
+            let d = Drag::new(Vec2::new(ax, ay), Vec2::ZERO, square);
+            let r = d.rect(Vec2::new(x, y), img);
             prop_assert!(r.x >= 0.0 && r.y >= 0.0);
             prop_assert!(r.right() <= img.x + 1e-3);
             prop_assert!(r.bottom() <= img.y + 1e-3);
