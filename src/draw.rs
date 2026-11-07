@@ -435,6 +435,28 @@ mod tests {
         assert!(x.turned(360.0).is_within(x, 1e-5));
     }
 
+    /// A line is a quad of `thickness` around its segment, and a point is no
+    /// quad at all.
+    #[test]
+    fn a_line_spans_its_thickness() {
+        let line = Quad::line(Vec2::new(10.0, 20.0), Vec2::new(30.0, 20.0), 4.0);
+        // A horizontal line grows up and down by half its thickness, so the
+        // corners sit on 18 and 22, in perimeter order from the start point.
+        assert!(line.p[0].is_within(Vec2::new(10.0, 22.0), 1e-6));
+        assert!(line.p[1].is_within(Vec2::new(30.0, 22.0), 1e-6));
+        assert!(line.p[2].is_within(Vec2::new(30.0, 18.0), 1e-6));
+        assert!(line.p[3].is_within(Vec2::new(10.0, 18.0), 1e-6));
+        // A zero-length line answers an empty quad at its point, so the draw
+        // never divides by zero.
+        let point = Quad::line(Vec2::new(5.0, 5.0), Vec2::new(5.0, 5.0), 4.0);
+        assert!(
+            point
+                .p
+                .iter()
+                .all(|p| p.is_within(Vec2::new(5.0, 5.0), 1e-6))
+        );
+    }
+
     /// A tint scales every channel in integer arithmetic.
     #[test]
     fn a_tint_scales_each_channel() {

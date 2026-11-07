@@ -679,3 +679,67 @@ fn a_loader_worker_uploads_its_own_frame() {
         "the worker's pixels reach the frame"
     );
 }
+
+/// The region veil dims the picture outside the selection and nothing else.
+///
+/// The four bands come from `region_sel::around` and map through
+/// `region::Frame::to_screen`, which is the same transform the picture draws
+/// with, so the veil stays on the picture through a pan, a zoom and a turn.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn the_region_veil_dims_only_outside_the_selection() {
+    use versatile_viewer::{DIM_LEVEL, DIM_VEIL, draw::Vec2, region, region_sel};
+
+    let mut canvas = canvas!(64, 64);
+    let selection = region::Crop {
+        x: 16.0,
+        y: 16.0,
+        w: 32.0,
+        h: 32.0,
+    };
+    for angle in [0.0_f32, 30.0] {
+        let frame = region::Frame {
+            img: Vec2::new(64.0, 64.0),
+            win: Vec2::new(64.0, 64.0),
+            pan: Vec2::ZERO,
+            scale: 1.0,
+            angle,
+        };
+        canvas.begin(Color::BLACK);
+        // The picture: a white plane, turned like the draw turns it.
+        let dest = Rect::new(32.0, 32.0, 64.0, 64.0);
+        canvas.renderer.fill(
+            Quad::pro(dest, Turn::new(dest.center_origin(), angle)),
+            Color::WHITE,
+        );
+        let outer = region::Crop {
+            x: 0.0,
+            y: 0.0,
+            w: frame.img.x,
+            h: frame.img.y,
+        };
+        for band in region_sel::around(outer, selection) {
+            let corners = band.map(|point| frame.to_screen(point));
+            canvas.renderer.fill(Quad::new(corners), DIM_VEIL);
+        }
+        let pixels = canvas.print();
+        let at = |point: Vec2| {
+            let screen = frame.to_screen(point);
+            pixels.at(screen.x as usize, screen.y as usize)
+        };
+        // The picture center sits inside the selection at any turn, so it keeps
+        // every bit of its brightness.
+        assert_eq!(
+            at(Vec2::new(32.0, 32.0)),
+            [255, 255, 255, 255],
+            "angle {angle}: the selection stays bright"
+        );
+        // A picture point outside the selection takes the veil: a black veil at
+        // `255 - DIM_LEVEL` alpha over white answers exactly `DIM_LEVEL`.
+        let dimmed = at(Vec2::new(4.0, 4.0))[0];
+        assert!(
+            dimmed.abs_diff(DIM_LEVEL) <= 2,
+            "angle {angle}: outside the selection reads {dimmed}, not the dim level"
+        );
+    }
+}
