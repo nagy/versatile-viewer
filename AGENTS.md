@@ -251,8 +251,10 @@ The binary name is `vv`.
   `src/texture.rs` owns one uploaded picture and its two filter groups.
   `src/draw.rs` owns `Vec2`, `Color` and `Quad`, the CPU-side geometry.
   `src/input.rs` owns the held keys, the frame edges and the pointer.
-  `src/view.rs` owns the image view itself: `ViewState` (what it shows and how it frames it), the region patch, the spread column, the `v` selection drawing, and `Ui`, which bundles one frame's window, input and clock.
-  `main.rs` keeps the window, the event loop, the launch and the one-entry pass, so no view code reads a raw `winit` event.
+  `src/view.rs` owns the image view itself: `ViewState` (what it shows and how it frames it), the region patch, the spread column and the `v` selection drawing.
+  It is `pub(crate)`, holds no window and no device, and `src/viewer.rs` drives it.
+  `src/viewer.rs` owns one `Viewer`: the pipeline on the host's device, the two views, the loaders, the input and the clock.
+  `main.rs` keeps the window, the surface, the event mapping and the CLI, so no view code reads a raw `winit` event.
   The decisions behind one pipeline are `docs/adr/0002-wgpu-renders-the-view.md`.
 - The backend is Vulkan only (`Backends::VULKAN`, features `vulkan` and `wgsl`), and the instance flags stay empty, so no DX12, Metal or GL instance exists and no library opens for one.
   Issue 94691ce measured the Vulkan loader alone at 28.9 ms of a 59.1 ms first frame, so the backend set is the one startup knob that matters.
@@ -407,6 +409,16 @@ A source that paints no paper carries it in its pixels, so no clear color ever h
   A host that expects the protocol focuses the pane itself.
 - `examples/embed_host.rs` is the demo host: a frame window, a container child inset under a bar, `vv --wid <container> <path>`, a frame resize that the container follows, a click on the bar that toggles focus onto the pane's own window, and a reap of the child on exit.
   It shows the two duties a host owes, and it uses only `x11rb`.
+- Stage 2 is the library value: `viewer::Viewer` in `src/viewer.rs`.
+  A host builds one on its own `wgpu::Device` and `Queue`, so vv needs no window, no surface and no swapchain: `Viewer::new(device, queue, format, max_texture_side, launch, size)` builds the pipeline and uploads the launch frame.
+  `Viewer::render(host, target, size, dt)` fills one frame's batch and paints it into the host's `wgpu::TextureView` through `Renderer::render_into`, so `render_into` stays the only encoder and the host presents.
+  `Viewer::handle_event(event, host)` takes `viewer::Event` (key, pointer, travel, button, wheel, focus), which a host maps from its own toolkit, and `viewer::Input` below it keeps the held state.
+  A repeat stays a flag and not an edge, and a lost focus drops every held key, the capture and every drag, so the host needs no rule of its own.
+  `Host` is the whole platform wall: four window actions (`set_title`, `grab_pointer`, `release_pointer`, `place_pointer`), and the binary answers them from `winit`.
+  `viewer::Launch` is the work that runs before a window exists: it lists a directory, decodes a single file, and names the size and the title a host then creates its window with.
+  A host therefore opens a `Launch`, creates its window from `Launch::window_size`, and then builds the `Viewer`.
+  The `Viewer` owns no clock: the host passes `dt`, and the viewer sums it.
+  `image_size` and `title` answer what a host captions or fits a window to, and `open(path, size)` swaps the open source.
 
 ## MCP
 

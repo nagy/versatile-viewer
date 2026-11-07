@@ -18,8 +18,8 @@
 //! `ViewState` is what the image view shows and how it frames it: the plane,
 //! the scale, the pan, the turn, the region, the patch that refines a settled
 //! zoom, and the loader of the open source.
-//! `Ui` is one frame's window, input and clock, so the frame body reads one
-//! name for the pointer, the held keys and the window size.
+//! The frame body in [`crate::viewer`] drives it: the view holds no window and
+//! no device, so a host owns both.
 //! The helpers here are the pure geometry and policy of that view: `Column`
 //! for the spread math, `patch_dest` and `draw_patch` for the region patch,
 //! `selection_rect` and `draw_selection` for the `v` region, and the
@@ -33,21 +33,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Result;
-use winit::{
-    event::MouseButton,
-    keyboard::KeyCode,
-    window::{CursorGrabMode, Window},
-};
+use winit::event::MouseButton;
 
 use crate::{
     DIM_VEIL, DecodedImage,
     blurbg::BlurBg,
     dim::{PreviewPx, RampTime, Rect, WinH, WinW},
     draw::{Color, Quad, Turn, Vec2},
-    gpu::{FrameError, Gpu},
     grid::{DecodeFailure, EntrySource, Grid},
-    input::{self, Input},
+    input::Input,
     loader::Loader,
     region, region_sel,
     render::Renderer,
@@ -1390,7 +1384,6 @@ pub fn show_entry(
     st: &mut ViewState,
     grid: &mut Grid,
     idx: usize,
-    ui: &Ui,
     r: &Renderer,
     win: (WinW, WinH),
     set_scale_now: bool,
@@ -1469,7 +1462,10 @@ pub fn show_entry(
             // nothing: the loader renders the book now.
             None
         } else {
-            let preview_px = PreviewPx::new(ui.width().max(ui.height()).try_into().unwrap_or(512));
+            // The placeholder takes the long side of the window, so a thumb
+            // never upscales past the cell it fills.
+            let long_side = win.0.raw().max(win.1.raw());
+            let preview_px = PreviewPx::new(long_side.max(1.0) as u32);
             // The image view opens a document as a book, so plane 0 holds
             // every spread.
             // The opening box comes from the surface before the loader takes
@@ -1492,173 +1488,6 @@ pub fn show_entry(
             }
         };
         attach_blur_bg(&mut st.blur_bg, &r.uploader(), blur.as_ref(), st.open_id);
-    }
-}
-
-/// One frame's window, input and clock, as the view code reads them.
-///
-/// The type bundles the platform facts that the raylib handle used to carry, so
-/// the frame body reads one name: the pointer, its travel, the held keys, the
-/// frame time, the window size and the three window calls (place the pointer,
-/// grab it, name the title).
-///
-/// The drawing does not live here: the frame body holds the [`Renderer`] apart,
-/// because the batch needs a mutable borrow for the whole frame while the input
-/// is read at the same time.
-pub struct Ui<'a> {
-    pub input: &'a mut Input,
-    pub window: &'a Window,
-    pub gpu: &'a Gpu,
-    pub size: (u32, u32),
-    /// The seconds since the viewer started.
-    pub time: f64,
-    /// The seconds the previous frame took.
-    pub dt: f32,
-}
-
-impl Ui<'_> {
-    /// The window width, in physical pixels.
-    #[must_use]
-    pub fn width(&self) -> i32 {
-        i32::try_from(self.size.0).unwrap_or(i32::MAX)
-    }
-
-    /// The window height, in physical pixels.
-    #[must_use]
-    pub fn height(&self) -> i32 {
-        i32::try_from(self.size.1).unwrap_or(i32::MAX)
-    }
-
-    /// The seconds since the viewer started.
-    #[must_use]
-    pub fn elapsed(&self) -> f64 {
-        self.time
-    }
-
-    /// The seconds the previous frame took.
-    #[must_use]
-    pub fn frame_time(&self) -> f32 {
-        self.dt
-    }
-
-    /// The pointer position, in window pixels.
-    ///
-    /// A drag that holds the pointer moves this value by the raw device travel
-    /// (see [`Input::motion`]), so the view keeps reading one pointer while the
-    /// real cursor stays grabbed.
-    #[must_use]
-    pub fn pointer(&self) -> Vec2 {
-        self.input.cursor_position()
-    }
-
-    /// The raw device travel since the previous frame.
-    #[must_use]
-    pub fn travel(&self) -> Vec2 {
-        self.input.delta()
-    }
-
-    /// The wheel travel since the previous frame, in notches.
-    #[must_use]
-    pub fn wheel(&self) -> f32 {
-        self.input.wheel_move()
-    }
-
-    /// Is the key held now?
-    #[must_use]
-    pub fn key_down(&self, key: KeyCode) -> bool {
-        self.input.is_key_down(key)
-    }
-
-    /// Did the key go down this frame, without a repeat?
-    #[must_use]
-    pub fn key_pressed(&self, key: KeyCode) -> bool {
-        self.input.is_key_pressed(key)
-    }
-
-    /// The keys that went down this frame, without a repeat.
-    pub fn pressed_keys(&self) -> impl Iterator<Item = KeyCode> + '_ {
-        self.input.pressed_keys()
-    }
-
-    /// The input state of this frame.
-    #[must_use]
-    pub fn input(&self) -> &Input {
-        self.input
-    }
-
-    /// The typed characters of this frame, each with its physical key.
-    #[must_use]
-    pub fn typed(&self) -> &[input::Typed] {
-        self.input.typed()
-    }
-
-    /// Did the mouse button go down this frame?
-    #[must_use]
-    pub fn button_pressed(&self, button: MouseButton) -> bool {
-        self.input.is_button_pressed(button)
-    }
-
-    /// Did the mouse button come up this frame?
-    #[must_use]
-    pub fn button_released(&self, button: MouseButton) -> bool {
-        self.input.is_button_released(button)
-    }
-
-    /// Set the window title.
-    pub fn set_title(&self, title: &str) {
-        self.window.set_title(title);
-    }
-
-    /// Grab the pointer and hide it, so a drag has unbounded travel.
-    ///
-    /// `Locked` is the mode with no pointer motion at all, and X11 refuses it,
-    /// so `Confined` is the fallback. The raw device deltas arrive either way,
-    /// and [`Input::capture`] makes them the pointer's motion.
-    pub fn grab_pointer(&mut self) {
-        for mode in [CursorGrabMode::Locked, CursorGrabMode::Confined] {
-            if self.window.set_cursor_grab(mode).is_ok() {
-                break;
-            }
-        }
-        self.window.set_cursor_visible(false);
-        self.input.capture(true);
-    }
-
-    /// Give the pointer back and show it again.
-    pub fn release_pointer(&mut self) {
-        let _ = self.window.set_cursor_grab(CursorGrabMode::None);
-        self.window.set_cursor_visible(true);
-        self.input.capture(false);
-    }
-
-    /// Put the pointer at a window point.
-    ///
-    /// The logical pointer follows at once, so the next frame reads the spot
-    /// the warp sent it to instead of the travel that ran before it.
-    pub fn place_pointer(&mut self, at: Vec2) {
-        let position = winit::dpi::PhysicalPosition::new(at.x.round(), at.y.round());
-        let _ = self.window.set_cursor_position(position);
-        self.input.set_cursor(at);
-    }
-
-    /// Start a frame: set the viewport and empty the batch.
-    pub fn begin(&self, r: &mut Renderer) {
-        r.begin(self.gpu.queue(), self.size);
-    }
-
-    /// Clear the window to `color`.
-    pub fn clear(r: &mut Renderer, color: Color) {
-        r.set_clear(color);
-    }
-
-    /// Draw the batch and present it.
-    ///
-    /// # Errors
-    ///
-    /// [`FrameError`] when the swapchain hands out no image or drops the
-    /// frame.
-    pub fn end(&self, r: &mut Renderer) -> Result<(), FrameError> {
-        r.flush(self.gpu)
     }
 }
 

@@ -102,21 +102,40 @@ view state, the grid, the loaders and the thumbnail cache. The host owns the
 window, the surface, the present, the event loop and the clock.
 
 ```rust
-Viewer::new(device, queue, format, max_texture_side, path)?;
-viewer.handle_event(viewer::Event::Key { .. });
-viewer.render(&target_view, size, dt);
+let launch = viewer::Launch::open(path, shows_grid)?;   // lists, decodes, sizes
+let window = host.create_window(launch.window_size(), launch.title());
+let mut viewer = Viewer::new(device, queue, format, max_texture_side, launch, size);
+viewer.handle_event(viewer::Event::Key { .. }, &mut host);
+viewer.render(&mut host, &target_view, size, dt)?;
 ```
 
-`viewer::Event` is the viewer's own input vocabulary (key, pointer, travel,
-button, wheel, focus), so a host maps from winit, from a toolkit or from a
-socket, and `src/input.rs` keeps holding the state. `main.rs` keeps the CLI, the
-pane, the winit handler, the window, `Gpu` and the event mapping, and its `App`
-becomes a shell around a `Viewer`. `Ui` disappears: its accessors become the
-arguments of `handle_event` and `render`.
+Two parts of that sketch are worth the words.
 
-The draw seam exists: `Renderer::render_into` already paints into an arbitrary
-texture view, so stage 2 passes the host's view and does not invent a second
-encoder.
+**The launch happens before the window.** A directory lists itself, a single
+file decodes, and the result names the window size and the window title. The
+viewer needs the device to upload the decoded frame, and the device needs the
+window, so the work splits: `viewer::Launch` is the window-free half, and
+`Viewer::new` is the device half. A host opens the launch, creates its window
+from it, and then builds the viewer. `Viewer::new` therefore answers a value and
+not a `Result`: everything that can fail already ran in the launch.
+
+**Four window calls stay with the host.** `viewer::Host` is the whole platform
+wall: `set_title`, `grab_pointer`, `release_pointer`, `place_pointer`. The
+viewer holds no window, so it asks. `viewer::Event` is the input vocabulary one
+level above `input::Input` (key, pointer, travel, button, wheel, focus), which a
+host maps from winit, from a toolkit or from a socket, and `Input` keeps holding
+the state: a repeat stays a flag, never an edge, and a lost focus drops every
+held key, the capture and every drag.
+
+The viewer owns no clock either. The host passes `dt`, the viewer sums it for
+`elapsed`. `Renderer::render_into` was already the only encoder, so
+`Viewer::render` fills the batch and paints the host's texture view, and the host
+presents: the swapchain for the binary, a composite for another host.
+
+`src/view.rs` stays `pub(crate)`: the view is the implementation of a `Viewer`
+and not a second API. The old `Ui` type is gone, its accessors became the
+arguments of `handle_event` and `render`, and `main.rs` keeps the CLI, the pane,
+the winit handler, the window, `Gpu` and the event mapping.
 
 ## Consequences
 
@@ -137,3 +156,6 @@ encoder.
 - An embedded open failure exits the process. A caller who wants a fallback
   drives the pane through stage 2, where `Viewer::open` answers a `Result` and
   the host decides what to show.
+- The offscreen paints are now the regression net for the viewer, and the
+  golden-frame comparison the port could not do is possible from here: render a
+  fixed source at a fixed size and compare a hash.

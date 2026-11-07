@@ -39,7 +39,7 @@ use std::fmt::Write as _;
 
 use versatile_viewer::{
     dim::Rect,
-    draw::{Color, Quad, Turn},
+    draw::{Color, Quad, Turn, Vec2},
     render::Renderer,
     surface::{View, open_surface},
     texture::Filter,
@@ -124,6 +124,14 @@ impl Canvas {
             .target
             .create_view(&wgpu::TextureViewDescriptor::default());
         self.renderer.render_into(&self.device, &self.queue, &view);
+        self.read()
+    }
+
+    /// Read every pixel of the target back as `[r, g, b, a]`.
+    ///
+    /// A caller that painted the target itself (the viewer owns its own
+    /// renderer) reads the result here, so one readback serves both.
+    fn read(&self) -> Pixels {
         let (width, height) = self.size;
         let unpadded = width * 4;
         let padded = unpadded.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
@@ -766,4 +774,82 @@ fn a_stroke_rect_stays_inside_its_rect() {
     assert_eq!(pixels.at(7, 8), [0, 0, 0, 255], "outside the rect");
     assert_eq!(pixels.at(8, 24), [0, 0, 0, 255], "below the rect");
     assert_eq!(pixels.at(16, 16), [0, 0, 0, 255], "hollow middle");
+}
+
+/// A `Viewer` paints into a texture its host owns.
+///
+/// This is the stage-2 seam end to end: a device with no surface, a launch, a
+/// frame loop that reports time, and a host that answers the four window calls.
+/// The viewer's own renderer paints the host's texture, so no swapchain is in
+/// the path.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_viewer_paints_into_a_host_texture() {
+    struct NullHost {
+        titles: Vec<String>,
+    }
+
+    impl versatile_viewer::viewer::Host for NullHost {
+        fn set_title(&mut self, title: &str) {
+            self.titles.push(title.to_string());
+        }
+
+        fn grab_pointer(&mut self) {}
+
+        fn release_pointer(&mut self) {}
+
+        fn place_pointer(&mut self, _at: Vec2) {}
+    }
+
+    let Some(canvas) = Canvas::new(32, 32) else {
+        eprintln!("no Vulkan adapter, skipping");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("red.svg");
+    std::fs::write(
+        &path,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="#ff0000"/></svg>"##,
+    )
+    .expect("write the svg");
+    let launch =
+        versatile_viewer::viewer::Launch::open(dir.path(), true).expect("the launch opens");
+    // A picture sizes the window it asks for, which is what a host reads before
+    // it creates one.
+    assert_eq!(launch.window_size(), (16, 16));
+    let mut viewer = versatile_viewer::viewer::Viewer::new(
+        canvas.device.clone(),
+        canvas.queue.clone(),
+        FORMAT,
+        canvas.device.limits().max_texture_dimension_2d,
+        launch,
+        canvas.size,
+    );
+    assert_eq!(viewer.image_size(), (32, 32), "the base raster of the svg");
+
+    let mut host = NullHost { titles: Vec::new() };
+    let mut red = false;
+    for _ in 0..240 {
+        let view = canvas
+            .target
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        viewer
+            .render(&mut host, &view, canvas.size, 0.016)
+            .expect("the frame renders");
+        let pixels = canvas.read();
+        if pixels.at(16, 16) == [255, 0, 0, 255] {
+            red = true;
+            break;
+        }
+        // The decode runs on a worker, so the first frames show the clear
+        // color and the picture lands a moment later.
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
+    assert!(red, "the picture lands in the host texture");
+    assert!(
+        host.titles.iter().any(|title| title.contains("red.svg")),
+        "the host names its window after the open picture: {:?}",
+        host.titles
+    );
+    assert!(!viewer.quit(), "nothing asked the viewer to exit");
 }

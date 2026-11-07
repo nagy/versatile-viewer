@@ -90,6 +90,19 @@ pub struct Input {
     released_buttons: HashSet<MouseButton>,
 }
 
+/// The notches of one platform wheel report.
+///
+/// A line delta is a notch already, and a pixel delta becomes one by the
+/// platform's step, so a host outside `winit` can convert its own report to the
+/// same unit.
+#[must_use]
+pub fn notches(delta: MouseScrollDelta) -> f32 {
+    match delta {
+        MouseScrollDelta::LineDelta(_, y) => y,
+        MouseScrollDelta::PixelDelta(position) => (position.y / WHEEL_PIXEL_NOTCH) as f32,
+    }
+}
+
 impl Input {
     /// Empty the frame edges, so the next frame reads a fresh set.
     ///
@@ -172,12 +185,15 @@ impl Input {
 
     /// Take one wheel report.
     pub fn wheel(&mut self, delta: MouseScrollDelta) {
-        match delta {
-            MouseScrollDelta::LineDelta(_, y) => self.wheel += y,
-            MouseScrollDelta::PixelDelta(position) => {
-                self.wheel += (position.y / WHEEL_PIXEL_NOTCH) as f32;
-            }
-        }
+        self.wheel_lines(notches(delta));
+    }
+
+    /// Take one wheel report that a host already read as notches.
+    ///
+    /// A host that is not `winit` reads its own wheel events, so it converts
+    /// them once and this is the entrance: one notch is one step of the wheel.
+    pub fn wheel_lines(&mut self, notches: f32) {
+        self.wheel += notches;
     }
 
     /// Take one mouse button event.
