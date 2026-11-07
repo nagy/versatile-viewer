@@ -2125,7 +2125,7 @@ fn main() -> Result<()> {
                 st.loader = None; // cancel the worker
                 st.close_crop();
                 // Keep the entry: mark it as failed, so its cell stays
-                // visible (dimmed, error glyph) instead of vanishing
+                // visible (dimmed, error mark) instead of vanishing
                 // silently.
                 if let Some(id) = st.open_id.take() {
                     grid.as_mut()

@@ -920,7 +920,7 @@ impl Grid {
 
     /// Step 1 of [`Self::load_pending`]: apply finished decodes.
     /// A failed decode marks its entry as failed (the cell stays visible,
-    /// dimmed, with an error glyph) instead of deleting it, so the grid count
+    /// dimmed, with an error mark) instead of deleting it, so the grid count
     /// never lies.
     /// Textures upload here because that needs the main thread.
     fn drain_results(&mut self, rl: &mut RaylibHandle, thread: &RaylibThread, keep: &HashSet<u64>) {
@@ -1095,7 +1095,7 @@ impl Grid {
 
     /// Mark the entry with this stable id as failed (e.g. a streaming load
     /// that errored in the middle).
-    /// The cell stays, dimmed, with an error glyph.
+    /// The cell stays, dimmed, with an error mark.
     pub fn mark_failed(&mut self, id: u64, err: DecodeFailure) {
         if let Some(e) = self.entries.iter_mut().find(|e| e.id == id) {
             e.queued = false;
@@ -1442,19 +1442,14 @@ impl Grid {
         None
     }
 
-    /// Draw the grid: the placeholder text or every visible thumbnail cell.
+    /// Draw every visible thumbnail cell.
+    ///
+    /// An empty grid draws nothing: the window title already carries the count
+    /// (`(0 image(s)) – <dir> – versatile-viewer`), so the grid needs no text
+    /// layer to say it.
     pub fn draw(&self, d: &mut RaylibDrawHandle, win: (WinW, WinH)) {
-        let (win_w, win_h) = (win.0.raw(), win.1.raw());
+        let win_h = win.1.raw();
         if self.entries.is_empty() {
-            let msg = "no images found in directory";
-            let tw = d.measure_text(msg, 20);
-            d.draw_text(
-                msg,
-                (win_w as i32 - tw) / 2,
-                win_h as i32 / 2 - 10,
-                20,
-                Color::GRAY,
-            );
             return;
         }
         let l = self.layout(win.0, win.1);
@@ -1487,18 +1482,10 @@ impl Grid {
                 let src = Rect::sized(tex.width() as f32, tex.height() as f32).center_square();
                 d.draw_texture_pro(tex, src, thumb, Vector2::ZERO, 0.0, tint);
             } else if e.cell.is_failed() {
-                // Decode failed: dim red placeholder with an error glyph.
+                // Decode failed: dim red placeholder with an error mark.
                 // The file stays visible instead of vanishing silently.
                 d.draw_rectangle_rec(thumb, Color::new(72, 26, 26, 255).tint(tint));
-                let msg = "!";
-                let tw = d.measure_text(msg, 24);
-                d.draw_text(
-                    msg,
-                    (thumb.x + (thumb.width - tw as f32) / 2.0) as i32,
-                    (thumb.y + (thumb.height - 24.0) / 2.0) as i32,
-                    24,
-                    Color::new(214, 92, 92, 255).tint(tint),
-                );
+                draw_failure_mark(d, thumb, tint);
             } else if let Some(tex) = e.cell.placeholder() {
                 // The few-byte ThumbHash placeholder, until the decoded thumb
                 // lands.
@@ -1514,6 +1501,21 @@ impl Grid {
             }
         }
     }
+}
+
+/// Draw the failure mark of a cell whose decode failed.
+///
+/// The mark is an exclamation built from two rectangles: a bar and a dot.
+/// The grid owns no font, so the cell shows a shape instead of a glyph.
+fn draw_failure_mark(d: &mut impl RaylibDraw, thumb: Rect, tint: Color) {
+    let color = Color::new(214, 92, 92, 255).tint(tint);
+    let stroke = (thumb.width * 0.08).max(2.0);
+    let bar = thumb.height * 0.40;
+    let gap = thumb.height * 0.12;
+    let left = thumb.x + (thumb.width - stroke) / 2.0;
+    let top = thumb.y + (thumb.height - (bar + gap + stroke)) / 2.0;
+    d.draw_rectangle_rec(Rect::new(left, top, stroke, bar), color);
+    d.draw_rectangle_rec(Rect::new(left, top + bar + gap, stroke, stroke), color);
 }
 
 /// Move the selection by one direction press, `step` times over.
