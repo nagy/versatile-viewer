@@ -85,7 +85,9 @@
               cargoArtifacts
               env
               ;
-            buildInputs = libInputs;
+            # `libgcc_s` is a real DT_NEEDED dependency of the binary (unwinding),
+            # so the patchelf step needs it at build time.
+            buildInputs = libInputs ++ [ pkgs.stdenv.cc.cc.lib ];
             # wgpu opens `libvulkan.so.1` and winit opens the X11 libraries at
             # runtime, so none of them sits in DT_NEEDED.
             # Nix's fixup step shrinks RUNPATH down to only the DT_NEEDED
@@ -168,6 +170,10 @@
           };
 
           checks.clippy = clippy;
+
+          # The package itself, so `nix flake check` catches a broken rpath or a
+          # missing runtime library and not only the test run.
+          checks.package = versatileViewer;
 
           checks.doctests = doctests;
 
