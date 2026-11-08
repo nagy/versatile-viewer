@@ -17,6 +17,18 @@
 //! `xset q`. winit reports the flag, so the grid steps its selection on
 //! [`Input::repeated_keys`] and every one-shot action skips it.
 //!
+//! # A press this window saw
+//!
+//! A window manager that binds a key for itself, such as the `l` of a vim-style
+//! workspace switch, still holds that key when the window arrives.
+//! X replays every key that is down as a synthetic press when the window gains
+//! the focus, and winit marks those events `is_synthetic`.
+//! The first auto-repeat after them carries no repeat flag, so the flag alone
+//! cannot tell a real press from a held key.
+//! [`Input::key`] therefore marks a synthetic press as stale and starts no hold
+//! from it: a motion begins only at a press this window saw go down, and a
+//! release of the stale key hands it back.
+//!
 //! # The pointer
 //!
 //! Two sources exist and they do not measure the same travel.
@@ -70,6 +82,11 @@ pub struct Input {
     pressed: HashSet<KeyCode>,
     /// The keys that came back as an auto-repeat this frame.
     repeated: HashSet<KeyCode>,
+    /// The keys that were already down when the window gained the focus.
+    ///
+    /// A synthetic press from X adds one, and its release drops it, so a hold
+    /// this window never saw begin never moves the picture.
+    stale: HashSet<KeyCode>,
     /// The keys that came up this frame.
     released: HashSet<KeyCode>,
     /// The typed characters of this frame, each with its physical key.
@@ -123,9 +140,32 @@ impl Input {
     ///
     /// `text` is the character the event produced, if any: a modifier press
     /// carries none.
-    pub fn key(&mut self, key: KeyCode, state: ElementState, repeat: bool, text: Option<char>) {
+    ///
+    /// `synthetic` names the press that X replays for a key which was already
+    /// down when the window gained the focus.
+    /// Such a press starts no hold, and neither does the auto-repeat that
+    /// follows it, so a key the window manager holds never moves the picture.
+    pub fn key(
+        &mut self,
+        key: KeyCode,
+        state: ElementState,
+        repeat: bool,
+        synthetic: bool,
+        text: Option<char>,
+    ) {
         match state {
             ElementState::Pressed => {
+                if synthetic {
+                    // The key was down before this window had the focus, so
+                    // the press belongs to another window.
+                    self.stale.insert(key);
+                    return;
+                }
+                if self.stale.contains(&key) {
+                    // The first auto-repeat of a key held since the focus
+                    // arrived, which X reports without the repeat flag.
+                    return;
+                }
                 self.held.insert(key);
                 if repeat {
                     self.repeated.insert(key);
@@ -137,6 +177,9 @@ impl Input {
                 }
             }
             ElementState::Released => {
+                // A release ends the stale mark as well, because the next press
+                // of that key is one this window sees go down.
+                self.stale.remove(&key);
                 self.held.remove(&key);
                 self.released.insert(key);
             }
@@ -217,6 +260,7 @@ impl Input {
     /// a hold would otherwise stay on after the window came back.
     pub fn forget_held(&mut self) {
         self.held.clear();
+        self.stale.clear();
         self.buttons.clear();
     }
 
@@ -311,13 +355,13 @@ mod tests {
     #[test]
     fn a_hold_outlives_its_edge() {
         let mut input = Input::default();
-        input.key(KeyCode::KeyH, ElementState::Pressed, false, None);
+        input.key(KeyCode::KeyH, ElementState::Pressed, false, false, None);
         assert!(input.is_key_down(KeyCode::KeyH));
         assert!(input.is_key_pressed(KeyCode::KeyH));
         input.begin_frame();
         assert!(input.is_key_down(KeyCode::KeyH));
         assert!(!input.is_key_pressed(KeyCode::KeyH));
-        input.key(KeyCode::KeyH, ElementState::Released, false, None);
+        input.key(KeyCode::KeyH, ElementState::Released, false, false, None);
         assert!(!input.is_key_down(KeyCode::KeyH));
         assert!(input.is_key_released(KeyCode::KeyH));
     }
@@ -326,9 +370,9 @@ mod tests {
     #[test]
     fn a_repeat_is_not_a_press() {
         let mut input = Input::default();
-        input.key(KeyCode::KeyJ, ElementState::Pressed, false, None);
+        input.key(KeyCode::KeyJ, ElementState::Pressed, false, false, None);
         input.begin_frame();
-        input.key(KeyCode::KeyJ, ElementState::Pressed, true, None);
+        input.key(KeyCode::KeyJ, ElementState::Pressed, true, false, None);
         assert!(!input.is_key_pressed(KeyCode::KeyJ));
         assert_eq!(
             input.repeated_keys().collect::<Vec<_>>(),
@@ -337,11 +381,36 @@ mod tests {
         assert!(input.is_key_down(KeyCode::KeyJ));
     }
 
+    /// A key that was already down when the window gained the focus starts no
+    /// hold, and neither does the auto-repeat that follows it.
+    #[test]
+    fn a_replayed_press_starts_no_hold() {
+        let mut input = Input::default();
+        // X replays the key the window manager holds as a synthetic press.
+        input.key(KeyCode::KeyL, ElementState::Pressed, false, true, None);
+        assert!(!input.is_key_down(KeyCode::KeyL));
+        assert!(!input.is_key_pressed(KeyCode::KeyL));
+        // The first auto-repeat of that key carries no repeat flag.
+        input.begin_frame();
+        input.key(KeyCode::KeyL, ElementState::Pressed, false, false, None);
+        assert!(!input.is_key_down(KeyCode::KeyL));
+        assert!(!input.is_key_pressed(KeyCode::KeyL));
+        // Every later repeat stays out too.
+        input.begin_frame();
+        input.key(KeyCode::KeyL, ElementState::Pressed, true, false, None);
+        assert!(!input.is_key_down(KeyCode::KeyL));
+        // The release hands the key back, so the next press counts.
+        input.key(KeyCode::KeyL, ElementState::Released, false, false, None);
+        input.key(KeyCode::KeyL, ElementState::Pressed, false, false, None);
+        assert!(input.is_key_down(KeyCode::KeyL));
+        assert!(input.is_key_pressed(KeyCode::KeyL));
+    }
+
     /// A lost focus drops every hold.
     #[test]
     fn a_lost_focus_drops_the_holds() {
         let mut input = Input::default();
-        input.key(KeyCode::KeyF, ElementState::Pressed, false, None);
+        input.key(KeyCode::KeyF, ElementState::Pressed, false, false, None);
         input.button(MouseButton::Left, ElementState::Pressed);
         input.forget_held();
         assert!(!input.is_key_down(KeyCode::KeyF));
@@ -399,7 +468,13 @@ mod tests {
     #[test]
     fn a_typed_character_carries_its_key() {
         let mut input = Input::default();
-        input.key(KeyCode::Equal, ElementState::Pressed, false, Some('+'));
+        input.key(
+            KeyCode::Equal,
+            ElementState::Pressed,
+            false,
+            false,
+            Some('+'),
+        );
         assert_eq!(
             input.typed(),
             &[Typed {

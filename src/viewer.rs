@@ -124,7 +124,8 @@ fn place_pointer(input: &mut Input, host: &mut dyn Host, at: Vec2) {
 ///
 /// A host maps its toolkit into these, and [`Viewer::handle_event`] keeps the
 /// held state. A repeat is not an edge: the flag says so, and a one-shot action
-/// reads only a press that is not one.
+/// reads only a press that is not one. A synthetic press is not an edge either:
+/// it names a key that was down before this window had the focus.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Event {
     /// A key went down or came up, with the character it typed, if any.
@@ -135,6 +136,12 @@ pub enum Event {
         state: ElementState,
         /// The platform repeated the press.
         repeat: bool,
+        /// The platform replayed a key that was already down.
+        ///
+        /// X emits such a press for every held key when the window gains the
+        /// focus, so a window manager that holds its own shortcut key at the
+        /// switch never starts a motion here.
+        synthetic: bool,
         /// The character the press produced.
         text: Option<char>,
     },
@@ -613,8 +620,9 @@ impl Viewer {
                 key,
                 state,
                 repeat,
+                synthetic,
                 text,
-            } => self.input.key(key, state, repeat, text),
+            } => self.input.key(key, state, repeat, synthetic, text),
             Event::Pointer(position) => self.input.cursor(position),
             Event::Travel(delta) => self.input.motion(delta),
             Event::Button { button, state } => self.input.button(button, state),

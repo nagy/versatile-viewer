@@ -279,7 +279,11 @@ impl ApplicationHandler for HostApp {
                     }
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } => {
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } => {
                 let PhysicalKey::Code(key) = event.physical_key else {
                     return;
                 };
@@ -288,6 +292,7 @@ impl ApplicationHandler for HostApp {
                     key,
                     state: event.state,
                     repeat: event.repeat,
+                    synthetic: is_synthetic,
                     text,
                 });
             }

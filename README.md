@@ -233,6 +233,11 @@ scripts a resize. `xwininfo -tree -name "vv embed host"` shows the three levels
 
 `Esc` never quits the program.
 
+A motion starts only at a key press this window saw go down. A window manager
+that binds `l` for a workspace switch still holds that key when `vv` arrives,
+and X replays it as a synthetic press. `vv` ignores that replay and the
+auto-repeat after it, so a pan never starts from a key another window owns.
+
 `v` in the image view selects a region: hold `v`, drag the rectangle, and
 release. The rest of the picture dims by the same amount as the grid cells
 outside a visual selection, and a bright border marks the region. The region

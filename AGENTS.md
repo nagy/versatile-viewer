@@ -296,6 +296,10 @@ The binary name is `vv`.
 - winit 0.30.13 emits one `DeviceEvent::MouseMotion` per XI2 raw motion event, with the device's raw axis values as the delta (see `xinput2_raw_mouse_motion` in its X11 backend), so no per-event guard belongs here.
   A virtual X server (XTEST) reports the absolute pointer position as those raw values instead, sometimes twice, which looks like a double-speed drag; that is an injection artifact of the test harness and not a real event pair, so do not add a delta sanity clamp for it.
 - A lost focus forgets every held key and button and drops the grab, because the releases never arrive.
+- A motion starts only at a press this window saw go down.
+  X replays every key that is down as a synthetic press when the window gains the focus (`is_synthetic` in winit's X11 backend, see `handle_pressed_keys`), so a window manager that binds `l` for a workspace switch still holds that key as `vv` arrives.
+  The first auto-repeat of such a key carries no repeat flag, so `src/input.rs` marks the synthetic press as stale (`Input::key`): the key never enters the held set, neither the replay nor its repeats, and a release clears the mark so the next press counts.
+  A `viewer::Event::Key` carries the flag (`synthetic`), and a host that has no such event reports `false`.
 - A frame is one method (`Viewer::frame` in `src/viewer.rs`), and the host wraps it: `App::frame` takes the swapchain image, hands the texture view to `Viewer::render` and presents.
   The launch lists the directory and decodes a single file before a window exists, because the title carries the image count and a picture sizes its own window.
   `App::resumed` creates the window, the GPU stack and the `Viewer`.
@@ -416,7 +420,7 @@ A source that paints no paper carries it in its pixels, so no clear color ever h
   A host builds one on its own `wgpu::Device` and `Queue`, so vv needs no window, no surface and no swapchain: `Viewer::new(device, queue, format, max_texture_side, launch, size)` builds the pipeline and uploads the launch frame.
   `Viewer::render(host, target, size, dt)` fills one frame's batch and paints it into the host's `wgpu::TextureView` through `Renderer::render_into`, so `render_into` stays the only encoder and the host presents.
   `Viewer::handle_event(event, host)` takes `viewer::Event` (key, pointer, travel, button, wheel, focus), which a host maps from its own toolkit, and `viewer::Input` below it keeps the held state.
-  A repeat stays a flag and not an edge, and a lost focus drops every held key, the capture and every drag, so the host needs no rule of its own.
+  A repeat stays a flag and not an edge, a lost focus drops every held key, the capture and every drag, and a synthetic press starts no hold, so the host needs no rule of its own.
   `Host` is the whole platform wall: four window actions (`set_title`, `grab_pointer`, `release_pointer`, `place_pointer`), and the binary answers them from `winit`.
   `viewer::Launch` is the work that runs before a window exists: it lists a directory, decodes a single file, and names the size and the title a host then creates its window with.
   A host therefore opens a `Launch`, creates its window from `Launch::window_size`, and then builds the `Viewer`.
