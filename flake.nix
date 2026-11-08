@@ -175,16 +175,11 @@
             cargoClippyExtraArgs = "--all-targets -- --deny warnings";
             meta.description = "Versatile-viewer clippy lint gate";
           };
-        in
-        {
-          packages.versatile-viewer = versatileViewer;
-          packages.default = config.packages.versatile-viewer;
-          packages.versatile-viewer-doc = docs;
 
           # `cargo test` runs the unit tests, the integration tests and the
           # doctests, so it is the one test gate: a separate `--doc` run would
           # compile and link the crate a second time for the same coverage.
-          checks.default = craneLib.cargoTest {
+          tests = craneLib.cargoTest {
             inherit
               src
               cargoArtifacts
@@ -194,6 +189,13 @@
             buildInputs = libInputs;
             meta.description = "Versatile-viewer test suite";
           };
+        in
+        {
+          packages.versatile-viewer = versatileViewer;
+          packages.default = config.packages.versatile-viewer;
+          packages.versatile-viewer-doc = docs;
+
+          checks.default = tests;
 
           checks.clippy = clippy;
 
