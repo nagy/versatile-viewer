@@ -21,6 +21,9 @@
 //!
 //! Usage: `vv [--mcp] [--wid <id>] <image-path-or-directory>`
 //!
+//! `clap` prints `--help` and `--version` before the viewer starts, and the
+//! `Cli` struct below is the one place the flags are declared.
+//!
 //! `VV_DEBUG`=1 traces input events.
 //! `VV_PRESENT` picks the swapchain present mode.
 //! `VV_TIMING`=1 prints the GPU stack and every slow frame.
@@ -38,13 +41,13 @@
 //! a top-level window of its own (see `Pane`).
 
 use std::{
-    env,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
+use clap::Parser;
 use versatile_viewer::{
     draw::Vec2,
     gpu::{FrameError, Gpu, GpuSettings, Present},
@@ -473,66 +476,40 @@ impl ApplicationHandler for App {
     }
 }
 
-/// The command line of one run.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// The command line of one run.
+//
+// `--help` and `--version` come from the derive, and neither reaches `main`:
+// clap prints its line and exits before a window exists.
+#[derive(Debug, Clone, PartialEq, Eq, Parser)]
+#[command(
+    name = "vv",
+    version,
+    about = "A fast image viewer: nsxiv meets mpv. JPEG XL first-class.",
+    after_help = "The path reads as an image file or as a directory of them.\nESC and Enter \
+                  toggle between the grid and the image view."
+)]
 struct Cli {
-    /// `--mcp`: serve the Model Context Protocol on stdio.
+    /// Serve the Model Context Protocol on stdio.
+    #[arg(long)]
     mcp: bool,
-    /// `--wid`: the window a host handed over, so the picture draws inside it.
+    /// Draw the image view inside this host window instead of a top-level window
+    #[arg(long, value_name = "ID", value_parser = parse_wid)]
     wid: Option<Wid>,
-    /// The image file or the directory to show.
+    /// The image file or the directory to show
+    #[arg(value_name = "IMAGE-PATH-OR-DIRECTORY")]
     path: PathBuf,
 }
 
-/// The shape of the command line, printed beside a usage error.
-const USAGE: &str = "usage: vv [--mcp] [--wid <id>] <image-path-or-directory>";
-
-/// Read the command line.
-///
-/// `--mcp` and `--wid` may come before or after the path.
-/// `--wid` takes its value apart (`--wid 74`) or joined (`--wid=74`), because a
-/// wrapper script and a `.desktop` file usually write the joined form.
-/// Every other argument is the path, and a second path is an error: the argv
-/// loop this replaces kept the first one and silently dropped the rest.
-fn parse_args<I: Iterator<Item = String>>(args: I) -> Result<Cli, String> {
-    let mut mcp = false;
-    let mut wid = None;
-    let mut path: Option<PathBuf> = None;
-    let mut args = args;
-    while let Some(arg) = args.next() {
-        if arg == "--mcp" {
-            mcp = true;
-        } else if arg == "--wid" {
-            let Some(value) = args.next() else {
-                return Err("--wid needs a window id".to_string());
-            };
-            wid = Some(parse_wid(&value)?);
-        } else if let Some(value) = arg.strip_prefix("--wid=") {
-            wid = Some(parse_wid(value)?);
-        } else if arg.starts_with("--") {
-            return Err(format!("unknown option {arg}"));
-        } else if path.is_some() {
-            return Err(format!("a second path: {arg}"));
-        } else {
-            path = Some(PathBuf::from(arg));
-        }
-    }
-    match path {
-        Some(path) => Ok(Cli { mcp, wid, path }),
-        None => Err("no image path given".to_string()),
-    }
-}
-
 /// Read the `--wid` value, naming the flag when it is not a window id.
+///
+/// The value reads apart (`--wid 74`) or joined (`--wid=74`), because a wrapper
+/// script and a `.desktop` file usually write the joined form.
 fn parse_wid(value: &str) -> Result<Wid, String> {
     Wid::parse(value).ok_or_else(|| format!("--wid needs a window id, not {value:?}"))
 }
 
 fn main() -> Result<()> {
-    let cli = match parse_args(env::args().skip(1)) {
-        Ok(cli) => cli,
-        Err(err) => bail!("{err}\n{USAGE}"),
-    };
+    let cli = Cli::parse();
     if cli.mcp {
         start_mcp()?;
     }
@@ -557,11 +534,13 @@ fn main() -> Result<()> {
 #[cfg(test)]
 #[allow(clippy::float_cmp)] // the asserted values are exact window arithmetic
 mod tests {
+    use clap::CommandFactory as _;
+
     use super::*;
 
-    /// The parsed command line of an argv list.
-    fn parsed(args: &[&str]) -> Result<Cli, String> {
-        parse_args(args.iter().map(|arg| (*arg).to_string()))
+    /// The parsed command line of an argv list, with the program name first.
+    fn parsed(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(std::iter::once("vv").chain(args.iter().copied()))
     }
 
     /// The path of a parsed command line, for a test that cares about it.
@@ -609,7 +588,7 @@ mod tests {
             vec!["--wid=", "pic.jpg"],
         ] {
             let err = parsed(&args).expect_err("no window id");
-            assert!(err.contains("--wid"), "{args:?}: {err}");
+            assert!(err.to_string().contains("--wid"), "{args:?}: {err}");
         }
     }
 
@@ -618,7 +597,14 @@ mod tests {
         assert!(parsed(&["a.jpg", "b.jpg"]).is_err());
         assert!(parsed(&[]).is_err());
         let err = parsed(&["--nope", "pic.jpg"]).expect_err("unknown option");
-        assert!(err.contains("--nope"), "{err}");
+        assert!(err.to_string().contains("--nope"), "{err}");
+    }
+
+    #[test]
+    fn the_version_names_the_binary_and_the_crate_version() {
+        // `-V` and `--version` print this line, and clap exits before a window.
+        let rendered = Cli::command().render_version();
+        assert_eq!(rendered.trim(), format!("vv {}", env!("CARGO_PKG_VERSION")));
     }
 
     #[test]

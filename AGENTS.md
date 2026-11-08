@@ -387,11 +387,19 @@ A source that paints no paper carries it in its pixels, so no clear color ever h
 - X11 WM_CLASS is `vv` (res_name and res_class), which the window name sets (`.with_name("vv", "vv")`).
   The build carries the `x11` feature of winit only, so one display path ships.
 
+## Command line
+
+- `clap` (derive) owns the command line: one `Cli` struct in `main.rs` carries `--mcp`, `--wid <ID>` and the positional path.
+  clap answers `-h`/`--help` and `-V`/`--version` before `main` runs, so neither opens a window.
+  An unknown option, a second path, a missing path and a bad id all leave as clap errors that name the flag, so no usage string and no argv loop live in the tree.
+- `--version` prints `vv <Cargo.toml version>`, and `name = "vv"` in `#[command(..)]` names the program, so the package name never shows.
+- `Cli::try_parse_from` takes the program name first and is the test seam, so a test never reads `std::env::args`.
+- `pane::Wid` stays the one reader of the `--wid` value: `parse_wid` (`main.rs`) wraps `Wid::parse` as the clap value parser, so the decimal and `0x` forms and the `0` rejection live in `src/pane.rs` and nowhere else.
+
 ## Embed
 
 - `vv --wid <id> <path>` shows the picture inside a host window, the way `mpv --wid` does.
   The id reads as decimal or `0x` hex, before or after the path, and `--wid` composes with `--mcp`.
-  `parse_args` (`main.rs`) is pure and takes an iterator, so a test never reads `std::env::args`.
   A second path, an unknown option, an id that is not a number and the id `0` are usage errors that name the flag.
 - `pane::Wid` (`src/pane.rs`) is the parsed id: it is the one place a bare window number becomes a value with a meaning, and `raw()` is the only way back.
 - One `Pane` (`main.rs`) carries the policy: `Window` or `Embedded(Wid)`.

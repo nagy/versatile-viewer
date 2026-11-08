@@ -30,6 +30,10 @@ elk = ["mermaid", "merman/layout-elk"]
 
 [dependencies]
 anyhow = "1.0.104"
+# The command line.
+# One derive struct owns the flags, the value parsers, `--help` and
+# `--version`, so no argv loop and no usage string to keep in step.
+clap = { version = "4.6.7", features = ["derive"] }
 # JPEG XL decode, pure Rust (no libjxl C dependency).
 jxl-oxide = "0.12.6"
 # Common-format decode. Keep in sync with grid.rs is_image_path(): every

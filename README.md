@@ -104,6 +104,8 @@ pages, so it opens as the same book. See `docs/adr/0001-*.md` and
 nix run . -- <image-path-or-directory>   # single image or directory grid
 nix run . -- --mcp <image-path-or-directory>   # the same, plus MCP on stdio
 nix run . -- --wid 0x3a00007 <image-path-or-directory>   # inside a host window
+nix run . -- --version   # prints `vv 0.1.0`
+nix run . -- --help      # every flag and the path
 ```
 
 Requires the X11 libraries and a Vulkan driver; the Nix build bakes the
