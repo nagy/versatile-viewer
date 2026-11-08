@@ -99,6 +99,12 @@
             # comes from the host.
             nativeBuildInputs = nativeBuildInputs ++ [ pkgs.autoPatchelfHook ];
             appendRunpaths = [ (lib.makeLibraryPath libInputs) ];
+            # `cargo test` in this derivation repeats the whole test suite of
+            # `checks.default`, so it buys no gate at the price of one more
+            # release build of the crate and every test binary.
+            # The rpath and the missing-library gate live in the fixup, which
+            # still runs.
+            doCheck = false;
             meta.description = "A fast image viewer. nsxiv meets mpv. JPEG XL first-class.";
           };
 
@@ -120,18 +126,19 @@
             meta.description = "Versatile-viewer API documentation";
           };
 
-          # Doctests compile and run the code blocks in doc comments against
-          # the library (`cargo test --doc`).
-          # They use the same artifact set as above.
-          doctests = craneLib.cargoDocTest {
+          # The dependency set of the build without the default features.
+          # `--no-default-features` drops the cache, SVG and Mermaid
+          # dependencies, so 58 crates resolve with a different feature set and
+          # cargo recompiles them in the release profile on every gate run.
+          # An artifact set of their own pays that build once.
+          minimalArtifacts = craneLib.buildDepsOnly {
             inherit
               src
-              cargoArtifacts
               nativeBuildInputs
               env
               ;
             buildInputs = libInputs;
-            meta.description = "Versatile-viewer doctests";
+            cargoExtraArgs = "--no-default-features";
           };
 
           # The build without the default features: no thumbnail cache, no SVG,
@@ -141,10 +148,10 @@
           minimal = craneLib.cargoTest {
             inherit
               src
-              cargoArtifacts
               nativeBuildInputs
               env
               ;
+            cargoArtifacts = minimalArtifacts;
             buildInputs = libInputs;
             cargoExtraArgs = "--no-default-features";
             meta.description = "Versatile-viewer tests without the default features";
@@ -174,6 +181,9 @@
           packages.default = config.packages.versatile-viewer;
           packages.versatile-viewer-doc = docs;
 
+          # `cargo test` runs the unit tests, the integration tests and the
+          # doctests, so it is the one test gate: a separate `--doc` run would
+          # compile and link the crate a second time for the same coverage.
           checks.default = craneLib.cargoTest {
             inherit
               src
@@ -194,8 +204,6 @@
           # The package itself, so `nix flake check` catches a broken rpath or a
           # missing runtime library and not only the test run.
           checks.package = versatileViewer;
-
-          checks.doctests = doctests;
 
           apps.default = {
             type = "app";

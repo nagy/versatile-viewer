@@ -312,7 +312,10 @@ The binary name is `vv`.
 ## Build
 
 - `nix build .#versatile-viewer-doc` makes the rustdoc HTML.
-- `nix flake check` gates clippy (`--all-targets -- --deny warnings`), tests, doctests, treefmt, the package build, and `checks.minimal` (`cargo test --no-default-features`, which compiles the `_off` stubs of the thumbnail cache, the SVG backend and the Mermaid backend).
+- `nix flake check` gates clippy (`--all-targets -- --deny warnings`), tests, treefmt, the package build, and `checks.minimal` (`cargo test --no-default-features`, which compiles the `_off` stubs of the thumbnail cache, the SVG backend and the Mermaid backend).
+  One test gate only: `cargo test` in `checks.default` runs the unit tests, the integration tests and the doctests, so no separate `--doc` check exists.
+  `checks.package` builds the package with `doCheck = false`, because the fixup owns the rpath gate and a second `cargo test` would only repeat the suite.
+  `checks.minimal` carries its own `minimalArtifacts` dep set, because `--no-default-features` resolves 58 crates with a different feature set and cargo would recompile them in release on every run.
 ## Run
 
 Run `nix run . -- <image-path-or-directory>`.
