@@ -79,9 +79,9 @@ rayon = "1.12.0"
 # Confined to pdf.rs: the rest of the viewer only sees the Surface trait
 # (surface.rs), so a pdfium fallback swap touches one file. The default
 # features embed the standard-14 fonts and the cmaps.
-# 0.8 is required: render_into() takes an arbitrary kurbo::Affine, which is
-# what makes a region render (visible crop) possible.
-hayro = "0.8.0"
+# 0.8 or newer is required: render_into() takes an arbitrary kurbo::Affine,
+# which is what makes a region render (visible crop) possible.
+hayro = "0.9.0"
 # Typst compile -> PDF export pipeline (pure Rust). Confined to typst.rs,
 # which hands the exported PDF bytes to the hayro backend in pdf.rs, so one
 # rasterizer draws every document. The exported pages are resolution

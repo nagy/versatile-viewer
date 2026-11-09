@@ -31,7 +31,7 @@ The binary name is `vv`.
   The module is `src/pdf.rs` (`PdfSurface`, `PdfError`), and it owns the hayro dependency, so a renderer swap touches one file.
   One PDF page is one plane, and the natural unit is the PostScript point (1 pt = 1 px at scale 1.0), so `bounds` answers from a page-size table captured once at open time.
   `open_surface` routes on the `%PDF-` magic, so a misnamed file still opens.
-  hayro 0.8 renders through an arbitrary `kurbo::Affine` (`render_into`), so the backend overrides `render` as a region anchor: it translates the requested rect to the origin and rasterizes only those pixels.
+  hayro 0.9 renders through an arbitrary `kurbo::Affine` (`render_into`), so the backend overrides `render` as a region anchor: it translates the requested rect to the origin and rasterizes only those pixels.
   A single render caps at `MAX_RENDER_PIXELS` (about 67 MP) and `MAX_RENDER_SIDE` (65535), and the returned scale is the clamped one.
   `previews` and `can_refine` answer true, so a coarse preview lands first and the image view repaints the window patch over a rested zoom.
   Every render runs in `catch_unwind`, because a young rasterizer can panic on a malformed page and the job runs on a pool thread: a panic becomes `SurfaceError::Render`, never a crash.

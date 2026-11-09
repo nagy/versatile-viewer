@@ -9,7 +9,7 @@
 //! One PDF page is one plane.
 //! The natural unit is the PostScript point (1/72 inch), so a render scale
 //! of 1.0 maps one point to one pixel.
-//! Hayro 0.8 renders through an arbitrary `kurbo::Affine`, so a region view
+//! Hayro 0.9 renders through an arbitrary `kurbo::Affine`, so a region view
 //! pays only for the pixels the screen shows.
 //!
 //! Rendering happens on the caller thread (rayon pool or loader worker).
