@@ -69,7 +69,7 @@ winit = { version = "0.30.13", default-features = false, features = [
 # the container it created, never the child, so the child hears nothing.
 # `mpv --wid` reads the same geometry, and `winio` above opens no seam for it.
 # The default feature set is empty, so no `libxcb` and no `libc` shim arrives.
-x11rb = "0.13.2"
+x11rb = "0.14.0"
 # Block on the two async wgpu calls of startup (adapter, device).
 pollster = "1.0.1"
 # Work pool for parallel background decodes (grid prefetch); jxl-oxide also
@@ -119,7 +119,7 @@ derive_more = { version = "2.1.1", default-features = false, features = [
 ] }
 # MCP (Model Context Protocol) server, spec revision 2026-07-28.
 # The server runs on a background thread and owns stdin and stdout.
-rmcp = { version = "3.8.0", default-features = false, features = [
+rmcp = { version = "3.9.0", default-features = false, features = [
   "server",
   "transport-io",
 ] }
@@ -141,7 +141,7 @@ sha2 = { version = "0.11.1", optional = true }
 # It is a second JXL codebase beside jxl-oxide, which only decodes.
 # `extraslow` stays off: it pulls the perceptual metric crates, and a 512 px
 # thumbnail never needs them. The SIMD backends stay on.
-jixel = { version = "0.5.2", default-features = false, features = [
+jixel = { version = "0.5.7", default-features = false, features = [
   "avx",
   "sse",
 ], optional = true }
@@ -165,7 +165,7 @@ tiny-skia = { version = "0.12.0", default-features = false, features = [
 ], optional = true }
 # Gzip for a `.svgz` head. The code decompresses itself, so a gzip bomb hits
 # a size cap instead of the allocator.
-flate2 = { version = "1.1.10", default-features = false, features = [
+flate2 = { version = "1.1.11", default-features = false, features = [
   "rust_backend",
 ], optional = true }
 # The host font database behind `system-fonts`. The code loads it once per
