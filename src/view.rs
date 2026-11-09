@@ -1294,8 +1294,9 @@ pub fn same_patch(a: &region::Patch, b: &region::Patch) -> bool {
 ///
 /// The draw skips the whole-image texture then, because the patch already
 /// holds every pixel the window shows.
-/// A patch whose margin a pan or a resize consumed leaves the rest to the
-/// whole-image texture until the repaint lands.
+/// A patch that a pan, a resize or a zoom out has outrun leaves the rest to
+/// the whole-image texture until the repaint lands, so the document never
+/// drops out of the window while the worker paints.
 #[must_use]
 pub fn patch_covers(st: &ViewState, win_w: f32, win_h: f32) -> bool {
     let Some(crop) = &st.crop else {
@@ -1310,7 +1311,8 @@ pub fn patch_covers(st: &ViewState, win_w: f32, win_h: f32) -> bool {
     let Some(frame) = st.frame(Vec2::new(win_w, win_h)) else {
         return false;
     };
-    frame.crop(0.0).contains(&crop.patch.rect)
+    let needed = region::Patch::new(frame.crop(0.0), scale);
+    region::holds(&needed, &crop.patch)
 }
 
 /// Keep the pivot of a turned image on its window spot.

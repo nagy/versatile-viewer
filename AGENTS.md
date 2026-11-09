@@ -93,7 +93,8 @@ The binary name is `vv`.
   A raster plane measures the capped size it renders, so `bounds` and the pixels of a scale-1.0 render agree.
   The trait decisions live in `docs/adr/0001-surface-one-region-based-render-trait.md`.
 - The image view repaints the region its window shows, from the open surface, when `Surface::can_refine` says a sharper picture is possible.
-  `src/region.rs` holds the pure geometry and policy: `Frame` (`to_screen`, `to_image`, `crop`), `Crop`, `Patch`, `worth_painting`, `covers`, `MARGIN`, `SCALE_SLACK`, `QUIET`.
+  `src/region.rs` holds the pure geometry and policy: `Frame` (`to_screen`, `to_image`, `crop`), `Crop`, `Patch`, `worth_painting`, `holds`, `covers`, `MARGIN`, `SCALE_SLACK`, `QUIET`.
+  `holds` reads the two rects alone and answers whether the painted rect reaches every source pixel the window shows; the draw asks it (`patch_covers` in `src/view.rs`) before it skips the whole-image texture, and so does `worth_painting`.
   `Frame` bundles one window mapping (`img`, `win`, `pan`, `scale`, `angle`), and `ViewState::frame` (`main.rs`) builds it, so a caller never re-derives the transform and never mixes window units with source units.
   The mapping and the crop are methods of `Frame`, so no free function takes the five numbers loose and no call site can swap the scale for the angle; `ViewState::frame_at` answers the same frame for a pan the view aims at (a glide target) rather than the one on screen.
   A `Patch` is a `Crop` beside the scale its pixels were painted at, so `worth_painting` and `covers` compare two values instead of a rect and two loose scales; `CropState`, `LoadPlan`-driven prefetch state and the crop messages carry one.
@@ -111,7 +112,7 @@ The binary name is `vv`.
   A single-file launch keeps the surface it already opened, under the same rule.
   `ViewState::img` (a `Size`) keeps measuring the source plane, never the patch, so a bigger texture never disturbs fit, pan or zoom, and no site can set or read the two axes apart.
   The spread math reads only the y axis, so it takes a `Column` (`Column::new(Size, scale, win_h)`), which names the plane height, the scale and the window height instead of passing three loose floats.
-  The whole-image texture (`view_tex`) stays as the fallback and draws only where the patch cannot reach (`patch_covers`), so a resize or a pan that outruns the repaint never shows background.
+  The whole-image texture (`view_tex`) stays as the fallback and draws only where the patch cannot reach (`patch_covers`), so a resize, a pan or a zoom out that outruns the repaint never shows background.
   Drawing both over the same pixels would double the alpha of an antialiased edge, so the patch hides the whole image where it covers.
   A spread step paints the region it lands on before the glide ends: `ViewState::prefetch_spread` (`main.rs`) renders the target rect on a `rayon` worker at the press edge, so the glide never waits on it.
   The result rides `CropMsg::Prefetch` with a `prefetch_id` token into `ViewState::prefetch`, a second `CropState` that drops when the aim moved.

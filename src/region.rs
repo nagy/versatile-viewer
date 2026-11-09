@@ -280,7 +280,21 @@ pub fn worth_painting(needed: &Patch, painted: Option<&Patch>) -> bool {
     let Some(painted) = painted else {
         return true;
     };
-    mismatched_scale(needed, painted) || !painted.rect.contains(&needed.rect)
+    mismatched_scale(needed, painted) || !holds(needed, painted)
+}
+
+/// Whether a painted rect reaches every source pixel the window shows.
+///
+/// The test reads the rects alone, so a patch stretched by a zoom still holds
+/// the window.
+/// [`covers`] adds the scale to it, and the draw asks this one: a patch that
+/// reaches the window alone may draw without the whole-image texture under it.
+#[must_use]
+pub fn holds(needed: &Patch, patch: &Patch) -> bool {
+    if needed.rect.is_empty() {
+        return false;
+    }
+    patch.rect.contains(&needed.rect)
 }
 
 /// Whether a painted rect holds the region the window shows at its scale.
@@ -291,10 +305,7 @@ pub fn worth_painting(needed: &Patch, painted: Option<&Patch>) -> bool {
 /// tells the view when that patch has become the one on screen.
 #[must_use]
 pub fn covers(needed: &Patch, patch: &Patch) -> bool {
-    if needed.rect.is_empty() {
-        return false;
-    }
-    !mismatched_scale(needed, patch) && patch.rect.contains(&needed.rect)
+    holds(needed, patch) && !mismatched_scale(needed, patch)
 }
 
 /// Whether two patches disagree about the scale beyond [`SCALE_SLACK`].
@@ -427,6 +438,46 @@ mod tests {
         assert!(!covers(&needed, &far));
         // The test and the paint rule never both fire.
         assert!(!(covers(&needed, &painted) && worth_painting(&needed, Some(&painted))));
+    }
+
+    #[test]
+    fn a_patch_holds_only_the_window_it_reaches() {
+        let wide = frame(Vec2::ZERO, 4.0, 0.0);
+        let needed = Patch::new(wide.crop(0.0), 4.0);
+        let covering = Patch::new(wide.crop(MARGIN), 4.0);
+        assert!(holds(&needed, &covering));
+        // Zoomed out, the window shows more than the patch painted, so the
+        // patch holds a part and the whole image must draw under it.
+        let out = frame(Vec2::ZERO, 1.0, 0.0);
+        let wide_need = Patch::new(out.crop(0.0), 1.0);
+        assert!(!holds(&wide_need, &covering));
+        // A patch at another scale still holds the rect it reaches, and the
+        // scale is `covers`'s business alone.
+        assert!(holds(
+            &needed,
+            &Patch {
+                scale: 8.0,
+                ..covering
+            }
+        ));
+        assert!(!covers(
+            &needed,
+            &Patch {
+                scale: 8.0,
+                ..covering
+            }
+        ));
+        // An empty need is never held.
+        let none = Patch::new(
+            Crop {
+                x: 0.0,
+                y: 0.0,
+                w: 0.0,
+                h: 0.0,
+            },
+            4.0,
+        );
+        assert!(!holds(&none, &covering));
     }
 }
 
