@@ -23,7 +23,7 @@ use crate::{TAP_SLACK, draw::Vec2, region::Crop};
 
 /// What a `v` press does with the region.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Kind {
+pub enum VPress {
     /// The press landed outside the region: anchor one corner and drag the
     /// opposite one.
     Span {
@@ -47,7 +47,7 @@ pub struct Drag {
     /// The same point on screen, in window pixels, for the click test.
     pub grab: Vec2,
     /// Whether the press spans a fresh rect or carries the kept one.
-    pub kind: Kind,
+    pub press: VPress,
 }
 
 impl Drag {
@@ -58,7 +58,7 @@ impl Drag {
         Self {
             anchor,
             grab,
-            kind: Kind::Span { square },
+            press: VPress::Span { square },
         }
     }
 
@@ -68,7 +68,7 @@ impl Drag {
         Self {
             anchor,
             grab,
-            kind: Kind::Move { from },
+            press: VPress::Move { from },
         }
     }
 
@@ -85,10 +85,10 @@ impl Drag {
     pub fn rect(&self, corner: Vec2, img: Vec2) -> Crop {
         let anchor = clamp(self.anchor, img);
         let corner = clamp(corner, img);
-        match self.kind {
-            Kind::Span { square: false } => span(anchor, corner),
-            Kind::Span { square: true } => square(anchor, corner, img),
-            Kind::Move { from } => shift(from, corner - anchor, img),
+        match self.press {
+            VPress::Span { square: false } => span(anchor, corner),
+            VPress::Span { square: true } => square(anchor, corner, img),
+            VPress::Move { from } => shift(from, corner - anchor, img),
         }
     }
 
@@ -96,9 +96,9 @@ impl Drag {
     /// span commits nothing, so an empty `v` click outside the region drops it.
     #[must_use]
     pub fn tap_rect(&self) -> Option<Crop> {
-        match self.kind {
-            Kind::Move { from } => Some(from),
-            Kind::Span { .. } => None,
+        match self.press {
+            VPress::Move { from } => Some(from),
+            VPress::Span { .. } => None,
         }
     }
 
@@ -318,16 +318,16 @@ mod tests {
         };
         // A press on the border counts as inside, so the edge still moves it.
         let inside = press(Vec2::new(300.0, 150.0), Vec2::ZERO, img, Some(kept), false);
-        assert!(matches!(inside.kind, Kind::Move { .. }));
+        assert!(matches!(inside.press, VPress::Move { .. }));
         // Shift only shapes a span, so a move reads the same with it.
         let shifted = press(Vec2::new(300.0, 150.0), Vec2::ZERO, img, Some(kept), true);
-        assert_eq!(shifted.kind, inside.kind);
+        assert_eq!(shifted.press, inside.press);
         // A press outside the region still spans a fresh rect.
         let outside = press(Vec2::new(10.0, 10.0), Vec2::ZERO, img, Some(kept), false);
-        assert!(matches!(outside.kind, Kind::Span { square: false }));
+        assert!(matches!(outside.press, VPress::Span { square: false }));
         // With no kept region every press spans.
         let fresh = press(Vec2::new(10.0, 10.0), Vec2::ZERO, img, None, true);
-        assert!(matches!(fresh.kind, Kind::Span { square: true }));
+        assert!(matches!(fresh.press, VPress::Span { square: true }));
     }
 
     #[test]

@@ -99,15 +99,15 @@ impl EntrySource {
         self.0.as_path()
     }
 
-    /// A shared handle on the path, for a worker that outlives this borrow.
+    /// The path, shared so a worker can outlive this borrow.
     #[must_use]
-    pub fn handle(&self) -> Arc<PathBuf> {
+    pub fn shared_path(&self) -> Arc<PathBuf> {
         Arc::clone(&self.0)
     }
 
-    /// A human-readable label for log lines.
+    /// The path as text for a log line.
     #[must_use]
-    pub fn label(&self) -> String {
+    pub fn log_label(&self) -> String {
         self.path().display().to_string()
     }
 
@@ -397,10 +397,9 @@ impl Cell {
         Self::Pending { placeholder: None }
     }
 
-    /// Whether the cell still waits for its first decode and holds no
-    /// placeholder.
+    /// Whether the cell still waits for its first decode.
     #[must_use]
-    pub fn is_cold(&self) -> bool {
+    pub fn awaits_first_decode(&self) -> bool {
         matches!(self, Self::Pending { placeholder: None })
     }
 
@@ -808,7 +807,7 @@ impl Grid {
             layout_cache: RefCell::new(None),
             zoom: 1.0,
             scroll: 0.0,
-            blur: blurbg::Config::from_env(),
+            blur: blurbg::Config::from_env_if_enabled(),
             cache,
         }
     }
@@ -862,7 +861,7 @@ impl Grid {
             let Some(ready) = res.ready else {
                 continue;
             };
-            if !e.cell.is_cold() {
+            if !e.cell.awaits_first_decode() {
                 continue;
             }
             e.cell = Cell::Pending {
@@ -965,7 +964,7 @@ impl Grid {
                 Err(err) => {
                     eprintln!(
                         "vv: {}: decode failed: {err}",
-                        self.entries[i].source.label()
+                        self.entries[i].source.log_label()
                     );
                     let e = &mut self.entries[i];
                     e.queued = false;
@@ -2135,7 +2134,7 @@ mod tests {
         image::DynamicImage::new_rgb8(3, 2).save(&path).unwrap();
         let source = EntrySource::new(path.clone());
         assert_eq!(source.path(), path.as_path());
-        assert!(source.label().ends_with("a.png"));
+        assert!(source.log_label().ends_with("a.png"));
         let (surface, plane) = source.open().unwrap();
         assert_eq!(plane, 0);
         assert_eq!(surface.plane_count(), 1);

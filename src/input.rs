@@ -66,7 +66,7 @@ const WHEEL_PIXEL_NOTCH: f64 = 100.0;
 
 /// The most recent typed character and the physical key that produced it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Typed {
+pub struct TypedChar {
     /// The key that went down.
     pub key: KeyCode,
     /// The character it typed.
@@ -90,13 +90,13 @@ pub struct Input {
     /// The keys that came up this frame.
     released: HashSet<KeyCode>,
     /// The typed characters of this frame, each with its physical key.
-    typed: Vec<Typed>,
+    typed: Vec<TypedChar>,
     /// The pointer position, in window pixels.
     cursor: Vec2,
     /// A drag holds the pointer, so the raw travel moves the pointer.
     captured: bool,
     /// The raw device travel since the last frame.
-    delta: Vec2,
+    travel: Vec2,
     /// The wheel travel since the last frame, in notches.
     wheel: f32,
     /// The buttons held now.
@@ -130,7 +130,7 @@ impl Input {
         self.repeated.clear();
         self.released.clear();
         self.typed.clear();
-        self.delta = Vec2::ZERO;
+        self.travel = Vec2::ZERO;
         self.wheel = 0.0;
         self.pressed_buttons.clear();
         self.released_buttons.clear();
@@ -173,7 +173,7 @@ impl Input {
                     self.pressed.insert(key);
                 }
                 if let Some(text) = text {
-                    self.typed.push(Typed { key, text });
+                    self.typed.push(TypedChar { key, text });
                 }
             }
             ElementState::Released => {
@@ -204,7 +204,7 @@ impl Input {
     /// where in the frame the grab switched.
     /// The pointer itself follows only while [`Self::capture`] holds it.
     pub fn motion(&mut self, delta: Vec2) {
-        self.delta += delta;
+        self.travel += delta;
         if self.captured {
             self.cursor += delta;
         }
@@ -294,7 +294,7 @@ impl Input {
 
     /// The typed characters of this frame, each with its physical key.
     #[must_use]
-    pub fn typed(&self) -> &[Typed] {
+    pub fn typed(&self) -> &[TypedChar] {
         &self.typed
     }
 
@@ -306,8 +306,8 @@ impl Input {
 
     /// The raw device travel since the last frame.
     #[must_use]
-    pub fn delta(&self) -> Vec2 {
-        self.delta
+    pub fn pointer_travel(&self) -> Vec2 {
+        self.travel
     }
 
     /// The wheel travel since the last frame, in notches.
@@ -427,14 +427,14 @@ mod tests {
         // A free pointer is where the platform put it, whatever the device
         // travel since.
         assert_eq!(input.cursor_position(), Vec2::new(10.0, 10.0));
-        assert_eq!(input.delta(), Vec2::new(4.0, -1.0));
+        assert_eq!(input.pointer_travel(), Vec2::new(4.0, -1.0));
         input.wheel(MouseScrollDelta::LineDelta(0.0, 1.0));
         input.wheel(MouseScrollDelta::PixelDelta(
             winit::dpi::PhysicalPosition::new(0.0, 200.0),
         ));
         assert!((input.wheel_move() - 3.0).abs() < 1e-6);
         input.begin_frame();
-        assert_eq!(input.delta(), Vec2::ZERO);
+        assert_eq!(input.pointer_travel(), Vec2::ZERO);
         assert_eq!(input.wheel_move(), 0.0);
         assert_eq!(input.cursor_position(), Vec2::new(10.0, 10.0));
     }
@@ -461,7 +461,11 @@ mod tests {
         assert_eq!(input.cursor_position(), Vec2::new(10.0, 20.0));
         input.motion(Vec2::new(1.0, 1.0));
         assert_eq!(input.cursor_position(), Vec2::new(10.0, 20.0));
-        assert_eq!(input.delta(), Vec2::new(21.0, -4.0), "every event counts");
+        assert_eq!(
+            input.pointer_travel(),
+            Vec2::new(21.0, -4.0),
+            "every event counts"
+        );
     }
 
     /// A typed character keeps the key that produced it, for the zoom keys.
@@ -477,7 +481,7 @@ mod tests {
         );
         assert_eq!(
             input.typed(),
-            &[Typed {
+            &[TypedChar {
                 key: KeyCode::Equal,
                 text: '+'
             }]

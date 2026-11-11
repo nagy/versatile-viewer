@@ -526,8 +526,8 @@ impl VectorSurface {
         self
     }
 
-    /// The paper color, as the RGBA8 bytes a paint takes.
-    fn paper(&self) -> Option<[u8; 4]> {
+    /// The paper color as the RGBA8 bytes a paint takes.
+    fn paper_rgba(&self) -> Option<[u8; 4]> {
         self.background.map(|c| [c.r, c.g, c.b, c.a])
     }
 }
@@ -557,7 +557,9 @@ impl Surface for VectorSurface {
             return Err(SurfaceError::Scale(scale));
         }
         let region = self.bounds(0)?.whole();
-        Ok(self.vector.render_region(region, scale, self.paper())?)
+        Ok(self
+            .vector
+            .render_region(region, scale, self.paper_rgba())?)
     }
 
     fn render(&self, view: View) -> Result<DecodedImage, SurfaceError> {
@@ -572,7 +574,7 @@ impl Surface for VectorSurface {
         let region = view.region.unwrap_or(self.bounds(0)?.whole());
         Ok(self
             .vector
-            .render_region(region, view.scale, self.paper())?)
+            .render_region(region, view.scale, self.paper_rgba())?)
     }
 
     fn progressive(&self) -> Result<Option<Box<dyn ChunkSource>>, SurfaceError> {

@@ -397,9 +397,9 @@ pub enum Prefetch {
 }
 
 impl Prefetch {
-    /// The patch this state holds on screen, if any.
+    /// The patch this state shows now that its paint landed, if any.
     #[must_use]
-    pub fn held(&self) -> Option<&CropState> {
+    pub fn on_screen_patch(&self) -> Option<&CropState> {
         match self {
             Self::Ready(state) => Some(state),
             Self::Idle | Self::Painting { .. } => None,
@@ -484,7 +484,7 @@ impl ViewState {
             scale: self.view_scale?,
             angle: self.angle,
         })
-        .filter(region::Frame::drawable)
+        .filter(region::Frame::has_drawable_plane)
     }
 
     /// The window mapping of the open plane at `pan` and `scale`.
@@ -587,7 +587,9 @@ impl ViewState {
             return false;
         }
         let column = Column::new(self.img, scale, win_h);
-        let row = column.row(self.target_pan.y, first.h).min(count - 1);
+        let row = column
+            .spread_at_top(self.target_pan.y, first.h)
+            .min(count - 1);
         let next = row as isize + step;
         if next < 0 || next as usize >= count {
             return false;
@@ -706,7 +708,7 @@ impl ViewState {
     pub fn request_source(&mut self, entry: &EntrySource) {
         self.close_crop();
         self.source_plane = 0;
-        let path = entry.handle();
+        let path = entry.shared_path();
         let (generation, tx) = (self.crop_gen, self.crop_tx.clone());
         rayon::spawn(move || {
             // The open reads the head and, for a vector file, parses the tree
@@ -746,8 +748,8 @@ impl ViewState {
         // sharp spread at once instead of waiting out [`region::QUIET`].
         if self
             .prefetch
-            .held()
-            .is_some_and(|state| region::covers(&needed, &state.patch))
+            .on_screen_patch()
+            .is_some_and(|state| region::patch_covers_at_scale(&needed, &state.patch))
         {
             let ready = std::mem::replace(&mut self.prefetch, Prefetch::Idle);
             if let Prefetch::Ready(state) = ready {
@@ -781,7 +783,7 @@ impl ViewState {
         // duplicate it waits instead.
         // A worker that never answers stops the wait at [`PREFETCH_GIVE_UP`].
         if let Some((aim, _, at)) = self.prefetch.painting()
-            && region::covers(&needed, &aim)
+            && region::patch_covers_at_scale(&needed, &aim)
         {
             if now.duration_since(at) < PREFETCH_GIVE_UP {
                 return;
@@ -1114,7 +1116,7 @@ impl Column {
     /// while an earlier step still glides counts from the spread that step
     /// aims at, never from the pixels on the way.
     #[must_use]
-    pub fn row(self, pan_y: f32, spread_h: f32) -> usize {
+    pub fn spread_at_top(self, pan_y: f32, spread_h: f32) -> usize {
         if !(spread_h > 0.0 && self.scale.is_finite() && self.scale > 0.0) {
             return 0;
         }
@@ -1233,7 +1235,7 @@ pub fn selection_rect(
     drag: Option<region_sel::Drag>,
     mouse: Vec2,
 ) -> Option<region::Crop> {
-    let frame = frame.filter(region::Frame::drawable)?;
+    let frame = frame.filter(region::Frame::has_drawable_plane)?;
     let Some(drag) = drag else {
         return kept;
     };
@@ -1312,7 +1314,7 @@ pub fn patch_covers(st: &ViewState, win_w: f32, win_h: f32) -> bool {
         return false;
     };
     let needed = region::Patch::new(frame.crop(0.0), scale);
-    region::holds(&needed, &crop.patch)
+    region::patch_reaches_window(&needed, &crop.patch)
 }
 
 /// Keep the pivot of a turned image on its window spot.
@@ -1483,7 +1485,7 @@ pub fn show_entry(
                     ))
                 }
                 Err(err) => {
-                    eprintln!("vv: {}: {err}", source.label());
+                    eprintln!("vv: {}: {err}", source.log_label());
                     grid.mark_failed(id, DecodeFailure::Decode);
                     None
                 }
@@ -1573,7 +1575,7 @@ mod tests {
             // The top of that spread lands on the top edge of the window.
             let top = (win_h - h * scale) / 2.0 + pan + row as f32 * row_h * scale;
             assert!(top.abs() < 1e-3, "row {row} top {top}");
-            assert_eq!(col.row(pan, row_h), row);
+            assert_eq!(col.spread_at_top(pan, row_h), row);
         }
     }
 
@@ -1585,11 +1587,11 @@ mod tests {
         let col = column(h, scale, win_h);
         let row = 2;
         let pan = col.pan_of(row as f32 * row_h);
-        assert_eq!(col.row(pan, row_h), row);
+        assert_eq!(col.spread_at_top(pan, row_h), row);
         // Above the plane top the row stays the first one.
-        assert_eq!(col.row(col.top_pan() + 500.0, row_h), 0);
+        assert_eq!(col.spread_at_top(col.top_pan() + 500.0, row_h), 0);
         // A book that fits the window has no row to read.
-        assert_eq!(column(200.0, 1.0, 768.0).row(0.0, 100.0), 0);
+        assert_eq!(column(200.0, 1.0, 768.0).spread_at_top(0.0, 100.0), 0);
     }
 
     #[test]

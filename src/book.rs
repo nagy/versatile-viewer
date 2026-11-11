@@ -17,7 +17,7 @@
 //! The book keeps its own unit: **base units**, not points.
 //! A document of a thousand pages stands far taller than one texture, and the
 //! main thread never resizes a buffer, so the surface bakes a base scale
-//! ([`BookSurface::base`]) that lands the whole book inside
+//! ([`BookSurface::units_per_point`]) that lands the whole book inside
 //! [`MAX_TEXTURE_SIDE`] and [`MAX_RENDER_PIXELS`] at scale 1.0.
 //! `bounds` answers in base units, so a scale-1.0 render matches it, and a
 //! region patch at a settled zoom converts back to points and rasterizes only
@@ -88,7 +88,7 @@ pub struct BookSurface {
     /// How many spreads the book stacks.
     rows: usize,
     /// Base units per point, so the whole book at scale 1.0 fits one texture.
-    base: f32,
+    units_per_point: f32,
 }
 
 impl std::fmt::Debug for BookSurface {
@@ -98,7 +98,7 @@ impl std::fmt::Debug for BookSurface {
             .field("slot", &self.slot)
             .field("canvas", &self.canvas)
             .field("rows", &self.rows)
-            .field("base", &self.base)
+            .field("units_per_point", &self.units_per_point)
             .finish()
     }
 }
@@ -148,7 +148,7 @@ impl BookSurface {
         // The base scale keeps the whole-book render uploadable as one
         // texture, and under the render cap.
         let long = canvas.w.max(canvas.h);
-        let base = 1.0_f32
+        let units_per_point = 1.0_f32
             .min(MAX_TEXTURE_SIDE as f32 / long)
             .min((MAX_RENDER_PIXELS / (canvas.w * canvas.h)).sqrt());
         Ok(BookSurface {
@@ -156,7 +156,7 @@ impl BookSurface {
             slot,
             canvas,
             rows,
-            base,
+            units_per_point,
         })
     }
 
@@ -179,13 +179,11 @@ impl BookSurface {
         self.rows
     }
 
-    /// Base units per point.
-    ///
-    /// One point of the document measures this many of the plane's units, so
-    /// a scale-1.0 render of the whole book fits one texture.
+    /// Base units per point, so a scale-1.0 render of the whole book fits one
+    /// texture.
     #[must_use]
-    pub fn base(&self) -> f32 {
-        self.base
+    pub fn units_per_point(&self) -> f32 {
+        self.units_per_point
     }
 
     /// The canvas of the book in points, before the base scale.
@@ -198,8 +196,8 @@ impl BookSurface {
     #[must_use]
     fn size(&self) -> Size {
         Size {
-            w: self.canvas.w * self.base,
-            h: self.canvas.h * self.base,
+            w: self.canvas.w * self.units_per_point,
+            h: self.canvas.h * self.units_per_point,
         }
     }
 
@@ -210,8 +208,8 @@ impl BookSurface {
     #[must_use]
     pub fn first_spread(&self) -> Size {
         Size {
-            w: (self.slot.w * SLOTS as f32 + GUTTER * (SLOTS - 1) as f32) * self.base,
-            h: self.slot.h * self.base,
+            w: (self.slot.w * SLOTS as f32 + GUTTER * (SLOTS - 1) as f32) * self.units_per_point,
+            h: self.slot.h * self.units_per_point,
         }
     }
 
@@ -261,9 +259,9 @@ impl BookSurface {
         let rect = intersect(region, self.size().whole()).ok_or(SurfaceError::Buffer)?;
         // The request in points, and the output pixels per point, under the
         // render cap.
-        let (x0, y0) = (rect.x / self.base, rect.y / self.base);
-        let (w, h) = (rect.w / self.base, rect.h / self.base);
-        let scale = (scale * self.base).min((MAX_RENDER_PIXELS / (w * h)).sqrt());
+        let (x0, y0) = (rect.x / self.units_per_point, rect.y / self.units_per_point);
+        let (w, h) = (rect.w / self.units_per_point, rect.h / self.units_per_point);
+        let scale = (scale * self.units_per_point).min((MAX_RENDER_PIXELS / (w * h)).sqrt());
         let width = (w * scale).floor().max(1.0) as u32;
         let height = (h * scale).floor().max(1.0) as u32;
         // Transparent first: a slot with no page, and the gaps, show the window
@@ -369,9 +367,9 @@ impl Surface for BookSurface {
         // step from one to the next moves the pan by one row.
         Some(Crop {
             x: 0.0,
-            y: spread as f32 * (self.slot.h + ROW_GAP) * self.base,
-            w: self.canvas.w * self.base,
-            h: self.slot.h * self.base,
+            y: spread as f32 * (self.slot.h + ROW_GAP) * self.units_per_point,
+            w: self.canvas.w * self.units_per_point,
+            h: self.slot.h * self.units_per_point,
         })
     }
 }
@@ -475,7 +473,7 @@ mod tests {
     #[test]
     fn a_small_book_keeps_point_size_and_stacks_every_spread() {
         let b = book(vec![(100.0, 200.0), (120.0, 180.0)]);
-        assert_eq!(b.base(), 1.0);
+        assert_eq!(b.units_per_point(), 1.0);
         assert_eq!(b.rows(), 2);
         // Three rows of the tallest page, two slots of the widest page.
         assert_eq!(
@@ -561,9 +559,9 @@ mod tests {
     fn a_long_book_bakes_a_base_scale_that_fits_one_texture() {
         // 40 pages of a letter page make a book taller than any texture.
         let b = book(vec![(612.0, 792.0); 40]);
-        assert!(b.base() < 1.0, "base {}", b.base());
+        assert!(b.units_per_point() < 1.0, "base {}", b.units_per_point());
         assert_eq!(b.rows(), 21);
-        assert_eq!(b.bounds(0).unwrap().h, 792.0 * 21.0 * b.base());
+        assert_eq!(b.bounds(0).unwrap().h, 792.0 * 21.0 * b.units_per_point());
         let img = b.render_whole(0, 1.0).unwrap();
         assert_eq!(img.height().raw(), MAX_TEXTURE_SIDE);
         assert!(img.width().raw() < img.height().raw());
@@ -572,13 +570,13 @@ mod tests {
         let region = Crop {
             x: 0.0,
             y: 0.0,
-            w: 100.0 * b.base(),
-            h: 100.0 * b.base(),
+            w: 100.0 * b.units_per_point(),
+            h: 100.0 * b.units_per_point(),
         };
         let patch = b.render(View::region(0, region, 4.0)).unwrap();
         assert_eq!(
             patch.width().raw(),
-            (100.0 * b.base() * 4.0).floor().max(1.0) as u32
+            (100.0 * b.units_per_point() * 4.0).floor().max(1.0) as u32
         );
     }
 

@@ -45,33 +45,32 @@ const FADE_SECS: f64 = 0.4;
 /// brightness.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Config {
-    /// The long side of the tiny blurred copy, in pixels.
-    px: LongSide,
+    /// The long side of the tiny blurred copy.
+    long_side: LongSide,
     /// The brightness the background keeps, as a 0..=1 multiplier.
     dim: f32,
 }
 
 impl Config {
-    /// Read the settings from the environment, or `None` when the gimmick is
-    /// off.
+    /// Read the settings from the environment when the gimmick is on.
     ///
     /// The environment is read here and nowhere else, so a worker never
     /// re-parses it.
     #[must_use]
-    pub fn from_env() -> Option<Self> {
+    pub fn from_env_if_enabled() -> Option<Self> {
         // A strict opt-in: exactly `VV_BLUR_BG=1`.
         std::env::var_os("VV_BLUR_BG")
             .is_some_and(|v| v == "1")
             .then(|| Self {
-                px: parse_px(std::env::var("VV_BLUR_PX").ok().as_deref()),
+                long_side: parse_px(std::env::var("VV_BLUR_PX").ok().as_deref()),
                 dim: parse_dim(std::env::var("VV_BG_DIM").ok().as_deref()),
             })
     }
 
-    /// The long side of the tiny blurred copy, in pixels.
+    /// The long side of the tiny blurred copy.
     #[must_use]
-    pub const fn px(self) -> LongSide {
-        self.px
+    pub const fn long_side(self) -> LongSide {
+        self.long_side
     }
 
     /// The brightness the background keeps, as a 0..=1 multiplier.
@@ -83,7 +82,7 @@ impl Config {
     /// The tiny blurred copy of `image`, at the configured long side.
     #[must_use]
     pub fn blur(self, image: &DecodedImage) -> DecodedImage {
-        small_blur(image, self.px)
+        small_blur(image, self.long_side)
     }
 }
 
@@ -172,10 +171,10 @@ pub struct BlurBg {
 }
 
 impl BlurBg {
-    /// None when the gimmick is off.
+    /// The background gimmick when the environment turns it on.
     #[must_use]
-    pub fn from_env() -> Option<BlurBg> {
-        let config = Config::from_env()?;
+    pub fn from_env_if_enabled() -> Option<BlurBg> {
+        let config = Config::from_env_if_enabled()?;
         Some(BlurBg {
             dim: config.dim(),
             tex: None,

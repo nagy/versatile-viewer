@@ -254,7 +254,7 @@ impl Launch {
         };
         // Blur-background source for a single-plane launch: computed while the
         // RGBA buffer still exists, so the window uploads it once.
-        let blur = match (&decoded, blurbg::Config::from_env()) {
+        let blur = match (&decoded, blurbg::Config::from_env_if_enabled()) {
             (Some(image), Some(config)) => Some(config.blur(image)),
             _ => None,
         };
@@ -496,7 +496,7 @@ impl Viewer {
                 ramps: Ramps::default(),
                 pixelated: false,
                 loader: None,
-                blur_bg: BlurBg::from_env(),
+                blur_bg: BlurBg::from_env_if_enabled(),
                 source: None,
                 source_plane: 0,
                 open_box: None,
@@ -1193,7 +1193,7 @@ impl Viewer {
             {
                 // Fold in this frame's motion before the lock is released
                 // (the drag block below no longer runs once capture ends).
-                let delta = self.input.delta();
+                let delta = self.input.pointer_travel();
                 self.drag_virtual.x += delta.x;
                 self.drag_virtual.y += delta.y;
                 let f_dragged = (self.drag_virtual - self.grab_pos).length() > TAP_SLACK;
@@ -1619,7 +1619,7 @@ impl Viewer {
                 // The step comes from this frame's travel, so a held pointer
                 // holds the scale.
                 // The wheel below still zooms with no Shift.
-                let delta = self.input.delta();
+                let delta = self.input.pointer_travel();
                 let zoom_drag = self.f_capture && self.f_zoom_capture;
                 if zoom_drag {
                     // The grab edge seeds the anchor, and the drift carries it
@@ -1769,7 +1769,7 @@ impl Viewer {
                 // is vertical, so the pan stays put.
                 let dragging = self.pointer_captured;
                 if dragging {
-                    let delta = self.input.delta();
+                    let delta = self.input.pointer_travel();
                     // The virtual cursor follows physical travel 1:1 (self.debug
                     // crosshair).
                     self.drag_virtual.x += delta.x;
@@ -1957,7 +1957,7 @@ impl Viewer {
                     if self.debug {
                         eprintln!(
                             "vv: region grab at ({:.0},{:.0}) -> image ({:.0},{:.0}), {:?}",
-                            mouse.x, mouse.y, drag.anchor.x, drag.anchor.y, drag.kind
+                            mouse.x, mouse.y, drag.anchor.x, drag.anchor.y, drag.press
                         );
                     }
                 }
@@ -2104,7 +2104,12 @@ impl Viewer {
             // A patch that still matches the view scale lands on whole
             // window pixels (see `draw_patch`), so its text stays sharp.
             if let Some(frame) = self.st.frame(Vec2::new(win_w, win_h)) {
-                for patch in self.st.crop.iter().chain(self.st.prefetch.held()) {
+                for patch in self
+                    .st
+                    .crop
+                    .iter()
+                    .chain(self.st.prefetch.on_screen_patch())
+                {
                     draw_patch(r, patch, &frame, view_filter(self.st.pixelated));
                 }
             }

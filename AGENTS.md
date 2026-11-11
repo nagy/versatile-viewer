@@ -41,7 +41,7 @@ The binary name is `vv`.
   The cover page sits alone in the right slot of row 0, then the pages pair up: `1|2`, `3|4`, one spread under the next.
   `ROW_GAP` is 0, so the spreads stack edge to edge; `GUTTER` (0.5 pt, about half a screen pixel at a fit view of an A4 page) separates the two pages of a spread, and both gaps stay transparent, so `BACKGROUND` shows through.
   Every spread measures the widest and tallest page of the document, so the pages line up in two columns down the whole book, and a page narrower than the widest one centers in its slot.
-  The book keeps **base units**, not points: `BookSurface::base` bakes the scale that lands the whole book inside `MAX_TEXTURE_SIDE` and `MAX_RENDER_PIXELS` at scale 1.0, because `bounds` must match a scale-1.0 render and the main thread never resizes a buffer.
+  The book keeps **base units**, not points: `BookSurface::units_per_point` bakes the scale that lands the whole book inside `MAX_TEXTURE_SIDE` and `MAX_RENDER_PIXELS` at scale 1.0, because `bounds` must match a scale-1.0 render and the main thread never resizes a buffer.
   `render` converts the request back to points, walks only the spreads the rect touches, and asks each page for its own part at one shared scale.
   `Surface::open_box` names the box a fresh open frames: a book answers its first spread, every other source answers `None`.
   The fit measures that box, so whichever side binds decides and the cover page shows whole.
@@ -93,11 +93,11 @@ The binary name is `vv`.
   A raster plane measures the capped size it renders, so `bounds` and the pixels of a scale-1.0 render agree.
   The trait decisions live in `docs/adr/0001-surface-one-region-based-render-trait.md`.
 - The image view repaints the region its window shows, from the open surface, when `Surface::can_refine` says a sharper picture is possible.
-  `src/region.rs` holds the pure geometry and policy: `Frame` (`to_screen`, `to_image`, `crop`), `Crop`, `Patch`, `worth_painting`, `holds`, `covers`, `MARGIN`, `SCALE_SLACK`, `QUIET`.
-  `holds` reads the two rects alone and answers whether the painted rect reaches every source pixel the window shows; the draw asks it (`patch_covers` in `src/view.rs`) before it skips the whole-image texture, and so does `worth_painting`.
+  `src/region.rs` holds the pure geometry and policy: `Frame` (`to_screen`, `to_image`, `crop`), `Crop`, `Patch`, `worth_painting`, `patch_reaches_window`, `patch_covers_at_scale`, `MARGIN`, `SCALE_SLACK`, `QUIET`.
+  `patch_reaches_window` reads the two rects alone and answers whether the painted rect reaches every source pixel the window shows; the draw asks it (`patch_covers` in `src/view.rs`) before it skips the whole-image texture, and so does `worth_painting`.
   `Frame` bundles one window mapping (`img`, `win`, `pan`, `scale`, `angle`), and `ViewState::frame` (`main.rs`) builds it, so a caller never re-derives the transform and never mixes window units with source units.
   The mapping and the crop are methods of `Frame`, so no free function takes the five numbers loose and no call site can swap the scale for the angle; `ViewState::frame_at` answers the same frame for a pan the view aims at (a glide target) rather than the one on screen.
-  A `Patch` is a `Crop` beside the scale its pixels were painted at, so `worth_painting` and `covers` compare two values instead of a rect and two loose scales; `CropState`, `LoadPlan`-driven prefetch state and the crop messages carry one.
+  A `Patch` is a `Crop` beside the scale its pixels were painted at, so `worth_painting` and `patch_covers_at_scale` compare two values instead of a rect and two loose scales; `CropState`, `LoadPlan`-driven prefetch state and the crop messages carry one.
   A patch covers the window plus `MARGIN` (0.25 of each side), in source pixels, so the paint area follows the window and a deep zoom costs no more pixels than a shallow one.
   `Surface::render` paints that rect at the view scale, so the patch lands 1:1 on screen; a `VectorSurface` paints only those pixels, and a `PdfSurface` rasterizes only them.
   The region rect lives in surface units: base raster pixels for a vector file (`Vector::declared_per_base` converts to the tree's declared units), points for a PDF page.
@@ -117,13 +117,13 @@ The binary name is `vv`.
   A spread step paints the region it lands on before the glide ends: `ViewState::prefetch_spread` (`main.rs`) renders the target rect on a `rayon` worker at the press edge, so the glide never waits on it.
   The result rides `CropMsg::Prefetch` with a `prefetch_id` token into `ViewState::prefetch`, a second `CropState` that drops when the aim moved.
   `ViewState::prefetch_want` holds the aim still in flight, so `tick_crop` waits for it instead of starting a duplicate paint, and `PREFETCH_GIVE_UP` (3 s) bounds that wait for a worker that never answers.
-  The patch draws in place while it arrives, and `region::covers` adopts it into `crop` on the first frame that holds the window, so the landing frame skips `QUIET` and shows the sharp spread at once.
+  The patch draws in place while it arrives, and `region::patch_covers_at_scale` adopts it into `crop` on the first frame that holds the window, so the landing frame skips `QUIET` and shows the sharp spread at once.
   A resize or a pan away drops it, because a patch of an aim the view left would only linger as a stretched texture.
 - Grid extension filter: `src/grid.rs` `is_image_path` (also `pdf`, `typ` and `mmd`).
   Keep the crate features in sync (neither `pdf`, `typ` nor `mmd` is an image crate feature).
 - A grid cell holds an `EntrySource`, which is a path opened (and sniffed) lazily at decode time.
   What the cell draws is one `grid::Cell`: `Pending { placeholder }`, `Thumb(texture)` or `Failed(reason)`.
-  One value says whether the cell shows a thumb or an error square, so no cell holds both; `Cell::texture` answers the draw, `thumb` and `placeholder` answer one kind alone, and `is_cold` names a cell that waits for its first decode.
+  One value says whether the cell shows a thumb or an error square, so no cell holds both; `Cell::texture` answers the draw, `thumb` and `placeholder` answer one kind alone, and `awaits_first_decode` names a cell that waits for its first decode.
   One file is one cell, so a document cell shows page 0 and never a second page.
   `Grid::from_paths` builds a grid from a path list, and `Grid::from_dir` hands it the sorted directory listing.
   A single-file launch of a document hands it one path, so ESC still has a grid to return to.
@@ -137,7 +137,7 @@ The binary name is `vv`.
   Never add a main-thread resize: a large image then freezes the window for seconds.
   Downscale a borrowed buffer with `downscale_rgba_ref`, not `downscale_rgba` on a clone.
   `BlurBg::attach` and `upload` take `&DecodedImage`, so a caller never clones the blur buffer.
-  `blurbg::Config` holds the `VV_BLUR_BG` settings (`px`, `dim`) and `Config::from_env` answers `Option<Config>`, so `None` is the gimmick being off.
+  `blurbg::Config` holds the `VV_BLUR_BG` settings (`long_side`, `dim`) and `Config::from_env_if_enabled` answers `Option<Config>`, so `None` is the gimmick being off.
   The grid, the decode job and the loader carry that one `Option`, never a `blur_enabled` flag beside a size, and the environment is read once at the boundary instead of once per call.
   All pixel resize goes through `resample_rgba` (`src/lib.rs`), the `fast_image_resize` SIMD path with Lanczos3.
   Do not call `image::imageops::resize` for a downscale: it is several times slower.

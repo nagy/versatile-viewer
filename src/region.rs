@@ -105,7 +105,7 @@ impl Crop {
 
     /// Whether this rect covers all of `other`.
     #[must_use]
-    pub fn contains(&self, other: &Self) -> bool {
+    pub fn contains_rect(&self, other: &Self) -> bool {
         other.x >= self.x
             && other.y >= self.y
             && other.right() <= self.right()
@@ -191,7 +191,7 @@ impl Frame {
 
     /// Whether the frame names a plane the view can draw.
     #[must_use]
-    pub fn drawable(&self) -> bool {
+    pub fn has_drawable_plane(&self) -> bool {
         self.img.x > 0.0 && self.img.y > 0.0
     }
 
@@ -206,7 +206,7 @@ impl Frame {
     #[must_use]
     pub fn crop(&self, margin: f32) -> Crop {
         let margin = margin.max(0.0);
-        if !(self.drawable() && self.win.x > 0.0 && self.win.y > 0.0) {
+        if !(self.has_drawable_plane() && self.win.x > 0.0 && self.win.y > 0.0) {
             return Crop {
                 x: 0.0,
                 y: 0.0,
@@ -280,37 +280,38 @@ pub fn worth_painting(needed: &Patch, painted: Option<&Patch>) -> bool {
     let Some(painted) = painted else {
         return true;
     };
-    mismatched_scale(needed, painted) || !holds(needed, painted)
+    mismatched_scale(needed, painted) || !patch_reaches_window(needed, painted)
 }
 
 /// Whether a painted rect reaches every source pixel the window shows.
 ///
 /// The test reads the rects alone, so a patch stretched by a zoom still holds
 /// the window.
-/// [`covers`] adds the scale to it, and the draw asks this one: a patch that
-/// reaches the window alone may draw without the whole-image texture under it.
+/// [`patch_covers_at_scale`] adds the scale to it, and the draw asks this one:
+/// a patch that reaches the window alone may draw without the whole-image
+/// texture under it.
 #[must_use]
-pub fn holds(needed: &Patch, patch: &Patch) -> bool {
+pub fn patch_reaches_window(needed: &Patch, painted: &Patch) -> bool {
     if needed.rect.is_empty() {
         return false;
     }
-    patch.rect.contains(&needed.rect)
+    painted.rect.contains_rect(&needed.rect)
 }
 
-/// Whether a painted rect holds the region the window shows at its scale.
+/// Whether a painted rect reaches the window at the scale it shows.
 ///
-/// This is the inverse of [`worth_painting`]: the caller owns a patch of
-/// `patch` at `patch_scale`, and the view needs `needed` at `need_scale`.
+/// This is the inverse of [`worth_painting`]: the view needs `needed` at its
+/// own scale, and the patch on screen holds `painted` at another.
 /// A spread step paints its landing patch before the glide ends, and this test
 /// tells the view when that patch has become the one on screen.
 #[must_use]
-pub fn covers(needed: &Patch, patch: &Patch) -> bool {
-    holds(needed, patch) && !mismatched_scale(needed, patch)
+pub fn patch_covers_at_scale(needed: &Patch, painted: &Patch) -> bool {
+    patch_reaches_window(needed, painted) && !mismatched_scale(needed, painted)
 }
 
 /// Whether two patches disagree about the scale beyond [`SCALE_SLACK`].
-fn mismatched_scale(needed: &Patch, held: &Patch) -> bool {
-    needed.scale > held.scale * SCALE_SLACK || needed.scale * SCALE_SLACK < held.scale
+fn mismatched_scale(needed: &Patch, painted: &Patch) -> bool {
+    needed.scale > painted.scale * SCALE_SLACK || needed.scale * SCALE_SLACK < painted.scale
 }
 
 #[cfg(test)]
@@ -350,7 +351,7 @@ mod tests {
     fn the_margin_grows_the_rect_and_the_clip_bounds_it() {
         let plain = frame(Vec2::ZERO, 4.0, 0.0).crop(0.0);
         let grown = frame(Vec2::ZERO, 4.0, 0.0).crop(MARGIN);
-        assert!(grown.contains(&plain));
+        assert!(grown.contains_rect(&plain));
         assert!(grown.w > plain.w && grown.h > plain.h);
         // A pan far outside the document still clips to it.
         let out = frame(Vec2::new(9000.0, 9000.0), 1.0, 0.0).crop(MARGIN);
@@ -425,9 +426,9 @@ mod tests {
         let needed = Patch::new(frame(Vec2::ZERO, 4.0, 0.0).crop(0.0), 4.0);
         let painted = Patch::new(frame(Vec2::ZERO, 4.0, 0.0).crop(MARGIN), 4.0);
         // The margin holds the window at the same scale.
-        assert!(covers(&needed, &painted));
+        assert!(patch_covers_at_scale(&needed, &painted));
         // A scale past the slack, and a rect that misses the window, fail.
-        assert!(!covers(
+        assert!(!patch_covers_at_scale(
             &needed,
             &Patch {
                 scale: 4.1,
@@ -435,9 +436,11 @@ mod tests {
             }
         ));
         let far = Patch::new(frame(Vec2::new(300.0, 0.0), 4.0, 0.0).crop(MARGIN), 4.0);
-        assert!(!covers(&needed, &far));
+        assert!(!patch_covers_at_scale(&needed, &far));
         // The test and the paint rule never both fire.
-        assert!(!(covers(&needed, &painted) && worth_painting(&needed, Some(&painted))));
+        assert!(
+            !(patch_covers_at_scale(&needed, &painted) && worth_painting(&needed, Some(&painted)))
+        );
     }
 
     #[test]
@@ -445,22 +448,22 @@ mod tests {
         let wide = frame(Vec2::ZERO, 4.0, 0.0);
         let needed = Patch::new(wide.crop(0.0), 4.0);
         let covering = Patch::new(wide.crop(MARGIN), 4.0);
-        assert!(holds(&needed, &covering));
+        assert!(patch_reaches_window(&needed, &covering));
         // Zoomed out, the window shows more than the patch painted, so the
         // patch holds a part and the whole image must draw under it.
         let out = frame(Vec2::ZERO, 1.0, 0.0);
         let wide_need = Patch::new(out.crop(0.0), 1.0);
-        assert!(!holds(&wide_need, &covering));
+        assert!(!patch_reaches_window(&wide_need, &covering));
         // A patch at another scale still holds the rect it reaches, and the
-        // scale is `covers`'s business alone.
-        assert!(holds(
+        // scale is `patch_covers_at_scale`'s business alone.
+        assert!(patch_reaches_window(
             &needed,
             &Patch {
                 scale: 8.0,
                 ..covering
             }
         ));
-        assert!(!covers(
+        assert!(!patch_covers_at_scale(
             &needed,
             &Patch {
                 scale: 8.0,
@@ -477,7 +480,7 @@ mod tests {
             },
             4.0,
         );
-        assert!(!holds(&none, &covering));
+        assert!(!patch_reaches_window(&none, &covering));
     }
 }
 
@@ -530,7 +533,7 @@ mod property_tests {
             let frame = frame(Vec2::new(px, py), scale, angle);
             let painted = frame.crop(MARGIN);
             let needed = frame.crop(0.0);
-            prop_assert!(painted.contains(&needed));
+            prop_assert!(painted.contains_rect(&needed));
             prop_assert!(painted.x >= 0.0 && painted.y >= 0.0);
             prop_assert!(painted.right() <= 1024.0 + 1e-3);
             prop_assert!(painted.bottom() <= 512.0 + 1e-3);

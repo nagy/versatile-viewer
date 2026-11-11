@@ -193,7 +193,7 @@ impl Inst {
 }
 
 /// One run of instances that share a bind group.
-struct Call {
+struct DrawCall {
     group: Arc<wgpu::BindGroup>,
     start: u32,
     len: u32,
@@ -211,7 +211,7 @@ pub struct Renderer {
     instances: wgpu::Buffer,
     capacity: u32,
     insts: Vec<Inst>,
-    calls: Vec<Call>,
+    calls: Vec<DrawCall>,
     size: (u32, u32),
     /// The color the frame clears to, which the view sets every frame.
     clear: Color,
@@ -444,7 +444,7 @@ impl Renderer {
         }
         let start = self.insts.len() as u32;
         self.insts.push(inst);
-        self.calls.push(Call {
+        self.calls.push(DrawCall {
             group,
             start,
             len: 1,

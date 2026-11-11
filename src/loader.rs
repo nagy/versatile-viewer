@@ -126,9 +126,9 @@ pub enum DecodeMsg {
 }
 
 impl DecodeMsg {
-    /// The pixel size of the frame this message carries, when it carries one.
+    /// The frame size this message carries, when it carries one.
     #[must_use]
-    pub fn dims(&self) -> Option<(ImgW, ImgH)> {
+    pub fn frame_size(&self) -> Option<(ImgW, ImgH)> {
         match self {
             Self::Header { width, height } => Some((*width, *height)),
             Self::Preview { frame, .. } | Self::Done { frame, .. } => {
@@ -184,7 +184,7 @@ impl Loader {
         // (the receiver dropped).
         // The gimmick settings are parsed once per load, so a worker never
         // reads the environment.
-        let blur = blurbg::Config::from_env();
+        let blur = blurbg::Config::from_env_if_enabled();
         let uploader = uploader.clone();
         std::thread::spawn(move || {
             match stream(
