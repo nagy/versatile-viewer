@@ -1402,7 +1402,7 @@ impl Grid {
         let col = (mx / (cw + GAP)).floor();
         let row = (my / (ch + GAP)).floor();
         let cell = Rect::new(col * (cw + GAP), row * (ch + GAP), cw, ch);
-        if col >= 0.0 && row >= 0.0 && col < l.cols as f32 && cell.contains(mx, my) {
+        if col >= 0.0 && row >= 0.0 && col < l.cols as f32 && cell.contains_point(mx, my) {
             let idx = row as usize * l.cols + col as usize;
             if idx < self.entries.len() {
                 return Some(idx);

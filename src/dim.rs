@@ -76,8 +76,8 @@ macro_rules! float_newtype {
 /// assert_eq!((r.right(), r.bottom()), (40.0, 60.0));
 /// // The square sits centered inside the rectangle.
 /// assert_eq!(r.center_square(), Rect::new(10.0, 25.0, 30.0, 30.0));
-/// assert!(r.contains(25.0, 40.0));
-/// assert!(!r.contains(41.0, 40.0));
+/// assert!(r.contains_point(25.0, 40.0));
+/// assert!(!r.contains_point(41.0, 40.0));
 /// // The origin that keeps a turned rect on its own dest position.
 /// assert_eq!(r.center_origin(), Vec2::new(15.0, 20.0));
 /// ```
@@ -126,7 +126,7 @@ impl Rect {
 
     /// Is the point inside the rectangle, edges included?
     #[must_use]
-    pub const fn contains(self, px: f32, py: f32) -> bool {
+    pub const fn contains_point(self, px: f32, py: f32) -> bool {
         px >= self.x && py >= self.y && px <= self.right() && py <= self.bottom()
     }
 
