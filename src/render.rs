@@ -7,7 +7,7 @@
 //!
 //! # One instance is four corners
 //!
-//! An [`Inst`] names four window-space corners, a source rect in normalized
+//! An [`QuadInstance`] names four window-space corners, a source rect in normalized
 //! texture coordinates and a tint.
 //! The corners arrive already turned, so the shader needs no trigonometry: the
 //! CPU turns a picture through [`crate::draw::Quad::turned`], which is one
@@ -58,7 +58,7 @@ struct Globals {
 
 @group(0) @binding(0) var<uniform> globals: Globals;
 
-struct Inst {
+struct QuadInstance {
     @location(0) p0: vec2f,
     @location(1) p1: vec2f,
     @location(2) p2: vec2f,
@@ -74,7 +74,7 @@ struct VOut {
 };
 
 @vertex
-fn vmain(@builtin(vertex_index) index: u32, inst: Inst) -> VOut {
+fn vmain(@builtin(vertex_index) index: u32, inst: QuadInstance) -> VOut {
     var points = array<vec2f, 4>(inst.p0, inst.p1, inst.p2, inst.p3);
     var corners = array<vec2f, 4>(
         vec2f(0.0, 0.0), vec2f(1.0, 0.0), vec2f(1.0, 1.0), vec2f(0.0, 1.0),
@@ -108,7 +108,7 @@ fn fmain(in: VOut) -> @location(0) vec4f {
 /// One quad: four window-space corners, a source rect and a tint.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
-pub struct Inst {
+pub struct QuadInstance {
     /// The corners, around the perimeter, in window pixels.
     pub p: [[f32; 2]; 4],
     /// `u0, v0, u1, v1` of the source rect, normalized to the texture.
@@ -117,7 +117,7 @@ pub struct Inst {
     pub tint: [f32; 4],
 }
 
-impl Inst {
+impl QuadInstance {
     /// A solid quad over the one-by-one white texture.
     #[must_use]
     pub fn solid(quad: Quad, color: Color) -> Self {
@@ -210,7 +210,7 @@ pub struct Renderer {
     white: Texture,
     instances: wgpu::Buffer,
     capacity: u32,
-    insts: Vec<Inst>,
+    insts: Vec<QuadInstance>,
     calls: Vec<DrawCall>,
     size: (u32, u32),
     /// The color the frame clears to, which the view sets every frame.
@@ -305,7 +305,7 @@ impl Renderer {
     pub fn fill(&mut self, quad: Quad, color: Color) {
         self.push(
             self.white.group(Filter::Nearest).clone(),
-            Inst::solid(quad, color),
+            QuadInstance::solid(quad, color),
         );
     }
 
@@ -428,13 +428,13 @@ impl Renderer {
         tint: Color,
         filter: Filter,
     ) {
-        let inst = Inst::textured(quad, src, texture.dims(), tint);
+        let inst = QuadInstance::textured(quad, src, texture.dims(), tint);
         self.push(texture.group(filter).clone(), inst);
     }
 
     /// Append one instance, merging it into the previous call when the bind
     /// group is the same.
-    fn push(&mut self, group: Arc<wgpu::BindGroup>, inst: Inst) {
+    fn push(&mut self, group: Arc<wgpu::BindGroup>, inst: QuadInstance) {
         if let Some(call) = self.calls.last_mut()
             && Arc::ptr_eq(&call.group, &group)
         {
@@ -652,7 +652,7 @@ fn pipeline(
             module: shader,
             entry_point: Some("vmain"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            buffers: &[Some(Inst::layout())],
+            buffers: &[Some(QuadInstance::layout())],
         },
         primitive: wgpu::PrimitiveState {
             // No culling, so a quad draws in either winding and a veil band
@@ -681,7 +681,7 @@ fn pipeline(
 fn instance_buffer(device: &wgpu::Device, capacity: u32) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("vv instances"),
-        size: u64::from(capacity) * std::mem::size_of::<Inst>() as u64,
+        size: u64::from(capacity) * std::mem::size_of::<QuadInstance>() as u64,
         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })
@@ -695,7 +695,7 @@ mod tests {
     /// The instance stride keeps every attribute inside its alignment.
     #[test]
     fn the_instance_stride_is_sixty_four_bytes() {
-        assert_eq!(std::mem::size_of::<Inst>(), 64);
+        assert_eq!(std::mem::size_of::<QuadInstance>(), 64);
     }
 
     /// Every attribute offset names the field it claims to.
@@ -705,14 +705,14 @@ mod tests {
     /// then drew fully transparent with no error anywhere.
     #[test]
     fn the_attribute_offsets_match_the_fields() {
-        let offsets = Inst::ATTRIBS.map(|attribute| attribute.offset);
+        let offsets = QuadInstance::ATTRIBS.map(|attribute| attribute.offset);
         let fields = [
-            std::mem::offset_of!(Inst, p) as u64,
-            std::mem::offset_of!(Inst, p) as u64 + 8,
-            std::mem::offset_of!(Inst, p) as u64 + 16,
-            std::mem::offset_of!(Inst, p) as u64 + 24,
-            std::mem::offset_of!(Inst, src) as u64,
-            std::mem::offset_of!(Inst, tint) as u64,
+            std::mem::offset_of!(QuadInstance, p) as u64,
+            std::mem::offset_of!(QuadInstance, p) as u64 + 8,
+            std::mem::offset_of!(QuadInstance, p) as u64 + 16,
+            std::mem::offset_of!(QuadInstance, p) as u64 + 24,
+            std::mem::offset_of!(QuadInstance, src) as u64,
+            std::mem::offset_of!(QuadInstance, tint) as u64,
         ];
         assert_eq!(offsets, fields);
     }
@@ -721,7 +721,7 @@ mod tests {
     #[test]
     fn a_textured_instance_normalizes_its_source() {
         let quad = Quad::rect(Rect::new(0.0, 0.0, 10.0, 20.0));
-        let inst = Inst::textured(
+        let inst = QuadInstance::textured(
             quad,
             Rect::new(5.0, 10.0, 20.0, 40.0),
             (40, 80),
@@ -736,7 +736,7 @@ mod tests {
     /// A solid instance covers the quad and keeps the tint as straight alpha.
     #[test]
     fn a_solid_instance_carries_the_tint() {
-        let inst = Inst::solid(
+        let inst = QuadInstance::solid(
             Quad::rect(Rect::new(1.0, 2.0, 3.0, 4.0)),
             Color::new(0, 51, 255, 128),
         );

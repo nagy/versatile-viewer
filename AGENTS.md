@@ -267,7 +267,7 @@ The binary name is `vv`.
   The device's own `destroy` is not a loss, because the process is on its way out.
 - The present mode defaults to `Fifo`, which never tears and paces the loop to the refresh rate; `VV_PRESENT=fifo|relaxed|mailbox|immediate` picks another one.
   `desired_maximum_frame_latency` stays 1 (`gpu::DEFAULT_LATENCY`), the classic double buffer.
-- An instance is four window-space corners, a source rect and a tint (`render::Inst`).
+- An instance is four window-space corners, a source rect and a tint (`render::QuadInstance`).
   The corners arrive already turned, so the shader carries no trigonometry and a turned quad costs one `sin_cos` on the CPU.
   A triangle is a quad whose last corner repeats the first, so the second triangle has no area and the call needs no second primitive.
   A solid fill samples the one-by-one white texture, so a rectangle, a veil band, a border and a picture are the same draw.
