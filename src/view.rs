@@ -383,17 +383,21 @@ pub enum OpenAlign {
 pub enum Prefetch {
     /// Nothing prefetched.
     Idle,
-    /// A worker paints `patch` under token `id`, from `at` on.
-    Painting {
-        /// The rect and the scale the worker paints.
-        patch: region::Patch,
-        /// The token the result must carry, so an earlier aim drops.
-        id: u64,
-        /// When the paint started, so [`PREFETCH_GIVE_UP`] bounds the wait.
-        at: Instant,
-    },
+    /// A worker still paints the aim.
+    Painting(Painting),
     /// The patch of a step, drawn in place until the glide lands.
     Ready(CropState),
+}
+
+/// A spread-step patch whose worker still paints it.
+#[derive(Debug, Clone, Copy)]
+pub struct Painting {
+    /// The rect and the scale the worker paints.
+    pub patch: region::Patch,
+    /// The token the result must carry, so an earlier aim drops.
+    pub id: u64,
+    /// When the paint started, so [`PREFETCH_GIVE_UP`] bounds the wait.
+    pub started: Instant,
 }
 
 impl Prefetch {
@@ -402,15 +406,15 @@ impl Prefetch {
     pub fn on_screen_patch(&self) -> Option<&CropState> {
         match self {
             Self::Ready(state) => Some(state),
-            Self::Idle | Self::Painting { .. } => None,
+            Self::Idle | Self::Painting(_) => None,
         }
     }
 
-    /// The aim a worker paints now, with the token and the start time.
+    /// The aim a worker paints now.
     #[must_use]
-    pub fn painting(&self) -> Option<(region::Patch, u64, Instant)> {
+    pub fn painting(&self) -> Option<Painting> {
         match self {
-            Self::Painting { patch, id, at } => Some((*patch, *id, *at)),
+            Self::Painting(painting) => Some(*painting),
             Self::Idle | Self::Ready(_) => None,
         }
     }
@@ -632,11 +636,11 @@ impl ViewState {
             return;
         }
         let id = self.next_prefetch_id();
-        self.prefetch = Prefetch::Painting {
+        self.prefetch = Prefetch::Painting(Painting {
             patch,
             id,
-            at: Instant::now(),
-        };
+            started: Instant::now(),
+        });
         let (generation, tx) = (self.crop_gen, self.crop_tx.clone());
         let plane = self.source_plane;
         let uploader = uploader.clone();
@@ -782,10 +786,10 @@ impl ViewState {
         // A prefetch of this very region is on its way, so the paint that would
         // duplicate it waits instead.
         // A worker that never answers stops the wait at [`PREFETCH_GIVE_UP`].
-        if let Some((aim, _, at)) = self.prefetch.painting()
-            && region::patch_covers_at_scale(&needed, &aim)
+        if let Some(painting) = self.prefetch.painting()
+            && region::patch_covers_at_scale(&needed, &painting.patch)
         {
-            if now.duration_since(at) < PREFETCH_GIVE_UP {
+            if now.duration_since(painting.started) < PREFETCH_GIVE_UP {
                 return;
             }
             self.prefetch = Prefetch::Idle;
@@ -875,7 +879,7 @@ impl ViewState {
                     // drops, so an old spread never lands on the new one.
                     let aimed = matches!(
                         self.prefetch,
-                        Prefetch::Painting { id: want, .. } if want == id
+                        Prefetch::Painting(Painting { id: want, .. }) if want == id
                     );
                     if generation != self.crop_gen || !aimed {
                         continue;
@@ -885,7 +889,7 @@ impl ViewState {
                 CropMsg::PrefetchFailed { generation, id } => {
                     let aimed = matches!(
                         self.prefetch,
-                        Prefetch::Painting { id: want, .. } if want == id
+                        Prefetch::Painting(Painting { id: want, .. }) if want == id
                     );
                     if generation == self.crop_gen && aimed {
                         // The ordinary path paints after the glide instead.

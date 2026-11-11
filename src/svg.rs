@@ -36,6 +36,7 @@ use std::{
 use crate::{
     DecodeError, DecodedImage, MAX_TEXTURE_SIDE, cap_texture_side,
     dim::{ImgH, ImgW, LongSide},
+    surface::Size,
 };
 
 /// The smallest long side the code bakes for a vector file.
@@ -70,15 +71,15 @@ pub struct Vector {
 
 impl Vector {
     /// The declared size, guarded against zero, negative and non-finite.
-    fn declared(&self) -> (f32, f32) {
+    fn declared_size(&self) -> Size {
         let size = self.tree.size();
         guard(size.width(), size.height())
     }
 
-    /// The longest declared side, guarded like [`Self::declared`].
+    /// The longest declared side, guarded like [`Self::declared_size`].
     fn declared_long(&self) -> f32 {
-        let (w, h) = self.declared();
-        w.max(h)
+        let size = self.declared_size();
+        size.w.max(size.h)
     }
 
     /// The declared units that one base raster pixel spans.
@@ -87,13 +88,13 @@ impl Vector {
     /// units, so a region that arrives in base pixels converts with this
     /// factor.
     fn declared_per_base(&self) -> f32 {
-        let (w, h) = self.declared();
+        let size = self.declared_size();
         let (bw, bh) = self.base_size();
         let base_long = bw.raw().max(bh.raw());
         if base_long == 0 {
             return 1.0;
         }
-        w.max(h) / base_long as f32
+        size.w.max(size.h) / base_long as f32
     }
 
     /// The pixel size of the base raster.
@@ -104,7 +105,7 @@ impl Vector {
     /// a cold one measure the same picture.
     #[must_use]
     pub fn base_size(&self) -> (ImgW, ImgH) {
-        scale_to(self.declared(), base_side(self.declared_long()))
+        scale_to(self.declared_size(), base_side(self.declared_long()))
     }
 
     /// Paint the tree at the base raster size.
@@ -187,10 +188,11 @@ impl Vector {
     ///
     /// The function errors when the pixmap allocation fails.
     pub fn rasterize(&self, long: LongSide) -> Result<DecodedImage, DecodeError> {
-        let (w, h) = scale_to(self.declared(), long);
+        let (w, h) = scale_to(self.declared_size(), long);
         let (rw, rh) = (w.raw(), h.raw());
         let mut pixmap = tiny_skia::Pixmap::new(rw, rh).ok_or(DecodeError::Raster)?;
-        let (dw, dh) = self.declared();
+        let size = self.declared_size();
+        let (dw, dh) = (size.w, size.h);
         let transform = tiny_skia::Transform::from_scale(rw as f32 / dw, rh as f32 / dh);
         resvg::render(&self.tree, transform, &mut pixmap.as_mut());
         let mut data = pixmap.take();
@@ -222,8 +224,8 @@ pub(crate) fn base_side(declared_long: f32) -> LongSide {
 
 /// The pixel size of a raster whose long side lands on `long` and whose shape
 /// matches `size`.
-fn scale_to(size: (f32, f32), long: LongSide) -> (ImgW, ImgH) {
-    let (w, h) = size;
+fn scale_to(size: Size, long: LongSide) -> (ImgW, ImgH) {
+    let (w, h) = (size.w, size.h);
     let scale = long.raw().max(1) as f32 / w.max(h);
     let limit = MAX_TEXTURE_SIDE as f32;
     let rw = (w * scale).round().clamp(1.0, limit);
@@ -232,12 +234,15 @@ fn scale_to(size: (f32, f32), long: LongSide) -> (ImgW, ImgH) {
 }
 
 /// Replace a zero, negative or non-finite size with the SVG default.
-fn guard(w: f32, h: f32) -> (f32, f32) {
+fn guard(w: f32, h: f32) -> Size {
     let sane = |v: f32| v.is_finite() && v > 0.0;
     if sane(w) && sane(h) {
-        (w, h)
+        Size { w, h }
     } else {
-        (DEFAULT_SIDE, DEFAULT_SIDE)
+        Size {
+            w: DEFAULT_SIDE,
+            h: DEFAULT_SIDE,
+        }
     }
 }
 
@@ -466,6 +471,10 @@ mod tests {
         enc.finish().expect("gzip finish")
     }
 
+    fn size(w: f32, h: f32) -> Size {
+        Size { w, h }
+    }
+
     #[test]
     fn sniffs_a_document_behind_a_prolog() {
         assert!(looks_like_svg(SQUARE.as_bytes()));
@@ -517,15 +526,15 @@ mod tests {
     #[test]
     fn a_raster_keeps_the_aspect_and_lands_on_the_target() {
         assert_eq!(
-            scale_to((200.0, 100.0), LongSide::new(512)),
+            scale_to(size(200.0, 100.0), LongSide::new(512)),
             (ImgW::new(512), ImgH::new(256))
         );
         assert_eq!(
-            scale_to((100.0, 200.0), LongSide::new(512)),
+            scale_to(size(100.0, 200.0), LongSide::new(512)),
             (ImgW::new(256), ImgH::new(512))
         );
         assert_eq!(
-            scale_to((1.0, 1000.0), LongSide::new(512)),
+            scale_to(size(1.0, 1000.0), LongSide::new(512)),
             (ImgW::new(1), ImgH::new(512))
         );
     }

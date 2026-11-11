@@ -221,7 +221,8 @@ impl Cache {
     ///
     /// The function errors on a miss, a changed source, or a corrupt file.
     pub fn load(&self, path: &Path, long_side: LongSide) -> Result<CachedThumb, CacheError> {
-        let (file, canonical) = self.entry(path, long_side)?;
+        let canonical = Self::canonical_source(path)?;
+        let file = self.entry_file(&canonical, long_side)?;
         let bytes = fs::read(&file).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 CacheError::NotFound(e)
@@ -253,7 +254,8 @@ impl Cache {
         long_side: LongSide,
     ) -> Result<(Placeholder, (ImgW, ImgH)), CacheError> {
         use std::{io::Read as _, os::unix::ffi::OsStrExt as _};
-        let (file, canonical) = self.entry(path, long_side)?;
+        let canonical = Self::canonical_source(path)?;
+        let file = self.entry_file(&canonical, long_side)?;
         let mut file = fs::File::open(&file).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 CacheError::NotFound(e)
@@ -294,7 +296,8 @@ impl Cache {
         thumb: &DecodedImage,
         image: (ImgW, ImgH),
     ) -> Result<(), CacheError> {
-        let (file, canonical) = self.entry(path, long_side)?;
+        let canonical = Self::canonical_source(path)?;
+        let file = self.entry_file(&canonical, long_side)?;
         let bytes = encode_entry(&Stamp::of(&canonical)?, &canonical, thumb, image)?;
         let len = bytes.len() as u64;
         // One atomic add owns the budget, so two workers never overshoot it.
@@ -325,24 +328,27 @@ impl Cache {
     /// off or the path does not resolve.
     #[must_use]
     pub fn file(&self, path: &Path, long_side: LongSide) -> Option<PathBuf> {
-        self.entry(path, long_side).ok().map(|(file, _)| file)
+        let canonical = Self::canonical_source(path).ok()?;
+        self.entry_file(&canonical, long_side).ok()
     }
 
-    /// The cache file and the canonical source path for `path` at
-    /// `long_side`.
+    /// The cache file of `canonical` at `long_side`.
     ///
-    /// The code hashes the canonical path, so the name is independent of the
+    /// The key hashes the canonical path, so the name is independent of the
     /// launch directory, and the file header stores the same path.
     ///
     /// # Errors
     ///
-    /// The function errors when the cache is off or the path does not
-    /// resolve.
-    fn entry(&self, path: &Path, long_side: LongSide) -> Result<(PathBuf, PathBuf), CacheError> {
+    /// The function errors when the cache is off.
+    fn entry_file(&self, canonical: &Path, long_side: LongSide) -> Result<PathBuf, CacheError> {
         let dir = self.dir.as_ref().ok_or(CacheError::Off)?;
-        let canonical = fs::canonicalize(path)?;
-        let file = dir.join(format!("{}.{EXT}", key(&canonical, long_side)));
-        Ok((file, canonical))
+        Ok(dir.join(format!("{}.{EXT}", key(canonical, long_side))))
+    }
+
+    /// The source path as the cache keys it, or an error when it does not
+    /// resolve.
+    fn canonical_source(path: &Path) -> Result<PathBuf, CacheError> {
+        Ok(fs::canonicalize(path)?)
     }
 }
 
