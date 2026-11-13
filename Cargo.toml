@@ -154,7 +154,7 @@ jixel = { version = "0.5.7", default-features = false, features = [
 # `raster-images` stays off, so an embedded JPEG/WebP/GIF in an <image>
 # element does not render; an embedded PNG does, because the `png` crate is a
 # core dependency of usvg.
-resvg = { version = "0.49.0", default-features = false, features = [
+resvg = { version = "0.50.0", default-features = false, features = [
   "system-fonts",
   "svgz",
   "text",
@@ -176,7 +176,7 @@ fontdb = { version = "0.24.0", default-features = false, features = [
 ], optional = true }
 # The parser under resvg: XML, CSS and the tree the painter consumes.
 # The same feature flags as resvg, so one version serves both.
-usvg = { version = "0.49.0", default-features = false, features = [
+usvg = { version = "0.50.0", default-features = false, features = [
   "system-fonts",
   "svgz",
   "text",
