@@ -54,7 +54,7 @@ image = { version = "0.25.10", default-features = false, features = [
 # `default-features = false` with only `vulkan` + `wgsl`: no DX12, Metal or GL
 # instance exists, so no library is opened for one. Issue 94691ce measured the
 # Vulkan loader alone at 28.9 ms of a 59.1 ms first frame.
-wgpu = { version = "30.0.1", default-features = false, features = [
+wgpu = { version = "30.0.2", default-features = false, features = [
   "vulkan",
   "wgsl",
 ] }
@@ -119,7 +119,7 @@ derive_more = { version = "2.1.1", default-features = false, features = [
 ] }
 # MCP (Model Context Protocol) server, spec revision 2026-07-28.
 # The server runs on a background thread and owns stdin and stdout.
-rmcp = { version = "3.9.0", default-features = false, features = [
+rmcp = { version = "3.10.0", default-features = false, features = [
   "server",
   "transport-io",
 ] }
@@ -208,7 +208,7 @@ tempfile = "3.27.0"
 proptest = "1.12.0"
 # The headless paint tests (`tests/gpu_offscreen.rs`) build a device with no
 # window and read the pixels back, so they name wgpu and pollster themselves.
-wgpu = { version = "30.0.1", default-features = false, features = [
+wgpu = { version = "30.0.2", default-features = false, features = [
   "vulkan",
   "wgsl",
 ] }
