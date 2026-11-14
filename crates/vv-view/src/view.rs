@@ -616,7 +616,7 @@ impl ViewState {
     /// the patch on screen.
     /// A step that misses a spread calls nothing, because it moves nothing.
     pub fn prefetch_spread(&mut self, win: Vec2, uploader: &Uploader) {
-        if self.source.is_none() || self.img.w <= 0.0 || self.view_loading {
+        if self.source.is_none() || self.img.w <= 0.0 {
             return;
         }
         let Some(scale) = self.view_scale else {
@@ -732,11 +732,16 @@ impl ViewState {
     /// The paint area follows the window, not the document, so a deep zoom
     /// costs no more than a shallow one.
     /// The guard is one paint in flight: resvg cannot cancel mid-paint.
+    /// A load in flight never holds the paint back: the patch covers what the
+    /// window shows on its own, and a book's whole-plane render can take
+    /// seconds, so waiting for it would only delay the sharp picture.
+    /// The paint waits for its source instead, which [`Self::request_source`]
+    /// opens on its own worker.
     /// A spread step paints its landing region before the glide ends, so a
     /// patch that already covers the window replaces the one on screen here and
     /// skips the debounce and the paint.
     pub fn tick_crop(&mut self, now: Instant, win: Vec2, uploader: &Uploader) {
-        if self.source.is_none() || self.crop_pending || self.img.w <= 0.0 || self.view_loading {
+        if self.source.is_none() || self.crop_pending || self.img.w <= 0.0 {
             return;
         }
         let Some(scale) = self.view_scale else {

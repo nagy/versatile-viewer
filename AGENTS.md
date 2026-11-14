@@ -62,6 +62,7 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   hayro 0.9 renders through an arbitrary `kurbo::Affine` (`render_into`), so the backend overrides `render` as a region anchor: it translates the requested rect to the origin and rasterizes only those pixels.
   A single render caps at `MAX_RENDER_PIXELS` (about 67 MP) and `MAX_RENDER_SIDE` (65535), and the returned scale is the clamped one.
   `previews` and `can_refine` answer true, so a coarse preview lands first and the image view repaints the window patch over a rested zoom.
+  A document opens as a book, so the loader paints its first spread first (see the book section below).
   Every render runs in `catch_unwind`, because a young rasterizer can panic on a malformed page and the job runs on a pool thread: a panic becomes `SurfaceError::Render`, never a crash.
   Each render builds a fresh `RenderCache`, because hayro's cache is not `Send`.
 - A document shows as a book, `crates/vv-source/src/book.rs` (`BookSurface`, `COVER_SLOTS`, `COVER_ON_RIGHT`, `GUTTER`, `ROW_GAP`, `SLOTS`, `MAX_RENDER_PIXELS`).
@@ -77,6 +78,11 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   `ViewState::open_pan` records the pan the align wrote, so a pan or a target that moved away from it marks a user move and the align stops.
   `ViewState::refit_open` arms the same framing again when the loader header or the first frame brings the real plane size.
   `open_book_surface` wraps when the source holds two planes or more; the grid thumbnail keeps the plain `open_surface`, so a cell shows page 0 and never a second page.
+  A book holds every page in one plane, so a whole-plane render interprets every page and its cost grows with the page count: a 20-page A4 document costs about 250 ms at scale 1.0, and still about 177 ms at a coarse preview scale, because the interpreter dominates the rasterizer.
+  `loader::stream_book` therefore never renders a book's whole plane at scale 1.0.
+  It paints `spread_box(0)` first and sends it as a `DecodeMsg::Preview` that carries `Some(region::Patch)`, so the spread the fit frames lands sharp after one spread render (about 22 ms) and the view adopts it as `ViewState::crop`.
+  The coarse whole book follows as the `Done` frame at `min(preview_px / long, 1.0)`, and that texture is the fallback the patch draws over.
+  A document launch renders nothing before the window either, because a book keeps the default window size: `Viewer::start_launch` starts a `Loader` for it, so the window maps at once.
 - Compile Typst through the converter seam.
   A converter rule claims `typ` and runs the `typst` CLI with `compile --format pdf - /dev/stdout`, and the PDF answer opens in the hayro backend, so a document keeps one plane per page, its preview and its refine.
   The `typst`, `typst-layout`, `typst-pdf` and `typst-assets` crates leave the tree: no document engine links into the binary, and a Typst source stays one rule of the config file.
@@ -138,6 +144,8 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   A patch that still matches the view scale draws on whole window pixels and takes its painted pixel size (`patch_dest` in `main.rs`), so the bilinear sample sits on texel centers and the pixels land 1:1 on the screen.
   A turned patch, and one a zoom stretched since its paint, keep the true rect through `draw_turned`.
   One paint in flight, because resvg cannot cancel mid-paint.
+  A load in flight never holds the paint back: `ViewState::tick_crop` reads `source` alone and not `view_loading`, because a book's whole-plane fallback costs one page render per page and waiting for it would hold the sharp picture back for seconds.
+  The paint waits for its source instead, which `request_source` opens on its own worker.
   `ViewState` keeps `Arc<dyn Surface>`, the `CropState` (texture, source rect, raster scale), the pending flag and one generation counter.
   Every open, every n/p step and every return to the grid bumps that counter, so the result of a worker for an earlier image drops.
   An image opened from the grid opens its own surface on a worker (`request_source`), because the grid keeps none, and keeps it only when `can_refine` is true.
@@ -439,7 +447,7 @@ A source that paints no paper carries it in its pixels, so no clear color ever h
   The grid keeps the launch title.
   A one-image directory skips the grid at launch.
   A converted source opens as one vector picture, never as a book, because it holds one plane.
-  A document launched directly (two planes or more) opens its whole book at once, over a one-cell grid that waits behind ESC, and its title stays the image title.
+  A document launched directly (two planes or more) paints its first spread at once and its whole book as it follows, over a one-cell grid that waits behind ESC, and its title stays the image title.
   A book keeps the default window size, because its canvas can stand wider than a screen and taller than a texture.
   ESC returns to the grid.
 - X11 WM_CLASS is `vv` (res_name and res_class), which the window name sets (`.with_name("vv", "vv")`).

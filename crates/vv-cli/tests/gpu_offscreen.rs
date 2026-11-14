@@ -787,6 +787,79 @@ fn a_stroke_rect_stays_inside_its_rect() {
     assert_eq!(pixels.at(16, 16), [0, 0, 0, 255], "hollow middle");
 }
 
+/// A document launch paints its first spread without a whole-plane render.
+///
+/// A book holds every page in one plane, so a scale-1.0 render of it costs one
+/// page render per page before the window opens.
+/// The launch therefore renders nothing, and the loader paints the spread the
+/// fit frames (see [`vv_view::loader`]), which is the sharp picture this test
+/// reads out of the host texture.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_document_launch_paints_its_first_spread() {
+    struct NullHost;
+
+    impl vv_view::viewer::Host for NullHost {
+        fn set_title(&mut self, _title: &str) {}
+
+        fn grab_pointer(&mut self) {}
+
+        fn release_pointer(&mut self) {}
+
+        fn place_pointer(&mut self, _at: Vec2) {}
+    }
+
+    let canvas = canvas!(64, 64);
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("book.pdf");
+    // Three pages, so the surface holds a book: a cover row and one spread.
+    std::fs::write(&path, page_pdf(3, [0, 128, 0])).expect("write the pdf");
+    let launch = vv_view::viewer::Launch::open(&path, true).expect("the launch opens");
+    // A book keeps the default window size: its canvas can stand taller than
+    // any texture.
+    assert_eq!(launch.window_size(), (1024, 768));
+    let mut viewer = vv_view::viewer::Viewer::new(
+        canvas.device.clone(),
+        canvas.queue.clone(),
+        FORMAT,
+        canvas.device.limits().max_texture_dimension_2d,
+        launch,
+        canvas.size,
+    );
+
+    let mut host = NullHost;
+    let mut green = false;
+    for _ in 0..240 {
+        let view = canvas
+            .target
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        viewer
+            .render(&mut host, &view, canvas.size, 0.016)
+            .expect("the frame renders");
+        let pixels = canvas.read();
+        if (0..64).any(|y| {
+            (0..64).any(|x| {
+                let [r, g, b, _] = pixels.at(x, y);
+                g > 100 && r < 80 && b < 80
+            })
+        }) {
+            green = true;
+            break;
+        }
+        // The spread paints on a worker, so the early frames show the clear
+        // color and the picture lands a moment later.
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
+    assert!(green, "the first spread lands in the host texture");
+    // The view measures the whole book, never the spread it paints: three
+    // 64x64 pages stack into a cover row and a spread row.
+    let (width, height) = viewer.image_size();
+    assert!(
+        width > 64 && height > 64,
+        "a book, not one page: {width}x{height}"
+    );
+}
+
 /// A `Viewer` paints into a texture its host owns.
 ///
 /// This is the stage-2 seam end to end: a device with no surface, a launch, a

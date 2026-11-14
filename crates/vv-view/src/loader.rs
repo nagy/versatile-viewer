@@ -11,6 +11,12 @@
 //! The worker sends the final full-quality render when decoding completes.
 //! Every other content renders in one step, and it announces the plane size
 //! from [`Surface::bounds`] first, so the window fits the picture at once.
+//! A book is the exception: one plane holds every page, so a whole-plane
+//! render interprets every page.
+//! [`stream_book`] paints the spread the fit frames first and sends it as a
+//! [`DecodeMsg::Preview`] that carries its [`region::Patch`], so the sharp open
+//! picture lands after one spread render, and the coarse whole book follows as
+//! the zoom-out fallback.
 //!
 //! Cancellation: dropping the `Loader` sets a flag.
 //! The worker checks this flag between chunks and closes the channel.
@@ -37,7 +43,7 @@ use crate::{
     dim::{ImgH, ImgW, LongSide, PreviewPx},
     downscale_rgba,
     error::DecodeError,
-    fb_to_rgba,
+    fb_to_rgba, region,
     surface::{ChunkSource, Surface, SurfaceError, View},
     texture::{Ready, Uploader},
 };
@@ -117,6 +123,16 @@ pub enum DecodeMsg {
         /// The tiny blurred copy for the `VV_BLUR_BG` gimmick, which measures
         /// `VV_BLUR_PX` on its long side and uploads in one cheap call.
         blur: Option<DecodedImage>,
+        /// The source rect and scale the frame covers, for a loader that
+        /// paints one region instead of the whole plane.
+        ///
+        /// A book answers its first spread, because that spread is what the
+        /// fit frames at open.
+        /// The view adopts such a frame as its region patch, so the sharp
+        /// open picture lands on the first frame instead of after a whole-book
+        /// render.
+        /// None means the frame covers the whole plane.
+        patch: Option<region::Patch>,
     },
     /// The final full-quality image.
     Done {
@@ -254,6 +270,15 @@ fn stream(
     );
     let _ = tx.send(Ok(DecodeMsg::Header { width, height }));
 
+    // A book holds every page in one plane, so a whole-plane render
+    // interprets every page, and its cost grows with the page count.
+    // The fit frames the first spread, so that spread is the one picture the
+    // window shows at open: render it first, and let the coarse whole-book
+    // render follow as the zoom-out fallback.
+    if surface.spread_count() > 0 {
+        return stream_book(surface, plane, info, tx, blur, preview_px, uploader);
+    }
+
     // A slow rasterizer sends a cheap low-res render first.
     // The code skips it when it would not be smaller than the window.
     if surface.previews() {
@@ -266,11 +291,64 @@ fn stream(
             let _ = tx.send(Ok(DecodeMsg::Preview {
                 frame: ready(preview, uploader),
                 blur,
+                patch: None,
             }));
         }
     }
 
     let image = surface.render(View::whole(plane, 1.0))?;
+    let blur = blur.map(|config| config.blur(&image));
+    Ok(Some(DecodeMsg::Done {
+        frame: ready(image, uploader),
+        blur,
+    }))
+}
+
+/// The loader of a book: one spread, then the coarse whole book.
+///
+/// The first message paints the spread the fit frames, so the sharp open
+/// picture lands after one spread render instead of after a whole-book
+/// render.
+/// The view adopts it as its region patch, and the ordinary region painter
+/// refines it with a margin once the view holds still.
+/// The last message renders the whole book at the preview scale, never at
+/// 1.0: the whole book only ever shows as the fallback under the patch, and
+/// a scale-1.0 pass would interpret every page a second time for pixels the
+/// screen never shows.
+fn stream_book(
+    surface: &dyn Surface,
+    plane: usize,
+    info: crate::surface::Size,
+    tx: &Sender<Result<DecodeMsg, LoadError>>,
+    blur: Option<blurbg::Config>,
+    preview_px: PreviewPx,
+    uploader: Option<&Uploader>,
+) -> Result<Option<DecodeMsg>, LoadError> {
+    if let Some(spread) = surface.spread_box(0) {
+        // The preview limit measures the window, and the spread is what the
+        // fit shows of it, so its long side takes that limit.
+        let long = spread.width().max(spread.height()).max(1.0);
+        let scale = (preview_px.raw() as f32 / long).max(f32::MIN_POSITIVE);
+        if let Ok(image) = surface.render(View::region(plane, spread, scale)) {
+            // The render clamps its own scale, so the patch takes the scale
+            // the pixels really hold.
+            // Both axes approximate that one number, and the larger one keeps
+            // the patch from claiming less detail than it has.
+            let used = (image.width().raw() as f32 / spread.width().max(1.0))
+                .max(image.height().raw() as f32 / spread.height().max(1.0));
+            if used.is_finite() && used > 0.0 {
+                let _ = tx.send(Ok(DecodeMsg::Preview {
+                    frame: ready(image, uploader),
+                    blur: None,
+                    patch: Some(region::Patch::new(spread, used)),
+                }));
+            }
+        }
+    }
+
+    let long = info.w.max(info.h).max(1.0);
+    let scale = (preview_px.raw() as f32 / long).min(1.0);
+    let image = surface.render(View::whole(plane, scale))?;
     let blur = blur.map(|config| config.blur(&image));
     Ok(Some(DecodeMsg::Done {
         frame: ready(image, uploader),
@@ -362,6 +440,7 @@ fn stream_jxl(
                     let _ = tx.send(Ok(DecodeMsg::Preview {
                         frame: ready(image, uploader),
                         blur,
+                        patch: None,
                     }));
                     last_preview = Some(Instant::now());
                 }
@@ -574,6 +653,62 @@ mod tests {
         assert_eq!(header, Some((ImgW::new(612), ImgH::new(792))));
         assert_eq!(done.dims(), (612, 792));
         assert!(saw_preview, "a slow rasterizer previews first");
+    }
+
+    #[test]
+    fn a_book_paints_its_first_spread_then_a_coarse_whole_book() {
+        // A book holds every page in one plane, so a whole-plane render
+        // interprets every page.
+        // The loader therefore paints the spread the fit frames first, as a
+        // region patch, and the whole book only as the coarse fallback: never
+        // at scale 1.0, whose pixels the screen never shows.
+        let tmp = temp_dir();
+        let dir = tmp.path();
+        let path = dir.join("book.pdf");
+        std::fs::write(&path, crate::fixtures::TWO_PAGE_PDF).unwrap();
+
+        let surface = crate::surface::open_book_surface(&path).unwrap();
+        let plane = crate::surface::Surface::bounds(surface.as_ref(), 0).unwrap();
+        let loader = Loader::start(surface, PreviewPx::new(512), &None);
+        let mut header = None;
+        let mut patch = None;
+        let done;
+        loop {
+            match wait(&loader, Duration::from_secs(30))
+                .expect("loader timed out")
+                .expect("decode failed")
+            {
+                DecodeMsg::Done { frame, .. } => {
+                    done = frame;
+                    break;
+                }
+                DecodeMsg::Header { width, height } => header = Some((width, height)),
+                DecodeMsg::Preview {
+                    frame, patch: p, ..
+                } => {
+                    // One spread, never the whole book, and it covers the
+                    // window at the opened fit.
+                    let rect = p.expect("a book previews one region").rect;
+                    assert_eq!(rect.width(), plane.w);
+                    assert!(rect.height() < plane.h, "one row, not the book");
+                    let (width, height) = frame.dims();
+                    assert!(width.max(height) <= 512, "capped at the window");
+                    patch = Some(rect);
+                }
+            }
+        }
+        assert_eq!(
+            header,
+            Some((
+                ImgW::new(plane.w.ceil() as u32),
+                ImgH::new(plane.h.ceil() as u32)
+            ))
+        );
+        assert!(patch.is_some(), "the opening spread paints first");
+        // The fallback carries the whole plane at the preview scale.
+        let (width, height) = done.dims();
+        assert!(width.max(height) <= 512, "the fallback stays coarse");
+        assert!(f32::from(u16::try_from(height).unwrap()) < plane.h);
     }
 
     #[test]

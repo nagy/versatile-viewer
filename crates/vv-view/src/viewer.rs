@@ -56,7 +56,7 @@ use crate::{
     DecodedImage, TAP_SLACK,
     blurbg::{self, BlurBg},
     book::BookSurface,
-    dim::{self, WinH, WinW},
+    dim::{self, PreviewPx, WinH, WinW},
     draw::{Color, Vec2},
     grid::{DecodeFailure, Grid, GridAction, LoadPlan},
     input::Input,
@@ -68,11 +68,11 @@ use crate::{
     surface::{Size, Surface, View, open_surface},
     texture::Filter,
     view::{
-        BACKGROUND, EASE_TIME, Mode, NavKeys, OpenAlign, PAN_RATE, Prefetch, ROTATE_DRAG_SPAN,
-        ROTATE_DRAG_SPEED, Ramps, SPREAD_EASE_TIME, ViewState, ZOOM_ANCHOR_DRIFT, ZOOM_DRAG_SPAN,
-        ZOOM_DRAG_SPEED, ZoomMode, aim_fill_pan, attach_blur_bg, draw_patch, draw_selection,
-        draw_turned, keep_pivot, pan_drag_speed, patch_covers, put_back_view, read_nav_mouse,
-        selection_rect, show_entry, view_filter,
+        BACKGROUND, CropState, EASE_TIME, Mode, NavKeys, OpenAlign, PAN_RATE, Prefetch,
+        ROTATE_DRAG_SPAN, ROTATE_DRAG_SPEED, Ramps, SPREAD_EASE_TIME, ViewState, ZOOM_ANCHOR_DRIFT,
+        ZOOM_DRAG_SPAN, ZOOM_DRAG_SPEED, ZoomMode, aim_fill_pan, attach_blur_bg, draw_patch,
+        draw_selection, draw_turned, keep_pivot, pan_drag_speed, patch_covers, put_back_view,
+        read_nav_mouse, selection_rect, show_entry, view_filter,
     },
     zoomkeys::TypedKeys,
 };
@@ -230,8 +230,13 @@ impl Launch {
         // A directory launch keeps the default window size.
         // A single-plane launch renders its one plane, and a directory launch
         // decodes nothing here.
-        let decoded = match (single_plane, single_surface.as_ref()) {
-            (true, Some(surface)) => Some(surface.render(View::whole(0, 1.0))?),
+        // A book renders nothing here: its one plane holds every page, so a
+        // scale-1.0 render costs one page render per page, and a book keeps the
+        // default window size anyway.
+        // [`Viewer::start_launch`] starts a loader for it instead, so the
+        // window opens at once and its first spread paints on a worker.
+        let decoded = match (single_plane, book, single_surface.as_ref()) {
+            (true, false, Some(surface)) => Some(surface.render(View::whole(0, 1.0))?),
             _ => None,
         };
         // The box the launch frames: a book names its first spread, so the
@@ -561,6 +566,7 @@ impl Viewer {
             self.grid = grid;
         }
         let mut decoded = decoded;
+        let mut source = source;
         if let Some(image) = decoded.take() {
             match self.renderer.upload(&image) {
                 Ok(texture) => self.st.view_tex = Some(texture),
@@ -582,6 +588,23 @@ impl Viewer {
                     None,
                 );
             }
+        } else if let Some(book) = source.take() {
+            // A document launch: no picture exists yet, so a loader paints the
+            // spread the fit frames and then the coarse whole book (see
+            // [`crate::loader`]).
+            // The view holds the surface already, so the region painter can
+            // refine the spread as soon as the fit lands.
+            self.st.open_box = open_box;
+            self.st.img = Size { w: 0.0, h: 0.0 };
+            self.st.reset_view();
+            self.st.view_loading = true;
+            self.st.adopt_source(Some(book.clone()));
+            self.st.loader = Some(Loader::start_plane(
+                book,
+                0,
+                PreviewPx::new(size.0.max(size.1).max(1)),
+                &Some(self.renderer.uploader()),
+            ));
         }
         // The grid listed its directory before the window existed; the decodes
         // and the placeholder pass upload their own textures, so they start
@@ -913,9 +936,29 @@ impl Viewer {
                         };
                         self.st.refit_open();
                     }
-                    Ok(DecodeMsg::Preview { frame, blur }) => {
+                    Ok(DecodeMsg::Preview { frame, blur, patch }) => {
                         // Progressively better render of the same image.
-                        self.st.view_tex = Some(frame.upload(&r.uploader())?);
+                        let texture = frame.upload(&r.uploader())?;
+                        match patch {
+                            // The loader painted one region of the plane: a
+                            // book paints the spread its fit frames.
+                            // The view takes it as the patch on screen, so the
+                            // sharp open picture draws at once instead of
+                            // after a whole-book render, and the region
+                            // painter refines it with a margin later.
+                            // A paint in flight keeps its own patch, because
+                            // one patch lives at a time and a paint cannot be
+                            // cancelled.
+                            Some(patch) if !self.st.crop_pending => {
+                                self.st.crop = Some(CropState { texture, patch });
+                                // The window moved against a patch it never
+                                // saw, so the debounce starts again from here.
+                                self.st.crop_seen = None;
+                                self.st.crop_quiet_at = std::time::Instant::now();
+                            }
+                            Some(_) => {}
+                            None => self.st.view_tex = Some(texture),
+                        }
                         attach_blur_bg(
                             &mut self.st.blur_bg,
                             &r.uploader(),
