@@ -510,7 +510,42 @@ mod property_tests {
         }
     }
 
+    /// One frame passes every geometric rule the properties below hold.
+    fn assert_invariants(frame: Frame) {
+        let painted = frame.crop(MARGIN);
+        let needed = frame.crop(0.0);
+        assert!(painted.contains_rect(&needed));
+        assert!(painted.x >= 0.0 && painted.y >= 0.0);
+        assert!(painted.right() <= 1024.0 + 1e-3);
+        assert!(painted.bottom() <= 512.0 + 1e-3);
+        let (w, h) = (frame.win.x, frame.win.y);
+        let limit = (1.0 + 2.0 * MARGIN) * (w * w + h * h).sqrt();
+        assert!(painted.w * frame.scale <= limit * (1.0 + 1e-3));
+        assert!(painted.h * frame.scale <= limit * (1.0 + 1e-3));
+    }
+
+    /// A past failure of the paint bounds, at the pan that reached them.
+    #[test]
+    fn a_pan_down_keeps_the_paint_in_bounds() {
+        assert_invariants(frame(Vec2::new(0.0, -782.28406), 1.0, 0.0));
+    }
+
+    /// The failure that the diagonal bound of the paint area shrank to: the
+    /// turned corner touches the window diagonal. The two values stay here,
+    /// because the persistence of the seeds is off.
+    #[test]
+    fn a_deep_turned_zoom_keeps_the_paint_in_bounds() {
+        assert_invariants(frame(Vec2::new(0.0, 0.0), 22.561_317, 216.2562));
+    }
+
     proptest! {
+        // No seed file: a saved case becomes a plain `#[test]` above, so the
+        // suite reads its regressions in one place.
+        #![proptest_config(ProptestConfig {
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        })]
+
         /// The two mappings undo each other, so the region lines up with the
         /// draw.
         #[test]

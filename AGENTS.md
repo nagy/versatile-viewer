@@ -149,6 +149,7 @@ The binary name is `vv`.
 - Sort grid entries in natural order with `natord`, so `img2` comes before `img10`.
 - Tests: `proptest` covers the pure helpers (layout, visual selection, selection step, the resize fit, the ramp).
   Property tests are dev-only and never gate a release build.
+  The `region` proptests keep `failure_persistence` off, so no `proptest-regressions/` entry exists: a saved case becomes a plain `#[test]` beside the strategies, with its shrunk values written out.
 - Public error types derive `derive_more::{Display, Error, From}` (feature `from` on).
   Each module owns its error enum: `src/error.rs` (`DecodeError`), `src/sign.rs` (`SignError`), `src/surface.rs` (`SurfaceError`), `src/pdf.rs` (`PdfError`), `src/grid.rs` (`GridError`), `src/loader.rs` (`LoadError`), `src/mcp.rs` (`SpawnError`), `src/thumbcache.rs` (`CacheError`).
   `src/typst.rs` has no error enum of its own: its compile diagnostics and export failures become `SurfaceError::Render`.
