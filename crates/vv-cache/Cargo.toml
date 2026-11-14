@@ -26,6 +26,11 @@ jixel = { version = "0.5.7", default-features = false, features = [
 xdg = "3.0.0"
 # The entry file name: SHA-256 of the canonical source path.
 sha2 = "0.11.1"
+# The fixed entry header as one packed value, so a header writes and reads in
+# one call instead of a field-by-field loop. `derive` brings the two derive
+# macros; the crate is a plain `#[repr(C, packed)]` struct with no padding, so
+# the bytes on disk are the bytes the toolchain lays out.
+bytemuck = { version = "1.25.2", features = ["derive"] }
 derive_more = { version = "2.1.1", default-features = false, features = [
   "display",
   "error",

@@ -247,6 +247,9 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   A thumb texture is always bilinear (`grid::upload_thumb`), and the `a` key never reaches it: the cell fills with the thumb, and the image view stretches it over the image rect while the full-res decode catches up, so both draw it far larger than the texture and nearest aliases badly there.
   The flag reaches the whole-image texture and the region patches only.
   An entry holds a fixed header and a JPEG XL codestream, so a 512 px thumb costs tens of kilobytes instead of one megabyte of RGBA8.
+  The header is one `#[repr(C, packed)]` `bytemuck::Pod` struct of 81 bytes (`vv-cache` `Header`), so the file carries the bytes the toolchain lays out, one call writes it (`bytes_of`) and one call reads it (`pod_read_unaligned`), and the write side and the read side name the same fields.
+  Every number in it is little-endian, so a cache directory shared between hosts reads the same.
+  A test pins the size, so a new field trips a failure instead of silently changing the layout.
   The encode is `jixel`, pure Rust (BSD-3-Clause OR Apache-2.0), lossy at `QUALITY` (95) with `ALPHA_DISTANCE` 0, so only the alpha channel stays exact.
   The decode is the same `jxl-oxide` the viewer uses for a file, and both entry decode and file decode share `rgba_from_samples` (`crates/vv-pixels/src/lib.rs`), so one conversion serves the framebuffer of each.
   Both run on a decode worker.

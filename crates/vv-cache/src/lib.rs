@@ -65,6 +65,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use bytemuck::{Pod, Zeroable};
 use derive_more::{Display, Error, From};
 use sha2::{Digest, Sha256};
 // The layers below, named through this crate as well, so one `crate::dim` path
@@ -107,11 +108,8 @@ const QUALITY: f32 = 95.0;
 /// the color channels stay lossy.
 /// A default would follow [`QUALITY`] and band a transparent gradient.
 const ALPHA_DISTANCE: f32 = 0.0;
-/// Header bytes before the source path.
-/// magic, format, thumb width, thumb height, image width, image height,
-/// source length, source mtime seconds, source mtime nanoseconds, source
-/// path length, placeholder length, placeholder bytes.
-const HEADER: usize = 4 + 4 + 4 + 4 + 4 + 4 + 8 + 8 + 4 + 4 + 1 + crate::placeholder::MAX_BYTES;
+/// Header bytes before the source path: the size of [`Header`].
+const HEADER: usize = size_of::<Header>();
 /// The longest source path the header stores.
 const MAX_PATH: usize = 4096;
 /// Writes beyond this budget stop for the rest of the run, so a burst of
@@ -553,37 +551,131 @@ fn encode_entry(
             .with_quality(QUALITY)
             .with_alpha_distance(ALPHA_DISTANCE),
     )?;
-    let mut out = Vec::with_capacity(HEADER + src.len() + codestream.len());
-    for field in [
-        u32::from_le_bytes(MAGIC),
-        FORMAT,
-        thumb.width().raw(),
-        thumb.height().raw(),
-        image.0.raw(),
-        image.1.raw(),
-    ] {
-        out.extend_from_slice(&field.to_le_bytes());
-    }
-    out.extend_from_slice(&stamp.len.to_le_bytes());
-    out.extend_from_slice(&stamp.secs.to_le_bytes());
-    out.extend_from_slice(&stamp.nanos.to_le_bytes());
-    out.extend_from_slice(&(src.len() as u32).to_le_bytes());
     // The placeholder is a hint, so a payload the encoder cannot fit writes a
     // zero length and the entry still loads.
     let hash = Placeholder::encode(thumb);
-    out.push(hash.map_or(0, |h| h.len() as u8));
-    let mut padded = [0u8; crate::placeholder::MAX_BYTES];
-    if let Some(hash) = hash {
-        let bytes = hash.as_bytes();
-        padded
-            .get_mut(..bytes.len())
-            .ok_or(CacheError::Corrupt)?
-            .copy_from_slice(bytes);
-    }
-    out.extend_from_slice(&padded);
+    let header = Header::new(
+        stamp,
+        u32::try_from(src.len()).map_err(|_| CacheError::Corrupt)?,
+        (thumb.width(), thumb.height()),
+        image,
+        hash.as_ref(),
+    )?;
+    let mut out = Vec::with_capacity(HEADER + src.len() + codestream.len());
+    out.extend_from_slice(bytemuck::bytes_of(&header));
     out.extend_from_slice(src);
     out.extend_from_slice(&codestream);
     Ok(out)
+}
+
+/// The fixed header of an entry, laid out as the file carries it.
+///
+/// The struct is packed and holds no padding, so its size is [`HEADER`] and
+/// the first bytes of an entry read as one value.
+/// Every number is little-endian, so an entry reads the same on any host that
+/// shares the cache directory.
+#[repr(C, packed)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct Header {
+    /// [`MAGIC`], so a foreign file answers `Corrupt`.
+    magic: [u8; 4],
+    /// The [`FORMAT`] version of the entry.
+    format: u32,
+    /// The thumbnail width.
+    thumb_w: u32,
+    /// The thumbnail height.
+    thumb_h: u32,
+    /// The source width.
+    image_w: u32,
+    /// The source height.
+    image_h: u32,
+    /// The source length, in bytes.
+    src_len: u64,
+    /// The source modification time, in seconds since the epoch.
+    src_secs: u64,
+    /// The source modification time, in nanoseconds.
+    src_nanos: u32,
+    /// The length of the source path that follows the header.
+    path_len: u32,
+    /// The length of the placeholder payload, or zero for none.
+    hash_len: u8,
+    /// The placeholder payload, padded to its maximum.
+    payload: [u8; placeholder::MAX_BYTES],
+}
+
+impl Header {
+    /// The header of one entry.
+    ///
+    /// # Errors
+    ///
+    /// The function errors with [`CacheError::Corrupt`] when the placeholder
+    /// payload does not fit its field.
+    fn new(
+        stamp: &Stamp,
+        path_len: u32,
+        thumb: (ImgW, ImgH),
+        image: (ImgW, ImgH),
+        hash: Option<&Placeholder>,
+    ) -> Result<Self, CacheError> {
+        let mut payload = [0u8; placeholder::MAX_BYTES];
+        let bytes = hash.map_or(&[][..], Placeholder::as_bytes);
+        payload
+            .get_mut(..bytes.len())
+            .ok_or(CacheError::Corrupt)?
+            .copy_from_slice(bytes);
+        Ok(Self {
+            magic: MAGIC,
+            format: FORMAT.to_le(),
+            thumb_w: thumb.0.raw().to_le(),
+            thumb_h: thumb.1.raw().to_le(),
+            image_w: image.0.raw().to_le(),
+            image_h: image.1.raw().to_le(),
+            src_len: stamp.len.to_le(),
+            src_secs: stamp.secs.to_le(),
+            src_nanos: stamp.nanos.to_le(),
+            path_len: path_len.to_le(),
+            hash_len: u8::try_from(bytes.len()).map_err(|_| CacheError::Corrupt)?,
+            payload,
+        })
+    }
+
+    /// The parsed head, with the magic, the version and the lengths checked.
+    ///
+    /// # Errors
+    ///
+    /// The function errors with [`CacheError::Corrupt`] when the magic or the
+    /// version differs, or when a length field reaches past its cap.
+    fn head(self) -> Result<Head, CacheError> {
+        if self.magic != MAGIC || u32::from_le(self.format) != FORMAT {
+            return Err(CacheError::Corrupt);
+        }
+        let hash_len = usize::from(self.hash_len);
+        if hash_len > placeholder::MAX_BYTES {
+            return Err(CacheError::Corrupt);
+        }
+        let path_len = u32::from_le(self.path_len) as usize;
+        if path_len > MAX_PATH {
+            return Err(CacheError::Corrupt);
+        }
+        let payload = self.payload.get(..hash_len).ok_or(CacheError::Corrupt)?;
+        Ok(Head {
+            thumb: (
+                ImgW::new(u32::from_le(self.thumb_w)),
+                ImgH::new(u32::from_le(self.thumb_h)),
+            ),
+            image: (
+                ImgW::new(u32::from_le(self.image_w)),
+                ImgH::new(u32::from_le(self.image_h)),
+            ),
+            stamp: Stamp {
+                len: u64::from_le(self.src_len),
+                secs: u64::from_le(self.src_secs),
+                nanos: u32::from_le(self.src_nanos),
+            },
+            path_len,
+            hash: Placeholder::from_bytes(payload).filter(|_| hash_len > 0),
+        })
+    }
 }
 
 /// The fixed header of an entry, parsed.
@@ -605,37 +697,8 @@ struct Head {
 /// The function reads no bytes beyond the header, so a caller that needs only
 /// the placeholder reads that much and stops.
 fn parse_head(bytes: &[u8]) -> Result<Head, CacheError> {
-    let mut r = Reader::new(bytes);
-    if r.u32()? != u32::from_le_bytes(MAGIC) || r.u32()? != FORMAT {
-        return Err(CacheError::Corrupt);
-    }
-    let thumb = (ImgW::new(r.u32()?), ImgH::new(r.u32()?));
-    let image = (ImgW::new(r.u32()?), ImgH::new(r.u32()?));
-    let stamp = Stamp {
-        len: r.u64()?,
-        secs: r.u64()?,
-        nanos: r.u32()?,
-    };
-    let path_len = r.u32()? as usize;
-    if path_len > MAX_PATH {
-        return Err(CacheError::Corrupt);
-    }
-    let hash_len = usize::from(r.u8()?);
-    let payload = r.slice(crate::placeholder::MAX_BYTES)?;
-    if hash_len > crate::placeholder::MAX_BYTES {
-        return Err(CacheError::Corrupt);
-    }
-    let hash = payload
-        .get(..hash_len)
-        .filter(|_| hash_len > 0)
-        .and_then(Placeholder::from_bytes);
-    Ok(Head {
-        thumb,
-        image,
-        stamp,
-        path_len,
-        hash,
-    })
+    let head = bytes.get(..HEADER).ok_or(CacheError::Corrupt)?;
+    bytemuck::pod_read_unaligned::<Header>(head).head()
 }
 
 /// Parse cache file bytes, with the source stamp and path checked.
@@ -679,59 +742,6 @@ fn decode_codestream(codestream: &[u8]) -> Result<DecodedImage, CacheError> {
         fb.buf(),
     )
     .map_err(|_| CacheError::Corrupt)
-}
-
-/// A cursor over the fixed header, which keeps the reads bounds checked.
-struct Reader<'a> {
-    bytes: &'a [u8],
-    /// The read position.
-    at: usize,
-}
-
-impl<'a> Reader<'a> {
-    /// A cursor at the start of `bytes`.
-    const fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, at: 0 }
-    }
-
-    /// The next four bytes as a little-endian `u32`.
-    fn u32(&mut self) -> Result<u32, CacheError> {
-        let end = self.at + 4;
-        let bytes = self
-            .bytes
-            .get(self.at..end)
-            .and_then(|s| <[u8; 4]>::try_from(s).ok())
-            .ok_or(CacheError::Corrupt)?;
-        self.at = end;
-        Ok(u32::from_le_bytes(bytes))
-    }
-
-    /// The next eight bytes as a little-endian `u64`.
-    fn u64(&mut self) -> Result<u64, CacheError> {
-        let end = self.at + 8;
-        let bytes = self
-            .bytes
-            .get(self.at..end)
-            .and_then(|s| <[u8; 8]>::try_from(s).ok())
-            .ok_or(CacheError::Corrupt)?;
-        self.at = end;
-        Ok(u64::from_le_bytes(bytes))
-    }
-
-    /// The next byte.
-    fn u8(&mut self) -> Result<u8, CacheError> {
-        let byte = *self.bytes.get(self.at).ok_or(CacheError::Corrupt)?;
-        self.at += 1;
-        Ok(byte)
-    }
-
-    /// The next `len` bytes.
-    fn slice(&mut self, len: usize) -> Result<&'a [u8], CacheError> {
-        let end = self.at + len;
-        let bytes = self.bytes.get(self.at..end).ok_or(CacheError::Corrupt)?;
-        self.at = end;
-        Ok(bytes)
-    }
 }
 
 #[cfg(test)]
@@ -949,6 +959,14 @@ mod tests {
             cache.load(&src, LongSide::new(512)),
             Err(CacheError::Stale)
         ));
+    }
+
+    /// A field added to the header changes the file layout, so the entry
+    /// version must move with it.
+    #[test]
+    fn the_header_keeps_its_bytes() {
+        assert_eq!(HEADER, 81);
+        assert_eq!(size_of::<Header>(), 81);
     }
 
     #[test]
