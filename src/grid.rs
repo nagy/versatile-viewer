@@ -1503,11 +1503,28 @@ fn step_selection(sel: usize, n: usize, step: usize, delta: i128) -> usize {
     moved.clamp(0, n as i128 - 1) as usize
 }
 
-/// Do the code most likely decode this path as an image or a document?
-/// (Grid directory filter.)
-/// A PDF, a Typst source or a Mermaid source has no image extension but opens
-/// as a page grid, so the filter accepts them too.
+/// Whether the directory filter of the grid keeps this file.
+///
+/// The list is the formats this build routes by content, plus every path a
+/// converter rule of this process claims (`src/convert.rs`), so a configured
+/// format appears in the grid too.
+/// A PDF or a Typst source carries no image extension but opens as a page
+/// grid, so the filter accepts it too.
+/// A format with no rule of its own stays out: the viewer names no converter.
 fn is_image_path(path: &Path) -> bool {
+    is_image_path_in(path, crate::convert::rules())
+}
+
+/// Whether `path` belongs in the grid, with `converters` as the rule table.
+///
+/// A test passes a table of its own, so the filter never reads the table of the
+/// user.
+fn is_image_path_in(path: &Path, converters: &crate::convert::Converters) -> bool {
+    converters.claims(path) || is_image_extension(path)
+}
+
+/// Whether the extension of `path` names a format this build routes.
+fn is_image_extension(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
         matches!(
             e.to_ascii_lowercase().as_str(),
@@ -1525,7 +1542,6 @@ fn is_image_path(path: &Path) -> bool {
                 | "svgz"
                 | "pdf"
                 | "typ"
-                | "mmd"
         )
     })
 }
@@ -1960,24 +1976,44 @@ mod tests {
 
     #[test]
     fn image_extension_filter() {
-        assert!(is_image_path(Path::new("foo.png")));
-        assert!(is_image_path(Path::new("foo.PNG")));
-        assert!(is_image_path(Path::new("a/b/c.jpeg")));
-        assert!(is_image_path(Path::new("photo.JXL")));
-        assert!(is_image_path(Path::new("logo.svg")));
-        assert!(is_image_path(Path::new("logo.SVGZ")));
+        assert!(is_image_extension(Path::new("foo.png")));
+        assert!(is_image_extension(Path::new("foo.PNG")));
+        assert!(is_image_extension(Path::new("a/b/c.jpeg")));
+        assert!(is_image_extension(Path::new("photo.JXL")));
+        assert!(is_image_extension(Path::new("logo.svg")));
+        assert!(is_image_extension(Path::new("logo.SVGZ")));
         // A PDF opens as a page grid, so the directory filter keeps it.
-        assert!(is_image_path(Path::new("doc.pdf")));
-        assert!(is_image_path(Path::new("DOC.PDF")));
+        assert!(is_image_extension(Path::new("doc.pdf")));
+        assert!(is_image_extension(Path::new("DOC.PDF")));
         // Same for a Typst source, which compiles into its page grid.
-        assert!(is_image_path(Path::new("doc.typ")));
-        assert!(is_image_path(Path::new("DOC.TYP")));
-        // A Mermaid source renders to one vector picture.
-        assert!(is_image_path(Path::new("diagram.mmd")));
-        assert!(is_image_path(Path::new("DIAGRAM.MMD")));
-        assert!(!is_image_path(Path::new("notes.txt")));
-        assert!(!is_image_path(Path::new("archive.tar.gz")));
-        assert!(!is_image_path(Path::new("noext")));
+        assert!(is_image_extension(Path::new("doc.typ")));
+        assert!(is_image_extension(Path::new("DOC.TYP")));
+        // A Mermaid source needs a converter rule, so the plain list leaves
+        // it out.
+        assert!(!is_image_extension(Path::new("diagram.mmd")));
+        assert!(!is_image_extension(Path::new("DIAGRAM.MMD")));
+        assert!(!is_image_extension(Path::new("notes.txt")));
+        assert!(!is_image_extension(Path::new("archive.tar.gz")));
+        assert!(!is_image_extension(Path::new("noext")));
+    }
+
+    #[cfg(feature = "svg")]
+    #[test]
+    fn a_configured_extension_lists() {
+        // A table of this test alone, so the filter never reads the table of
+        // the user.
+        let table = crate::convert::Converters::parse(
+            "[[convert]]\next = [\"exr\", \"mmd\"]\ncommand = [\"exr2svg\"]\n",
+        )
+        .expect("a rule table");
+        assert!(is_image_path_in(Path::new("photo.EXR"), &table));
+        // The rule claims the Mermaid source too, so the filter keeps it.
+        assert!(is_image_path_in(Path::new("diagram.mmd"), &table));
+        assert!(!is_image_path_in(Path::new("notes.txt"), &table));
+        // A table with no rule lists no converted format.
+        let empty = crate::convert::Converters::empty();
+        assert!(!is_image_path_in(Path::new("diagram.mmd"), &empty));
+        assert!(is_image_path_in(Path::new("photo.png"), &empty));
     }
 
     #[test]

@@ -153,12 +153,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arraydeque"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
-
-[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -786,29 +780,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cssparser"
-version = "0.38.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11119743ad110e8c1bdccd930d7f5c30c99e5fc76a7b63ec9807e84eef0c5f59"
-dependencies = [
- "cssparser-macros",
- "dtoa-short",
- "itoa",
- "phf 0.14.0",
- "smallvec",
-]
-
-[[package]]
-name = "cssparser-macros"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d045de693cb712d0b22c6a64be5b953f67b3ce00ab5ad3dd5d8b441886ab8e1a"
-dependencies = [
- "quote",
- "syn 3.0.10",
-]
-
-[[package]]
 name = "csv"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -834,12 +805,6 @@ name = "cursor-icon"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
-
-[[package]]
-name = "data-encoding"
-version = "2.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
 name = "data-url"
@@ -939,43 +904,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
-name = "dtoa"
-version = "1.0.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c3cf4824e2d5f025c7b531afcb2325364084a16806f6d47fbc1f5fbd9960590"
-
-[[package]]
-name = "dtoa-short"
-version = "0.3.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd1511a7b6a56299bd043a9c167a6d2bfb37bf84a6dfceaba651168adfb43c87"
-dependencies = [
- "dtoa",
-]
-
-[[package]]
-name = "dugong"
-version = "0.9.3"
-source = "git+https://github.com/nagy/merman?branch=elk-json-provider#d7a57aac2b1f8f17e10205528e6214bfe85899ff"
-dependencies = [
- "dugong-graphlib",
- "rustc-hash 2.1.3",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "dugong-graphlib"
-version = "0.9.3"
-source = "git+https://github.com/nagy/merman?branch=elk-json-provider#d7a57aac2b1f8f17e10205528e6214bfe85899ff"
-dependencies = [
- "hashbrown 0.17.1",
- "rustc-hash 2.1.3",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -995,31 +923,6 @@ name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
-
-[[package]]
-name = "elk-layout"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dcce954a7136f0c42cb166d3aff3e3995fb500fa027d148884cb0940b4985da3"
-dependencies = [
- "org-eclipse-elk-alg-common",
- "org-eclipse-elk-alg-disco",
- "org-eclipse-elk-alg-force",
- "org-eclipse-elk-alg-graphviz-dot",
- "org-eclipse-elk-alg-graphviz-layouter",
- "org-eclipse-elk-alg-layered",
- "org-eclipse-elk-alg-libavoid",
- "org-eclipse-elk-alg-mrtree",
- "org-eclipse-elk-alg-radial",
- "org-eclipse-elk-alg-rectpacking",
- "org-eclipse-elk-alg-spore",
- "org-eclipse-elk-alg-topdownpacking",
- "org-eclipse-elk-alg-vertiflex",
- "org-eclipse-elk-conn-gmf",
- "org-eclipse-elk-core",
- "org-eclipse-elk-graph",
- "org-eclipse-elk-graph-json",
-]
 
 [[package]]
 name = "enum-ordinalize"
@@ -1431,16 +1334,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "granit-parser"
-version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05f05586d4d4df3d47123207826c40b252728b438a1a07bad3c01ee6bea401df"
-dependencies = [
- "arraydeque",
- "smallvec",
-]
-
-[[package]]
 name = "guillotiere"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1491,7 +1384,6 @@ version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
- "equivalent",
  "foldhash",
 ]
 
@@ -1587,7 +1479,7 @@ dependencies = [
  "hayro-cmap",
  "hayro-syntax 0.9.0",
  "kurbo",
- "phf 0.13.1",
+ "phf",
  "rustc-hash 2.1.3",
  "siphasher",
  "skrifa 0.49.0",
@@ -1604,7 +1496,7 @@ dependencies = [
  "hayro-syntax 0.7.2",
  "kurbo",
  "moxcms",
- "phf 0.13.1",
+ "phf",
  "rustc-hash 2.1.3",
  "siphasher",
  "skrifa 0.42.1",
@@ -1741,30 +1633,6 @@ name = "hermit-abi"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
-
-[[package]]
-name = "html5ever"
-version = "0.40.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "456a1a377e608e555d22ddab27ac0114bc7a7b4199078108e34c2aeae6c9b130"
-dependencies = [
- "log",
- "markup5ever",
- "memchr",
-]
-
-[[package]]
-name = "htmlize"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e815d50d9e411ba2690d730e6ec139c08260dddb756df315dbd16d01a587226"
-dependencies = [
- "memchr",
- "pastey 0.1.1",
- "phf 0.13.1",
- "phf_codegen 0.13.1",
- "serde_json",
-]
 
 [[package]]
 name = "hybrid-array"
@@ -2181,27 +2049,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "json5"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96b0db21af676c1ce64250b5f40f3ce2cf27e4e47cb91ed91eb6fe9350b430c1"
-dependencies = [
- "pest",
- "pest_derive",
- "serde",
-]
-
-[[package]]
-name = "json5"
-version = "1.3.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0348cde6df2b507ba3c3753beba226baba8567af588d6568cdb9877f02c75b60"
-dependencies = [
- "serde",
- "ucd-trie",
-]
-
-[[package]]
 name = "jxl-bitstream"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2448,12 +2295,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lalrpop-util"
-version = "0.23.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "364b49d1c98c07972e16fe1346463becc08bcd663da04e6e37ab1bea068dce6a"
-
-[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2552,17 +2393,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
-name = "markup5ever"
-version = "0.40.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ab3dc68ac4a0f5719e560136778c1ee716e296030d75dbd4484e37e39e3a842"
-dependencies = [
- "log",
- "tendril",
- "web_atoms",
-]
-
-[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2576,184 +2406,6 @@ checksum = "6b0ca1155a9ecc25aa12e8313a119f32edf0255fea2f44839c4ac0a12b2ac157"
 dependencies = [
  "libc",
 ]
-
-[[package]]
-name = "merman"
-version = "0.9.3"
-source = "git+https://github.com/nagy/merman?branch=elk-json-provider#d7a57aac2b1f8f17e10205528e6214bfe85899ff"
-dependencies = [
- "merman-analysis",
- "merman-ascii",
- "merman-core",
- "merman-editor-core",
- "merman-export",
- "merman-markup",
- "merman-model",
- "merman-render",
- "merman-theme-contract",
- "serde_json",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "merman-analysis"
-version = "0.9.3"
-source = "git+https://github.com/nagy/merman?branch=elk-json-provider#d7a57aac2b1f8f17e10205528e6214bfe85899ff"
-dependencies = [
- "merman-core",
- "merman-model",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "merman-ascii"
-version = "0.9.3"
-source = "git+https://github.com/nagy/merman?branch=elk-json-provider#d7a57aac2b1f8f17e10205528e6214bfe85899ff"
-dependencies = [
- "dugong",
- "merman-model",
- "rustc-hash 2.1.3",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "unicode-segmentation",
- "unicode-width",
-]
-
-[[package]]
-name = "merman-core"
-version = "0.9.3"
-source = "git+https://github.com/nagy/merman?branch=elk-json-provider#d7a57aac2b1f8f17e10205528e6214bfe85899ff"
-dependencies = [
- "cssparser",
- "granit-parser",
- "indexmap",
- "json5 1.3.7",
- "lalrpop-util",
- "merman-markup",
- "merman-model",
- "rustc-hash 2.1.3",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "unicode-general-category",
-]
-
-[[package]]
-name = "merman-editor-core"
-version = "0.9.3"
-source = "git+https://github.com/nagy/merman?branch=elk-json-provider#d7a57aac2b1f8f17e10205528e6214bfe85899ff"
-dependencies = [
- "merman-analysis",
- "merman-core",
- "merman-model",
- "serde",
-]
-
-[[package]]
-name = "merman-export"
-version = "0.9.3"
-source = "git+https://github.com/nagy/merman?branch=elk-json-provider#d7a57aac2b1f8f17e10205528e6214bfe85899ff"
-dependencies = [
- "merman-model",
- "merman-render",
- "rustybuzz",
- "sha2",
- "thiserror 2.0.21",
- "ttf-parser",
- "unicase",
- "usvg 0.47.0",
-]
-
-[[package]]
-name = "merman-layout-elk"
-version = "0.9.3"
-source = "git+https://github.com/nagy/merman?branch=elk-json-provider#d7a57aac2b1f8f17e10205528e6214bfe85899ff"
-dependencies = [
- "elk-layout",
- "serde_json",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "merman-markup"
-version = "0.9.3"
-source = "git+https://github.com/nagy/merman?branch=elk-json-provider#d7a57aac2b1f8f17e10205528e6214bfe85899ff"
-dependencies = [
- "html5ever",
- "htmlize",
- "merman-model",
- "ryu-js",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "merman-model"
-version = "0.9.3"
-source = "git+https://github.com/nagy/merman?branch=elk-json-provider#d7a57aac2b1f8f17e10205528e6214bfe85899ff"
-dependencies = [
- "htmlize",
- "indexmap",
- "rustc-hash 2.1.3",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "unicode-segmentation",
- "unicode-width",
-]
-
-[[package]]
-name = "merman-render"
-version = "0.9.3"
-source = "git+https://github.com/nagy/merman?branch=elk-json-provider#d7a57aac2b1f8f17e10205528e6214bfe85899ff"
-dependencies = [
- "base64 0.23.1",
- "cssparser",
- "data-encoding",
- "data-url",
- "dugong",
- "euclid",
- "indexmap",
- "kurbo",
- "libm",
- "memchr",
- "merman-layout-elk",
- "merman-markup",
- "merman-model",
- "merman-theme-contract",
- "merman-unicode-linebreak",
- "pulldown-cmark",
- "quick-xml 0.42.0",
- "roughr-merman",
- "rustc-hash 2.1.3",
- "ryu-js",
- "serde",
- "serde_json",
- "sha2",
- "svgtypes",
- "thiserror 2.0.21",
- "unicode-segmentation",
- "unicode-width",
-]
-
-[[package]]
-name = "merman-theme-contract"
-version = "0.9.3"
-source = "git+https://github.com/nagy/merman?branch=elk-json-provider#d7a57aac2b1f8f17e10205528e6214bfe85899ff"
-dependencies = [
- "serde",
- "serde_json",
- "serde_json_canonicalizer",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "merman-unicode-linebreak"
-version = "0.9.3"
-source = "git+https://github.com/nagy/merman?branch=elk-json-provider#d7a57aac2b1f8f17e10205528e6214bfe85899ff"
 
 [[package]]
 name = "miniz_oxide"
@@ -2875,12 +2527,6 @@ checksum = "ee6cda3051665f1fb8d9e08fc35c96d5a244fb1be711a03b71118828afc9a873"
 dependencies = [
  "jni-sys 0.3.1",
 ]
-
-[[package]]
-name = "new_debug_unreachable"
-version = "1.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "num-bigint"
@@ -3238,196 +2884,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "org-eclipse-elk-alg-common"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6441a6e67e83d5799ef3d6dedd914993e3426a297894197b08b1057137dc7030"
-dependencies = [
- "org-eclipse-elk-core",
- "org-eclipse-elk-graph",
- "rustc-hash 2.1.3",
-]
-
-[[package]]
-name = "org-eclipse-elk-alg-disco"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a63b8befb6ee7585539b611cfa1091aefcf5a9e9a73bc9e2fdc5af5229026078"
-dependencies = [
- "org-eclipse-elk-alg-common",
- "org-eclipse-elk-core",
- "org-eclipse-elk-graph",
-]
-
-[[package]]
-name = "org-eclipse-elk-alg-force"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7592d70b025063765c7bbc8b570137b96d945d1b473bf9285733df5a1a4eb304"
-dependencies = [
- "org-eclipse-elk-alg-common",
- "org-eclipse-elk-core",
- "org-eclipse-elk-graph",
-]
-
-[[package]]
-name = "org-eclipse-elk-alg-graphviz-dot"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0e01689e17a604cd8dfba9b6e0d9ba379d9fb9ec0c110726b98b5987a3da62a"
-
-[[package]]
-name = "org-eclipse-elk-alg-graphviz-layouter"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea9fd353096e2bf03d4c0eb40c5e2f88bfb0ada5eb2ae3a099fe11ea30068a2d"
-dependencies = [
- "org-eclipse-elk-alg-common",
- "org-eclipse-elk-alg-graphviz-dot",
- "org-eclipse-elk-core",
- "org-eclipse-elk-graph",
-]
-
-[[package]]
-name = "org-eclipse-elk-alg-layered"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "232028cdf2a795afdf08d115158adcf2096630fe06643e19a60345a4c93d435d"
-dependencies = [
- "org-eclipse-elk-alg-common",
- "org-eclipse-elk-core",
- "org-eclipse-elk-graph",
- "rustc-hash 2.1.3",
- "serde_json",
-]
-
-[[package]]
-name = "org-eclipse-elk-alg-libavoid"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2bfd3ff4d8a0c8def96dddd6f40c6b050d46faa55af1148a87904619540d6cfc"
-dependencies = [
- "org-eclipse-elk-alg-common",
- "org-eclipse-elk-core",
- "org-eclipse-elk-graph",
-]
-
-[[package]]
-name = "org-eclipse-elk-alg-mrtree"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc193abb35523780487ad460d51512030f8d36c49e6308ac8780859495c55fbb"
-dependencies = [
- "org-eclipse-elk-alg-common",
- "org-eclipse-elk-core",
- "org-eclipse-elk-graph",
-]
-
-[[package]]
-name = "org-eclipse-elk-alg-radial"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2bffeff3d6a4c29855c8c916eb7e400f2b1bfe9b10161d23ebdb44216e729e87"
-dependencies = [
- "org-eclipse-elk-alg-common",
- "org-eclipse-elk-core",
- "org-eclipse-elk-graph",
-]
-
-[[package]]
-name = "org-eclipse-elk-alg-rectpacking"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c21d804ad6fd215fe56c4205b92b6300858ad43e8b505ef6abbf1fa27d057f9"
-dependencies = [
- "org-eclipse-elk-alg-common",
- "org-eclipse-elk-core",
- "org-eclipse-elk-graph",
-]
-
-[[package]]
-name = "org-eclipse-elk-alg-spore"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8057fa7a0aa343710df74fd266e7bcb05272a0cd285d11d4db3184014c94cb08"
-dependencies = [
- "org-eclipse-elk-alg-common",
- "org-eclipse-elk-core",
- "org-eclipse-elk-graph",
-]
-
-[[package]]
-name = "org-eclipse-elk-alg-topdownpacking"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c29df413bcf35ff845ed219b2a608e53151c79d6b618149f30e0caa11eedb61"
-dependencies = [
- "org-eclipse-elk-core",
- "org-eclipse-elk-graph",
-]
-
-[[package]]
-name = "org-eclipse-elk-alg-vertiflex"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c602ef35b6a0ce06e21008bed0c6fc0e52ed72d46c7e649bbc8b1ab6f0309a80"
-dependencies = [
- "org-eclipse-elk-alg-common",
- "org-eclipse-elk-core",
- "org-eclipse-elk-graph",
-]
-
-[[package]]
-name = "org-eclipse-elk-conn-gmf"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d000136d6ec49caa5391a50d0f2d24edf83e8974afe51c71f35e9d57095846cb"
-dependencies = [
- "org-eclipse-elk-core",
- "org-eclipse-elk-graph",
-]
-
-[[package]]
-name = "org-eclipse-elk-core"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74979fa4d8b08c9aaa0cc00b99aef7a4907b4b97b9681cc677cf476f134012a9"
-dependencies = [
- "org-eclipse-elk-graph",
-]
-
-[[package]]
-name = "org-eclipse-elk-graph"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7267640e79baa15e0d2cdce015800d8fcd4ce600f080bcd220b5494ced2d7a86"
-dependencies = [
- "parking_lot",
- "rustc-hash 2.1.3",
-]
-
-[[package]]
-name = "org-eclipse-elk-graph-json"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "597c8657d028d3c25b1e8534fcbcca96a3fd0a9694a42c51d8cafde1f18e18e8"
-dependencies = [
- "json5 0.4.1",
- "org-eclipse-elk-alg-disco",
- "org-eclipse-elk-alg-force",
- "org-eclipse-elk-alg-layered",
- "org-eclipse-elk-alg-mrtree",
- "org-eclipse-elk-alg-radial",
- "org-eclipse-elk-alg-rectpacking",
- "org-eclipse-elk-alg-spore",
- "org-eclipse-elk-alg-vertiflex",
- "org-eclipse-elk-core",
- "org-eclipse-elk-graph",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "palette"
 version = "0.7.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3491,12 +2947,6 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "pastey"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35fb2e5f958ec131621fdd531e9fc186ed768cbe395337403ae56c17a74c68ec"
-
-[[package]]
-name = "pastey"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
@@ -3533,98 +2983,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
-name = "pest"
-version = "2.9.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ec53fd1d256900a9a771bf2720d42cef6f8bc91b4e25065fbd291e3e7222576"
-dependencies = [
- "memchr",
- "pest_stack_guard",
- "ucd-trie",
-]
-
-[[package]]
-name = "pest_derive"
-version = "2.9.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "adcf794fd301ddc20818a6b4de85ed507f4b45300245cec948982e69e12e3bd7"
-dependencies = [
- "pest",
- "pest_generator",
-]
-
-[[package]]
-name = "pest_generator"
-version = "2.9.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3073afae5db334c25dea9fc3e230a4f191e920c1df080cb9c0b37c9ce1dbb41"
-dependencies = [
- "pest",
- "pest_meta",
- "proc-macro2",
- "quote",
- "syn 3.0.10",
-]
-
-[[package]]
-name = "pest_meta"
-version = "2.9.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7bc7f614b3742541642af1685faaa910bf6333e3cd3729c2cccd118146a57327"
-dependencies = [
- "pest",
-]
-
-[[package]]
-name = "pest_stack_guard"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ac6154fd4418b8f0b82532c59c26f303f9ca59a64c883e8ce3971fd82733439"
-dependencies = [
- "psm",
- "stacker",
-]
-
-[[package]]
 name = "phf"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1562dc717473dbaa4c1f85a36410e03c047b2e7df7f45ee938fbef64ae7fadf"
 dependencies = [
- "phf_macros 0.13.1",
- "phf_shared 0.13.1",
+ "phf_macros",
+ "phf_shared",
  "serde",
-]
-
-[[package]]
-name = "phf"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "010378780309880b08997fae13be7834dba947d36393bd372f2b1556deb2a2f6"
-dependencies = [
- "phf_macros 0.14.0",
- "phf_shared 0.14.0",
- "serde",
-]
-
-[[package]]
-name = "phf_codegen"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49aa7f9d80421bca176ca8dbfebe668cc7a2684708594ec9f3c0db0805d5d6e1"
-dependencies = [
- "phf_generator 0.13.1",
- "phf_shared 0.13.1",
-]
-
-[[package]]
-name = "phf_codegen"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41b585a510fb76fdebead6897982ef2a03a21d8e6cbcca904999742a4afc6ffe"
-dependencies = [
- "phf_generator 0.14.0",
- "phf_shared 0.14.0",
 ]
 
 [[package]]
@@ -3634,17 +3000,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "135ace3a761e564ec88c03a77317a7c6b80bb7f7135ef2544dbe054243b89737"
 dependencies = [
  "fastrand",
- "phf_shared 0.13.1",
-]
-
-[[package]]
-name = "phf_generator"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aeb62e0959d5a1bebc965f4d15d9e2b7cea002b6b0f5ba8cde6cc26738467100"
-dependencies = [
- "fastrand",
- "phf_shared 0.14.0",
+ "phf_shared",
 ]
 
 [[package]]
@@ -3653,21 +3009,8 @@ version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "812f032b54b1e759ccd5f8b6677695d5268c588701effba24601f6932f8269ef"
 dependencies = [
- "phf_generator 0.13.1",
- "phf_shared 0.13.1",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "phf_macros"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5fa8d0ca26d424d27630da600c6624696e7dec8bf7b3b492b383c5dc49e5e085"
-dependencies = [
- "phf_generator 0.14.0",
- "phf_shared 0.14.0",
+ "phf_generator",
+ "phf_shared",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -3678,15 +3021,6 @@ name = "phf_shared"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e57fef6bc5981e38c2ce2d63bfa546861309f875b8a75f092d1d54ae2d64f266"
-dependencies = [
- "siphasher",
-]
-
-[[package]]
-name = "phf_shared"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6fd9027e2d9319be6349febd1db4e8d02aa544921200c9b777720ac34a3aa89"
 dependencies = [
  "siphasher",
 ]
@@ -3852,12 +3186,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "precomputed-hash"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "925383efa346730478fb4838dbe9137d2a47675ad789c546d150a6e1dd4ab31c"
-
-[[package]]
 name = "presser"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3921,17 +3249,6 @@ checksum = "4dcd034599e63b970727f70d79e02d62390a4a84f7c6b827c27c46d5ac3fa622"
 dependencies = [
  "ar_archive_writer",
  "cc",
-]
-
-[[package]]
-name = "pulldown-cmark"
-version = "0.13.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b"
-dependencies = [
- "bitflags 2.13.2",
- "memchr",
- "unicase",
 ]
 
 [[package]]
@@ -4242,7 +3559,7 @@ dependencies = [
  "futures",
  "indexmap",
  "libc",
- "pastey 0.2.3",
+ "pastey",
  "pin-project-lite",
  "schemars",
  "serde",
@@ -4260,18 +3577,6 @@ name = "roman-numerals-rs"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c85cd47a33a4510b1424fe796498e174c6a9cf94e606460ef022a19f3e4ff85e"
-
-[[package]]
-name = "roughr-merman"
-version = "0.12.4"
-source = "git+https://github.com/nagy/merman?branch=elk-json-provider#d7a57aac2b1f8f17e10205528e6214bfe85899ff"
-dependencies = [
- "euclid",
- "num-traits",
- "palette",
- "ryu-js",
- "svgtypes",
-]
 
 [[package]]
 name = "roxmltree"
@@ -4388,12 +3693,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
-name = "ryu-js"
-version = "1.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04d056b875a9d2e6cb9a61d127afee9ac5999b9f87bcb32079d1318e505be714"
-
-[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4487,24 +3786,11 @@ version = "1.0.154"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
 dependencies = [
- "foldhash",
- "indexmap",
  "itoa",
  "memchr",
  "serde",
  "serde_core",
  "zmij",
-]
-
-[[package]]
-name = "serde_json_canonicalizer"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87f7bb64f8c7e9f783fdfe883b5fe93a90bee1597c63705baa91842c5f698620"
-dependencies = [
- "ryu-js",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -4717,30 +4003,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "string_cache"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffa8a5dbe8b3f0bbe29d4c3225daafaeead63afdc1b65fc4c01a1384166038e6"
-dependencies = [
- "new_debug_unreachable",
- "parking_lot",
- "phf_shared 0.14.0",
- "precomputed-hash",
-]
-
-[[package]]
-name = "string_cache_codegen"
-version = "0.11.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "928dcdf75e47626b3617a976ec205d9f057584c371c1f23b782129268d0e6edc"
-dependencies = [
- "phf_generator 0.14.0",
- "phf_shared 0.14.0",
- "proc-macro2",
- "quote",
-]
-
-[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4854,15 +4116,6 @@ dependencies = [
  "once_cell",
  "rustix 1.1.6",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "tendril"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5fed54709c5b3a53d09bb1c113ea4f5ceafd1e772ddcb0030a82e1d56c087b08"
-dependencies = [
- "new_debug_unreachable",
 ]
 
 [[package]]
@@ -5319,7 +4572,7 @@ dependencies = [
  "moxcms",
  "palette",
  "percent-encoding",
- "phf 0.13.1",
+ "phf",
  "png",
  "rayon",
  "regex",
@@ -5490,12 +4743,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ucd-trie"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2896d95c02a80c6d6a5d6e953d479f5ddf2dfdb6a244441010e373ac0fb88971"
-
-[[package]]
 name = "unarray"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5546,12 +4793,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "unicase"
-version = "2.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "357cc3acc6a036009fd6c973ed009037c732d60d0b4f6c673e9041497482a28f"
-
-[[package]]
 name = "unicode-bidi"
 version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5568,12 +4809,6 @@ name = "unicode-ccc"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce61d488bcdc9bc8b5d1772c404828b17fc481c0a582b5581e95fb233aef503e"
-
-[[package]]
-name = "unicode-general-category"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b993bddc193ae5bd0d623b49ec06ac3e9312875fdae725a975c51db1cc1677f"
 
 [[package]]
 name = "unicode-ident"
@@ -5845,8 +5080,8 @@ dependencies = [
  "image",
  "jixel",
  "jxl-oxide",
+ "libc",
  "memmap2",
- "merman",
  "natord",
  "pollster",
  "proptest",
@@ -5859,6 +5094,7 @@ dependencies = [
  "thumbhash",
  "tiny-skia",
  "tokio",
+ "toml",
  "typst",
  "typst-assets",
  "typst-layout",
@@ -6020,18 +5256,6 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "web_atoms"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7572660c8890448ba236b7376f27e389c6a7e1c70195622faced601f855c0ada"
-dependencies = [
- "phf 0.14.0",
- "phf_codegen 0.14.0",
- "string_cache",
- "string_cache_codegen",
 ]
 
 [[package]]

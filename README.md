@@ -42,12 +42,14 @@ reasons. The compile runs with the directory of the file as project root, so
 `#include`, `#image` and `#read` resolve like the Typst CLI. The fonts ship
 inside the binary.
 
-A Mermaid source renders through [merman] to SVG text. The answer then parses
-through the same vector path, so it shows as one vector picture and zooms
-sharply for the same reasons. The render turns HTML labels into SVG text with
-the resvg-safe pipeline of merman. It turns them off through an init
-directive, because the HTML measure under-reports a wide label. Labels measure
-with the host font files, so a label box fits its text.
+A source of another format converts to SVG through an external program. The
+answer then parses through the same vector path, so it shows as one vector
+picture and zooms sharply for the same reasons. A converter reads the source
+bytes on stdin and writes an SVG document on stdout, so no format engine links
+into the binary. The viewer ships no rule of its own: write one in the rule
+table below, and every file of that format then lists in the grid and opens as
+a picture. A Mermaid diagram needs one rule, and a browserless renderer serves
+it.
 
 Thumbnails render in a directory grid that fills the window. They decode in
 parallel on a background pool and sort in natural order (`img2` before
@@ -68,11 +70,10 @@ image leaves its thumbnail to the user.
 
 The `cache` cargo feature (on by default) owns the cache.
 `--no-default-features` decodes every file on every launch. The `svg` cargo
-feature (on by default) owns the SVG path.
-`--no-default-features --features cache` leaves it out. The `mermaid` cargo
-feature (on by default) owns the Mermaid path and pulls the `svg` feature in,
-because that backend paints the diagram.
-`--no-default-features --features cache,svg` leaves it out.
+feature (on by default) owns the SVG path and the converter path beside it,
+because the converter answers an SVG document and that backend paints it.
+`--no-default-features --features cache` leaves both out, so no `.svg` file
+decodes and no file routes through an external program.
 
 ## Architecture
 
@@ -93,9 +94,14 @@ name. A PDF routes on its `%PDF-` magic to the hayro backend in `src/pdf.rs`.
 A Typst source routes by extension to `src/typst.rs`, which compiles it to PDF
 bytes and hands them to that same backend.
 
-A Mermaid source routes by extension to `src/mermaid.rs`, which renders it to
-an SVG string and hands the parsed tree to the vector backend in
-`src/surface.rs`.
+A path that a converter rule claims routes to `src/convert.rs`, which runs the
+program of the rule and hands the parsed tree to the vector backend in
+`src/surface.rs`. The content decides first, so a converter rule never takes a
+file this viewer can read. A format that carries no magic it knows falls to
+its rule. A converter reads the source on stdin and answers SVG on stdout. The
+answer caches under `$XDG_CACHE_HOME/vv/converted/`, keyed by the source bytes
+and the argv, so a grid decode and an image view open of one file cost one
+conversion.
 
 The grid holds one cell per file, and a document cell shows its cover page.
 
@@ -111,7 +117,7 @@ A Typst source compiles to the same pages, so it opens as the same book. See
 [resvg]: https://crates.io/crates/resvg
 [hayro]: https://crates.io/crates/hayro
 [typst]: https://crates.io/crates/typst
-[merman]: https://crates.io/crates/merman
+[merman-cli]: https://github.com/Latias94/merman
 [fast_image_resize]: https://crates.io/crates/fast_image_resize
 [ThumbHash]: https://evanw.github.io/thumbhash/
 
@@ -283,6 +289,51 @@ the next spread to the top of the window and stops there. One press moves one
 spread, and the step ends on the first and the last spread. `Page-down` and
 `Page-up` do the same step.
 
+## Converters
+
+A file format this viewer does not parse becomes showable through a program
+that reads the source bytes on stdin and writes an SVG document on stdout.
+Rules live in `$XDG_CONFIG_HOME/vv/converters.toml`, and `VV_CONVERTERS` names
+another file. The viewer holds no rule of its own, so a format converts only
+after you name its program.
+
+```toml
+[defaults]
+slots = 2                # conversions that run at one time
+timeout_ms = 15000       # wall clock of one conversion
+max_output = 67108864    # bytes a converter may write to stdout
+
+[[convert]]
+ext = ["mmd", "mermaid"]
+command = ["merman-cli", "render", "-"]
+background = "#ffffff"   # paper under the paints, `#rrggbb` or `#rrggbbaa`
+```
+
+That last table shows a Mermaid diagram. It runs [merman-cli], a browserless
+renderer: `merman-cli render -` reads the diagram on stdin and writes the SVG
+document on stdout. The command starts no browser, so one conversion costs a
+few milliseconds and the default limits are enough.
+
+The [merman-cli] SVG leaves its canvas unset, like Mermaid core. Either name
+`background` in the rule, as above, or pass `--background white` to the
+command. Without either one the page stays transparent and the viewer
+background shows through.
+
+A format without a rule stays out of the grid. A rule makes its extension
+list, so `diagram.mmd` appears beside the photos and opens as a picture.
+
+A converter that starts a browser, such as `mmdc`, takes the same shape:
+`command = ["mmdc", "-i", "-", "-o", "-", "-e", "svg"]`.
+
+The command runs without a shell, so each array element stays one argument.
+
+The converters hold two slots by default, because a browser-backed converter
+costs a second and hundreds of megabytes. The rest of the conversions queue.
+Every conversion has a wall clock and an output cap. A converter that outlives
+either one is killed, so a stuck program never holds a decode worker. A format
+that a rule claims lists in the directory grid like any other file. Without a
+rule the file keeps out of the grid, and no program runs.
+
 ## Environment variables
 
 |variable          |effect                                                                 |
@@ -294,6 +345,7 @@ spread, and the step ends on the first and the last spread. `Page-down` and
 |`VV_BG_DIM=0..1`  |brightness of the blurred background (default 0.6)                     |
 |`VV_BLUR_PX=<n>`  |long side of the blur texture, 8..=1024 (default 128; fewer = blurrier)|
 |`VV_CACHE=0`      |do not read or write the thumbnail cache under `$XDG_CACHE_HOME`      |
+|`VV_CONVERTERS=`  |path to the rule table (default `$XDG_CONFIG_HOME/vv/converters.toml`)|
 |`VV_PRESENT=`     |swapchain present mode: `fifo` (default), `relaxed`, `mailbox`, `immediate`|
 |`VV_PAN_DRAG_SPEED=`|picture pixels per unit of drag travel (default 1.0, range 0.05..=16)|
 

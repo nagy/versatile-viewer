@@ -9,24 +9,15 @@ description = "A fast image (and later, video) viewer: nsxiv meets mpv. JPEG XL 
 # The on-disk thumbnail cache: the XDG lookup, the entry key and the JPEG XL
 # encoder.
 # Without it every launch decodes every file, and the grid still works.
-default = ["cache", "svg", "mermaid", "elk"]
+default = ["cache", "svg"]
 cache = ["dep:jixel", "dep:sha2", "dep:xdg"]
 # SVG: sniffs the file head, parses with usvg and paints with tiny-skia.
 # Without it src/svg_off.rs never claims a file, so no `.svg` file decodes.
+# The feature also owns the converter path: an external program turns a file of
+# an unknown format into an SVG document, and this backend rasterizes it, so a
+# build without SVG compiles src/convert_off.rs, which claims no file and lets
+# every source route on its content alone.
 svg = ["dep:fontdb", "dep:flate2", "dep:resvg", "dep:tiny-skia", "dep:usvg"]
-# Mermaid: a `.mmd` file becomes an SVG string, which the SVG backend rasterizes.
-# Without it src/mermaid_off.rs never claims a file.
-# The feature needs the SVG backend, because that backend paints the diagram.
-mermaid = ["svg", "dep:merman"]
-# The ELK layout engine, which a `%%{init: {"layout": "elk"}}%%` directive asks for.
-# Without it merman silently lays such a source out with dagre, its default.
-#
-# The provider arrives through the merman fork that `[patch.crates-io]` names at
-# the end of this file: `merman-layout-elk` there drives `elk-layout`, whose
-# layered plugin ships `EPL-2.0 OR GPL-3.0-or-later`.
-# This crate takes the GPL arm, and GPL-3.0 combines with AGPL-3.0-or-later
-# (GPL-3.0 section 13), so the feature ships in `default`.
-elk = ["mermaid", "merman/layout-elk"]
 
 [dependencies]
 anyhow = "1.0.104"
@@ -182,22 +173,17 @@ usvg = { version = "0.50.0", default-features = false, features = [
   "text",
 ], optional = true }
 
-# Mermaid to SVG, pure Rust (MIT OR Apache-2.0), so no Node.js and no
-# Chromium. Confined to src/mermaid.rs: the rest of the viewer only sees the
-# Surface trait.
-# `svg` emits the diagram and `all-diagrams` compiles every family; `math`
-# (KaTeX-style labels) stays off.
-# ELK arrives through our `elk` feature only, never through merman's own
-# default features, which would turn on the EPL-only `merman-elk-layered`.
-# `native-fonts` measures a label with a real font file, which the backend
-# feeds from the fontdb scan of svg.rs, so a fallback label box fits its text.
-# `system-fonts` stays off: the viewer passes the face files itself, so no
-# second system scan and no fontconfig dependency.
-merman = { version = "0.9.3", default-features = false, features = [
-  "all-diagrams",
-  "native-fonts",
-  "svg",
-], optional = true }
+# The rule table of the converters (`src/convert.rs`): TOML, pure Rust
+# (MIT OR Apache-2.0).
+# `parse` alone, so the writer half of the crate stays out and the code walks
+# the values by hand (no serde derive in this tree).
+# Version 0.8 already resolves through the Typst dependency, so this entry adds
+# no crate to `Cargo.lock`.
+toml = { version = "0.8.23", default-features = false, features = ["parse"] }
+# The kill of a timed-out converter, which names its whole process group by the
+# negative pid. Only the one syscall wrapper, and `libc` already resolves
+# through winit and x11rb.
+libc = "0.2.191"
 
 [[bin]]
 name = "vv"
@@ -219,10 +205,3 @@ pollster = "1.0.1"
 # incrementally (plain cargo clippy shows the remaining findings).
 all = "deny"
 pedantic = "warn"
-
-# The merman fork: the same facade, with an ELK provider over `elk-layout`
-# (`EPL-2.0 OR GPL-3.0-or-later`) instead of the EPL-only `merman-elk-layered`.
-# `Cargo.lock` pins the revision, so a build stays reproducible while `branch`
-# keeps a bump one `cargo update -p merman` away.
-[patch.crates-io]
-merman = { git = "https://github.com/nagy/merman", branch = "elk-json-provider" }

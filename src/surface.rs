@@ -301,8 +301,13 @@ pub enum SurfaceError {
 /// misnamed file still opens.
 /// A `.typ` source routes by extension to the Typst backend, which compiles it
 /// to PDF bytes and hands them to that same backend.
-/// A `.mmd` source routes by extension to the Mermaid backend, which renders it
-/// to SVG and hands the tree to [`VectorSurface`].
+/// A path that a converter rule claims routes by extension to
+/// [`crate::convert`], which runs the rule's program and hands the parsed tree
+/// to [`VectorSurface`].
+/// The content decides first, so a file whose magic names a format this viewer
+/// parses opens through that backend even when a rule also claims its
+/// extension, and only a path whose bytes this viewer cannot read falls to the
+/// rule. The extension is the one honest signal for a format with no magic.
 /// A vector file keeps its parsed tree, so a region render of the image view
 /// pays only for the pixels it shows.
 /// Every other content goes to the raster backend, which dispatches JPEG XL
@@ -324,17 +329,18 @@ pub fn open_surface(path: &Path) -> Result<Box<dyn Surface>, SurfaceError> {
     if crate::typst::is_typst(path) {
         return Ok(Box::new(crate::typst::TypstSurface::open(path)?));
     }
-    // Mermaid: the extension decides too (.mmd is plain UTF-8 text). The
-    // backend renders the diagram to an SVG string and parses that string, so
-    // the file becomes a vector surface with a region anchor.
-    if crate::mermaid::is_mermaid(path) {
-        return crate::mermaid::open(path);
-    }
-    // The sniff doubles as a validity check; render() reports the decode
-    // error otherwise.
-    // It answers the decoder as well, so the raster backend never sniffs the
-    // same file a second time.
-    let kind = sign::detect(path)?;
+    // A converter claims the extensions its rules name, so a format this
+    // viewer does not parse itself reaches the vector backend through an
+    // external program that the user configured.
+    // The content decides first, so a rule never takes a file that this viewer
+    // can read: a `.png` file opens through the raster backend even when a rule
+    // claims `png`, and only a path whose bytes name no known format falls to
+    // its rule.
+    let kind = match sign::detect(path) {
+        Ok(kind) => kind,
+        Err(_) if crate::convert::claims(path) => return crate::convert::open(path),
+        Err(err) => return Err(err.into()),
+    };
     #[cfg(feature = "svg")]
     if kind == sign::Kind::Vector {
         return Ok(Box::new(VectorSurface::open(path)?));
@@ -502,9 +508,8 @@ impl VectorSurface {
 
     /// Wrap an already parsed tree.
     ///
-    /// A backend that generates its SVG (see [`crate::mermaid`]) hands the
-    /// tree here, so a generated diagram shows exactly like a `.svg` file.
-    #[cfg(feature = "mermaid")]
+    /// A backend that generates its SVG (see [`crate::convert`]) hands the
+    /// tree here, so a converted picture shows exactly like a `.svg` file.
     pub(crate) fn from_vector(vector: crate::svg::Vector) -> Self {
         VectorSurface {
             vector: std::sync::Arc::new(vector),
@@ -519,7 +524,6 @@ impl VectorSurface {
     /// The color fills under every render ([`Self::paper`]), so the grid cell,
     /// the thumbnail and the window patch all carry it, and the viewer window
     /// keeps its own background.
-    #[cfg(feature = "mermaid")]
     #[must_use]
     pub(crate) fn with_background(mut self, background: Color) -> Self {
         self.background = Some(background);

@@ -23,7 +23,7 @@
 //!   sharpness rule of `patch_dest` in the viewer;
 //! - straight alpha, and a tint that scales it;
 //! - a turned quad, on the pixels its corners name;
-//! - the decoder-to-draw chain of an SVG, a Typst page and a Mermaid diagram;
+//! - the decoder-to-draw chain of an SVG, a Typst page and a converted source;
 //! - the transparent gutter of a book plane.
 
 // The tests read and name window pixels as whole numbers, so a float rect
@@ -405,6 +405,11 @@ fn a_turned_quad_reaches_its_own_corners() {
 /// letterbox.
 fn paint_surface(canvas: &mut Canvas, path: &std::path::Path) -> Rect {
     let surface = open_surface(path).expect("the source opens");
+    paint_plane(canvas, surface.as_ref())
+}
+
+/// Paint one open plane into the frame, fitted.
+fn paint_plane(canvas: &mut Canvas, surface: &dyn versatile_viewer::surface::Surface) -> Rect {
     let image = surface
         .render(View::whole(0, 1.0))
         .expect("the plane renders");
@@ -479,33 +484,50 @@ fn a_typst_page_paints_a_red_box() {
     assert_eq!(pixels.at(middle.0, middle.1), [255, 0, 0, 255], "the box");
 }
 
-/// A Mermaid diagram paints white paper under its boxes.
+/// A converted source paints the paper its rule names, under its own paints.
+#[cfg(feature = "svg")]
 #[test]
 #[ignore = "needs a Vulkan device"]
-fn a_mermaid_diagram_paints_on_white_paper() {
+fn a_converted_source_paints_on_its_paper() {
+    use std::os::unix::fs::PermissionsExt as _;
+
     let mut canvas = canvas!(64, 64);
     let dir = tempfile::tempdir().expect("a temp dir");
-    let path = dir.path().join("flow.mmd");
-    std::fs::write(&path, "flowchart LR\n  A[one] --> B[two]\n").expect("write the source");
-    let dest = paint_surface(&mut canvas, &path);
+    // A stand-in converter: it swallows the source and answers a small red
+    // square on a transparent page.
+    let program = dir.path().join("convert.sh");
+    std::fs::write(
+        &program,
+        "#!/bin/sh\ncat > /dev/null\nprintf '%s' '<svg xmlns=\"http://www.w3.org/2000/svg\" \
+         width=\"100\" height=\"50\"><rect width=\"10\" height=\"10\" fill=\"#ff0000\"/></svg>'\n",
+    )
+    .expect("write the converter");
+    let mut perms = std::fs::metadata(&program).expect("stat").permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&program, perms).expect("chmod the converter");
+    let path = dir.path().join("source.mmd");
+    std::fs::write(&path, "a source the viewer does not parse").expect("write the source");
+    // The rule names white paper, so every pixel the page leaves clear shows
+    // white, and the square keeps its own red.
+    let config = format!(
+        "[[convert]]\next = [\"mmd\"]\ncommand = [\"{}\"]\nbackground = \"#ffffff\"\n",
+        program.display()
+    );
+    let table = versatile_viewer::convert::Converters::parse(&config)
+        .expect("the rule table")
+        .with_cache_dir(dir.path());
+    let surface = table.open(&path).expect("the converted surface");
+    let dest = paint_plane(&mut canvas, surface.as_ref());
     let pixels = canvas.print();
-    // The diagram paints its own paper (`mermaid::BACKGROUND`, white), and its
-    // boxes and labels leave dark ink on it.
     let (x0, y0) = (dest.x as usize, dest.y as usize);
     let (x1, y1) = (dest.right() as usize, dest.bottom() as usize);
-    // One pixel of a fitted diagram can hold a box corner on any font set, so
-    // the paper check counts the pixels instead of naming one.
-    let area = (x1 - x0) * (y1 - y0);
-    let paper = (y0..y1)
-        .flat_map(|y| (x0..x1).map(move |x| (x, y)))
-        .filter(|&(x, y)| pixels.at(x, y) == [255, 255, 255, 255])
-        .count();
-    assert!(
-        paper * 2 > area,
-        "the paper covers most of the diagram: {paper} of {area}"
+    assert_eq!(
+        pixels.at(x1 - 2, y1 - 2),
+        [255, 255, 255, 255],
+        "the rule paints white paper"
     );
-    let inked = (y0..y1).any(|y| (x0..x1).any(|x| pixels.at(x, y)[0] < 200));
-    assert!(inked, "the boxes and labels leave ink on the paper");
+    let inked = (y0..y1).any(|y| (x0..x1).any(|x| pixels.at(x, y) == [255, 0, 0, 255]));
+    assert!(inked, "the square paints over the paper");
 }
 
 /// A book plane leaves its gutter transparent, so the window shows through.

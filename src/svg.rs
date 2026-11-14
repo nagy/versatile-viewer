@@ -126,7 +126,7 @@ impl Vector {
     /// A filter that samples past the region loses its outer context, so the
     /// caller paints a margin around what it shows.
     ///
-    /// A tree that draws no page of its own (a Mermaid diagram) assumes a
+    /// A tree that draws no page of its own (a converted diagram) assumes a
     /// paper color, and `background` fills that color, as RGBA8, under the
     /// paint.
     /// The paper then rides the pixels, so the grid cell, the thumbnail and
@@ -270,8 +270,8 @@ fn demultiply(data: &mut [u8]) {
 ///
 /// A scan of the system fonts costs tens of milliseconds, so one load serves
 /// every SVG parse and every cell of a directory.
-/// The Mermaid backend walks the same database, so a label measures with the
-/// faces the painter can use.
+/// The painter and the parser share it, so a `<text>` label measures with the
+/// faces the paint uses.
 pub(crate) fn fontdb() -> &'static Arc<fontdb::Database> {
     static DB: OnceLock<Arc<fontdb::Database>> = OnceLock::new();
     DB.get_or_init(|| {
@@ -323,7 +323,7 @@ const fn is_gzip(bytes: &[u8]) -> bool {
 
 /// Parse SVG text into a [`Vector`].
 ///
-/// A source that generates its SVG in memory (see [`crate::mermaid`]) uses
+/// A source that generates its SVG in memory (see [`crate::convert`]) uses
 /// this path, so the parsed tree serves the thumbnail, the base raster and the
 /// window patch exactly like a `.svg` file does.
 ///
@@ -331,7 +331,6 @@ const fn is_gzip(bytes: &[u8]) -> bool {
 ///
 /// The function errors when usvg rejects the XML, the namespaces or the
 /// document structure.
-#[cfg(feature = "mermaid")]
 pub(crate) fn from_str(text: &str) -> Result<Vector, DecodeError> {
     let tree = usvg::Tree::from_str(text, &options()).map_err(|e| DecodeError::Svg(Box::new(e)))?;
     Ok(Vector { tree })

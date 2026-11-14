@@ -127,9 +127,10 @@
           };
 
           # The dependency set of the build without the default features.
-          # `--no-default-features` drops the cache, SVG and Mermaid
-          # dependencies, so 58 crates resolve with a different feature set and
-          # cargo recompiles them in the release profile on every gate run.
+          # `--no-default-features` drops the cache and SVG dependencies (and
+          # the converter path with them), so 58 crates resolve with a different
+          # feature set and cargo recompiles them in the release profile on
+          # every gate run.
           # An artifact set of their own pays that build once.
           minimalArtifacts = craneLib.buildDepsOnly {
             inherit
@@ -142,9 +143,9 @@
           };
 
           # The build without the default features: no thumbnail cache, no SVG,
-          # no Mermaid. `src/thumbcache_off.rs`, `src/svg_off.rs` and
-          # `src/mermaid_off.rs` answer from stubs in that build, and nothing
-          # else in the flake compiles them.
+          # and so no converter. `src/thumbcache_off.rs`, `src/svg_off.rs` and
+          # `src/convert_off.rs` answer from stubs in that build (the last two
+          # share the one gate), and nothing else in the flake compiles them.
           minimal = craneLib.cargoTest {
             inherit
               src
@@ -178,8 +179,8 @@
             LD_LIBRARY_PATH = lib.makeLibraryPath libInputs;
             VK_DRIVER_FILES = "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.x86_64.json";
             VV_GPU_REQUIRED = "1";
-            # A host reads its own font set, and a diagram measures its labels
-            # with one, so the gate pins one face instead of none.
+            # A host reads its own font set, and a converted SVG measures its
+            # text with one, so the gate pins one face instead of none.
             FONTCONFIG_FILE = pkgs.makeFontsConf {
               fontDirectories = [ pkgs.dejavu_fonts ];
             };

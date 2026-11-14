@@ -29,8 +29,9 @@
 //! plane.
 //! A Typst source compiles to PDF bytes in [`typst`] and renders through the
 //! same PDF backend, so it shows as the same book.
-//! A Mermaid source renders to SVG in [`mermaid`] and renders through the SVG
-//! backend, so it shows as one vector picture.
+//! A source of another format converts to SVG in [`convert`], which runs an
+//! external program, and renders through the SVG backend, so it shows as one
+//! vector picture.
 //! Every showable source is a [`surface::Surface`], so the grid, the loader
 //! and the image view ask for a plane at a scale and never for a file format.
 //! [`downscale_rgba`] and [`cap_texture_side`] keep the
@@ -70,6 +71,11 @@
 
 pub mod blurbg;
 pub mod book;
+#[cfg(feature = "svg")]
+pub mod convert;
+#[cfg(not(feature = "svg"))]
+#[path = "convert_off.rs"]
+pub mod convert;
 pub mod dim;
 pub mod draw;
 pub mod error;
@@ -79,11 +85,6 @@ pub mod input;
 pub mod keyrepeat;
 pub mod loader;
 pub mod mcp;
-#[cfg(feature = "mermaid")]
-pub mod mermaid;
-#[cfg(not(feature = "mermaid"))]
-#[path = "mermaid_off.rs"]
-pub mod mermaid;
 pub mod pane;
 pub mod pdf;
 pub mod placeholder;

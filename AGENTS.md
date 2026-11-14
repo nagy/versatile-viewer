@@ -58,26 +58,28 @@ The binary name is `vv`.
   The reader has no clock, so a document that reads `datetime.today()` fails.
   A compile error becomes a `file:line:col: error: message` line with the first hint, and a panicking compiler or exporter becomes `SurfaceError::Render`, never a crash.
   `open_surface` routes a `.typ` file by extension, because plain UTF-8 text has no magic bytes to sniff.
-- Render Mermaid with `merman` (pure Rust, MIT OR Apache-2.0), the module is `src/mermaid.rs`.
-  It owns the dependency, and the `mermaid` cargo feature (a default feature) owns it too.
-  The feature pulls `svg`, because the diagram paints through the vector backend: `open` renders the source to an SVG string, parses it with `svg::from_str`, and wraps the tree in `VectorSurface::from_vector`, so one plane shows with the region anchor, the settled-zoom refine and the 512 px grid thumb of a vector file.
-  The feature list is `all-diagrams` + `svg` + `elk`, and `math` stays off, so `architecture-beta` answers a capability error and every other family renders.
-  ELK is the default engine, so a source that asks for it (`%%{init: {"layout": "elk"}}%%`) keeps its own layout; without the `elk` feature merman falls back to dagre without a word, and its own test `flowchart_elk_alias_uses_dagre_geometry_when_loader_is_absent` names that path.
-  The engine arrives through the merman fork that `[patch.crates-io]` names: there `merman-layout-elk` builds ELK JSON from the provider-neutral `Graph`, calls `elk_layout::layout_value` and reads the geometry back as absolute coordinates, so the provider is `elk-layout` 0.12.x (`EPL-2.0 OR GPL-3.0-or-later`, pure Rust, elkjs-compatible JSON API) and this crate takes the GPL arm, which GPL-3.0 section 13 combines with our AGPL-3.0-or-later.
-  The fork's `WorkControl` checks the budget before and after that one call only, because ELK offers no interruption hook.
-  The patch names a git branch, so `Cargo.lock` pins the revision and a bump costs one `cargo update -p merman`.
-  The fork keeps its EPL-only `merman-elk-layered` crate unused, so never take merman's default features: `complete-svg-elk` turns that crate on.
-  Every render passes `SvgPipeline::resvg_safe()`, the preset merman uses for its own PNG and PDF export: it turns a `<foreignObject>` HTML label into an SVG `<text>` element and sanitizes the stylesheet, and without it `usvg` drops every label.
-  `svg_label_source` inserts `%%{init: {"htmlLabels": false}}%%` after a leading YAML front matter and before the diagram, because the HTML measure under-reports a wide entity name and an ER header then loses its first and last glyph behind the label viewport; a later directive in the source still wins, so the source keeps its own choice.
-  Label boxes measure with a real face: `FONTS` builds one `NativeFontContext` per process from the face files of `svg::fontdb`, so the measure and the paint share one database; the limits rise to 512 MiB and 4096 files because a host holds about 75 MiB of faces.
-  A host without a readable face falls back to `SvgEnvironment::deterministic`, and the diagram still renders.
-  `Renderer`, the font context and the panic guard (`catch_unwind`) live behind `LazyLock` and `OnceLock`, because the open runs on a decode worker.
-  A rejected source, a missing diagram and a panicking renderer all become `SurfaceError::Render`, never a crash.
-  `is_mermaid` reads the extension only (`.mmd`), because Mermaid text has no magic bytes.
-  A cold `.mmd` cell stays grey until its decode lands, like a Typst cell, because no cheap header parse exists.
-  A diagram paints no paper: the emitted SVG draws its boxes and labels and leaves every other pixel transparent, so the surface names `mermaid::BACKGROUND` (white, `VectorSurface::with_background`) and `svg::Vector::render_region` fills that paper under the tree before it paints; the paper therefore rides the pixels of the grid cell, the thumb, the placeholder and the window patch, and the viewer window keeps its own `BACKGROUND`; the color lives in `mermaid.rs`, and no other module names it.
+- A format this viewer does not parse reaches the vector backend through a converter, `src/convert.rs` (`Converters`, `Rule`, `Converters::open`).
+  The `svg` cargo feature (a default feature) owns the module, because that backend paints the answer, and `toml` stays a plain dependency beside it.
+  A converter reads the source bytes on stdin and writes an SVG document on stdout, so no format engine links into the binary and a new format needs no rebuild.
+  The rule table comes from `$XDG_CONFIG_HOME/vv/converters.toml`, which `VV_CONVERTERS` can point elsewhere, and `[defaults]` names `slots`, `timeout_ms` and `max_output`.
+  The viewer ships no rule of its own, so a format converts only after the user writes a rule: the README carries a `merman-cli` rule for a Mermaid diagram.
+  `Converters::parse` reads `[defaults]` before the rules, because a TOML table iterates in key order and every rule inherits those values, and the table appends nothing after them.
+  A rule names `ext`, `command`, and optionally `timeout_ms`, `max_output` and `background` (`#rrggbb` or `#rrggbbaa`).
+  The command runs without a shell (`Command::new(program).args(args)`), so a config file never reaches an interpolation.
+  `Converters::parse` walks the TOML by hand, rejects an unknown key, a rule without an extension and a rule without a command, so the file is the whole table.
+  `Converters::empty()` is a table with no rule, over the real cache: `load` answers it when the file is missing, and the process-wide `CONVERTERS` (`LazyLock`) prints one line and keeps it when the file does not parse, so a typo runs no program and every other file keeps its own decoder.
+  The table lives in a `LazyLock` because the open runs deep inside a surface open on a decode worker, and no owner passes a table down that path; a test builds a `Converters` of its own and `with_cache_dir`, so no test reads the table or the cache of the user.
+  Dispatch reads the extension (`Converters::claims`), which is the one honest signal for a format with no magic; `open_surface` sniffs the content first and asks `convert::claims` only when the sniff names no known format, so a config rule for `png` never takes a PNG from the raster decoder, and `grid::is_image_path` asks the table too (`is_image_path_in`), so a configured format lists in the grid.
+  `Converters::open` sizes the file before it reads it and stops the read at `MAX_SOURCE` (8 MiB), so the cap costs no allocation, runs the program under one `Slots` permit (`DEFAULT_SLOTS` 2, because a browser costs a second and hundreds of megabytes), and parses the answer with `svg::from_str` into `VectorSurface`, so a converted picture keeps the region anchor, the settled-zoom refine and the 512 px thumb.
+  A rule's `background` becomes `VectorSurface::with_background`, so the paper rides the pixels of the cell, the thumb, the placeholder and the window patch, and the viewer window keeps its `BACKGROUND`.
+  `run` bounds the call four ways: `wait` polls `try_wait` against `timeout`, kills the whole process group of the child when the clock runs out (`kill_group`, which sends `libc::kill` to the negative pid of the group that `CommandExt::process_group(0)` created at spawn) and reaps it, so a browser the converter started dies with it, `drain_capped` refuses an answer past `max_output` (64 MiB default) and closes the pipe on the flood, `drain_head` drains stderr to its end and keeps 4 KiB for the error message, so a chatty converter never meets `SIGPIPE`, and the three pipes run on detached threads, so a grandchild that holds one open can never stall the worker.
+  One `GRACE` (2 s) deadline covers both reader pipes together and never one period apiece, so a lingering helper costs the worker 2 s and not 4 s.
+  The reader threads share their buffer (`PipeBytes`) with the worker, so `bytes_until` takes the bytes that arrived when that deadline passes: a pipe a grandchild keeps open costs no picture.
+  A failure of any kind becomes `SurfaceError::Render` with the program name and the exit code or the stderr head, and a program that cannot start becomes `SurfaceError::Unsupported`.
+  The converted SVG caches at `$XDG_CACHE_HOME/vv/converted/<key>.svg`, keyed by `KEY_VERSION` + the argv + the source bytes (`Cache::load_converted`, `Cache::store_converted`), because a grid decode and an image view open of one file run the conversion twice; the payload counts against `thumbcache::WRITE_BUDGET`, a failed store stays silent like `grid::store_thumb`, and a key change invalidates an entry, so no `FORMAT` bump is necessary.
+  `src/convert_off.rs` claims no file and answers `SurfaceError::Unsupported`, so a build without the `svg` feature routes on content alone.
 - Every showable source is a `src/surface.rs` `Surface`: `plane_count`, `bounds`, `render_whole`, `render`, `progressive` and `previews`.
-  `open_surface` sniffs the content with `src/sign.rs` and picks the backend: a raster file (`ImageSurface`), a vector file (`VectorSurface`), a PDF (`PdfSurface`), a Typst source (`TypstSurface`, which compiles to PDF bytes) or a Mermaid source (`src/mermaid.rs`, which renders to SVG text).
+  `open_surface` sniffs the content with `src/sign.rs` and picks the backend: a raster file (`ImageSurface`), a vector file (`VectorSurface`), a PDF (`PdfSurface`), a Typst source (`TypstSurface`, which compiles to PDF bytes) or a path a converter rule claims (`src/convert.rs`, which runs the rule and parses its SVG).
   A backend writes `render_whole`; `render` is a provided method that renders the whole plane and crops the region out of it.
   A backend with a region anchor (the vector tree, the PDF rasterizer) overrides `render` to pay only for the pixels the caller asked for, and returns `SurfaceError::Unsupported` rather than the whole plane for a region it cannot serve.
   A `View` names a plane, an optional `region::Crop` and a scale (output pixels per surface unit), so the grid asks for a thumbnail, the loader for the whole plane and the image view for the patch it shows.
@@ -89,7 +91,7 @@ The binary name is `vv`.
   `Surface::progressive` returns a `Box<dyn ChunkSource>` and not a path, so an in-memory or network source can stream, and the default `Ok(None)` means one step.
   `Surface::can_refine` says whether a settled zoom can yield a sharper picture of the same plane: a vector tree or a document page answers true, a raster image false.
   `Surface::spread_count` and `Surface::spread_box` name the spread column of a book (0 and `None` for every other source), so the image view steps a spread with the book's own geometry.
-  A source that paints no paper fills it into its own renders (`mermaid` through `VectorSurface::with_background`), never into the window clear: a window color that waits on the async source handle would flip after the picture lands, so a picture never picks the window color for itself.
+  A source that paints no paper fills it into its own renders (`convert` through `VectorSurface::with_background`), never into the window clear: a window color that waits on the async source handle would flip after the picture lands, so a picture never picks the window color for itself.
   A raster plane measures the capped size it renders, so `bounds` and the pixels of a scale-1.0 render agree.
   The trait decisions live in `docs/adr/0001-surface-one-region-based-render-trait.md`.
 - The image view repaints the region its window shows, from the open surface, when `Surface::can_refine` says a sharper picture is possible.
@@ -119,8 +121,11 @@ The binary name is `vv`.
   `ViewState::prefetch_want` holds the aim still in flight, so `tick_crop` waits for it instead of starting a duplicate paint, and `PREFETCH_GIVE_UP` (3 s) bounds that wait for a worker that never answers.
   The patch draws in place while it arrives, and `region::patch_covers_at_scale` adopts it into `crop` on the first frame that holds the window, so the landing frame skips `QUIET` and shows the sharp spread at once.
   A resize or a pan away drops it, because a patch of an aim the view left would only linger as a stretched texture.
-- Grid extension filter: `src/grid.rs` `is_image_path` (also `pdf`, `typ` and `mmd`).
-  Keep the crate features in sync (neither `pdf`, `typ` nor `mmd` is an image crate feature).
+- Grid extension filter: `src/grid.rs` `is_image_path`, which asks `convert::rules` (`is_image_path_in`) and then the static list `is_image_extension` (also `pdf` and `typ`).
+  The static list holds only the formats this build routes, so a converted format lists through its rule alone, and a format with no rule stays out.
+  The list covers the formats this build routes by content, and the table adds every extension a rule claims.
+  A test calls `is_image_path_in` with a table of its own, so no test reads the table of the user.
+  Keep the crate features in sync (neither `pdf` nor `typ` is an image crate feature).
 - A grid cell holds an `EntrySource`, which is a path opened (and sniffed) lazily at decode time.
   What the cell draws is one `grid::Cell`: `Pending { placeholder }`, `Thumb(texture)` or `Failed(reason)`.
   One value says whether the cell shows a thumb or an error square, so no cell holds both; `Cell::texture` answers the draw, `thumb` and `placeholder` answer one kind alone, and `awaits_first_decode` names a cell that waits for its first decode.
@@ -151,9 +156,9 @@ The binary name is `vv`.
   Property tests are dev-only and never gate a release build.
   The `region` proptests keep `failure_persistence` off, so no `proptest-regressions/` entry exists: a saved case becomes a plain `#[test]` beside the strategies, with its shrunk values written out.
 - Public error types derive `derive_more::{Display, Error, From}` (feature `from` on).
-  Each module owns its error enum: `src/error.rs` (`DecodeError`), `src/sign.rs` (`SignError`), `src/surface.rs` (`SurfaceError`), `src/pdf.rs` (`PdfError`), `src/grid.rs` (`GridError`), `src/loader.rs` (`LoadError`), `src/mcp.rs` (`SpawnError`), `src/thumbcache.rs` (`CacheError`).
+  Each module owns its error enum: `src/error.rs` (`DecodeError`), `src/sign.rs` (`SignError`), `src/surface.rs` (`SurfaceError`), `src/pdf.rs` (`PdfError`), `src/grid.rs` (`GridError`), `src/loader.rs` (`LoadError`), `src/mcp.rs` (`SpawnError`), `src/thumbcache.rs` (`CacheError`), `src/convert.rs` (`ConvertError`, the rule table of the config file).
   `src/typst.rs` has no error enum of its own: its compile diagnostics and export failures become `SurfaceError::Render`.
-  `src/mermaid.rs` follows the same rule: a rejected source, a missing diagram and a panicking renderer become `SurfaceError::Render`, and a non-UTF-8 or oversized file becomes `SurfaceError::Unsupported`.
+  `src/convert.rs` keeps the same split for the conversion: a failed or timed-out program, a flood past its output cap and an answer that is no SVG document become `SurfaceError::Render`, and a source past its cap or a program that cannot start becomes `SurfaceError::Unsupported`. Its own `ConvertError` covers the rule table alone, and that never reaches a surface.
   `main.rs` keeps `anyhow`.
 - Wrap raw pixel and window primitives in the `src/dim.rs` newtypes (`ImgW`, `ImgH`, `WinW`, `WinH`, `LongSide`, `PreviewPx`, `Delay`, `Rate`, `RampTime`, `Rect`).
   The newtype accessor is `raw()`, never `get()`: `ImgW::new(4).raw() == 4`.
@@ -171,7 +176,7 @@ The binary name is `vv`.
   An mpsc `Sender` clone and a `NativeFontContext` clone are the same kind of thing: a shared handle, not a copy of the data.
   `mem::replace` swaps the visual anchor, and no code clones a pixel buffer: `downscale_rgba_ref` borrows.
   A function that only reads takes `&Path`, `&str` or `&[T]`, and takes ownership only when it stores the value.
-  A process-wide table is a `LazyLock` or an `OnceLock` (the embedded font list and its book, the Mermaid renderer and its font context, the host font database, the X auto-repeat rate, the core count), because a third-party API reads it with no seam for an owner, and each static docstring names that reason.
+  A process-wide table is a `LazyLock` or an `OnceLock` (the embedded font list and its book, the converter rule table, the host font database, the X auto-repeat rate, the core count), because a third-party API reads it with no seam for an owner, and each static docstring names that reason.
   The one `RefCell` (`Grid::layout_cache`) is a memo of a pure function of its key, and the grid is its only owner.
 - Two motion styles, and a key picks one:
   - Auto-repeat steps a discrete move.
@@ -287,7 +292,7 @@ The binary name is `vv`.
   Those paints are `#[ignore]`d, because a plain `cargo test` has no adapter: `checks.gpu` runs them on Mesa's lavapipe, and a host with Vulkan runs them by hand (`MESA` store path, `VK_DRIVER_FILES`, `cargo test --test gpu_offscreen -- --ignored`).
   lavapipe renders on the CPU with no GPU, no device node and no display, so the check runs in the build sandbox.
   The check sets `VK_DRIVER_FILES` to the lavapipe ICD, `LD_LIBRARY_PATH` to the system libraries (wgpu opens `libvulkan.so.1` with `dlopen`), one font set for the label metrics, and `VV_GPU_REQUIRED`, which turns a missing adapter into a failure instead of a skip.
-  They cover the clear, a fill, a source rect, straight alpha, a turn, the texel grid of a 1:1 patch, and the SVG, PDF, Typst, Mermaid and book planes end to end.
+  They cover the clear, a fill, a source rect, straight alpha, a turn, the texel grid of a 1:1 patch, and the SVG, PDF, Typst, converted-source and book planes end to end.
   The default gate still compiles them, so the seam never rots.
 - A captured drag grabs the pointer (`CursorGrabMode::Locked`, falling back to `Confined`, which is all X11 allows) and reads the raw device deltas of `DeviceEvent::MouseMotion`.
   `Input::capture` owns the swap: while a drag holds the pointer, the raw travel moves the logical pointer and `WindowEvent::CursorMoved` is ignored, because the grab keeps the real pointer in place.
@@ -317,7 +322,8 @@ The binary name is `vv`.
 ## Build
 
 - `nix build .#versatile-viewer-doc` makes the rustdoc HTML.
-- `nix flake check` gates clippy (`--all-targets -- --deny warnings`), tests, treefmt, the package build, `checks.gpu` (the ignored headless paints on lavapipe) and `checks.minimal` (`cargo test --no-default-features`, which compiles the `_off` stubs of the thumbnail cache, the SVG backend and the Mermaid backend).
+- `nix flake check` gates clippy (`--all-targets -- --deny warnings`), tests, treefmt, the package build, `checks.gpu` (the ignored headless paints on lavapipe) and `checks.minimal` (`cargo test --no-default-features`, which compiles the `_off` stubs of the thumbnail cache, the SVG backend and the converter backend).
+  The `svg` feature also owns the converter, so its stub and the SVG stub share one gate.
   One test gate only: `cargo test` in `checks.default` runs the unit tests, the integration tests and the doctests, so no separate `--doc` check exists.
   `checks.package` builds the package with `doCheck = false`, because the fixup owns the rpath gate and a second `cargo test` would only repeat the suite.
   `checks.minimal` carries its own `minimalArtifacts` dep set, because `--no-default-features` resolves 58 crates with a different feature set and cargo would recompile them in release on every run.
@@ -388,7 +394,7 @@ A source that paints no paper carries it in its pixels, so no clear color ever h
   The image view title follows the open image.
   The grid keeps the launch title.
   A one-image directory skips the grid at launch.
-  A Mermaid source opens as one vector picture, never as a book, because it holds one plane.
+  A converted source opens as one vector picture, never as a book, because it holds one plane.
   A document launched directly (two planes or more) opens its whole book at once, over a one-cell grid that waits behind ESC, and its title stays the image title.
   A book keeps the default window size, because its canvas can stand wider than a screen and taller than a texture.
   ESC returns to the grid.

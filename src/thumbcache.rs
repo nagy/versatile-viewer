@@ -58,6 +58,12 @@ use crate::{
 
 /// The directory under the XDG cache home.
 const DIR: &str = "vv/thumbnails";
+/// The directory of the converted sources, beside the thumbnails.
+#[cfg(feature = "svg")]
+const CONVERTED_DIR: &str = "vv/converted";
+/// File extension of a converted source.
+#[cfg(feature = "svg")]
+const CONVERTED_EXT: &str = "svg";
 /// File extension of a cached thumbnail.
 const EXT: &str = "thumb";
 /// `b"VVTH"`: the cache file magic.
@@ -154,6 +160,12 @@ pub struct CachedThumb {
 pub struct Cache {
     /// The cache directory, or None when the cache is off.
     dir: Option<PathBuf>,
+    /// The directory of the converted SVG documents, or None when the cache is
+    /// off.
+    /// The field exists only with the `svg` feature, because only that build
+    /// compiles a converter to read it.
+    #[cfg(feature = "svg")]
+    converted: Option<PathBuf>,
     /// The bytes this run wrote so far, against [`WRITE_BUDGET`].
     written: AtomicU64,
 }
@@ -172,12 +184,14 @@ impl Cache {
     #[must_use]
     pub fn new() -> Self {
         let off = std::env::var_os("VV_CACHE").is_some_and(|v| v == "0");
-        let dir = (!off)
+        let home = (!off)
             .then(|| xdg::BaseDirectories::new().get_cache_home())
-            .flatten()
-            .map(|dir| dir.join(DIR));
+            .flatten();
+        let dir = home.as_ref().map(|dir| dir.join(DIR));
         Self {
             dir,
+            #[cfg(feature = "svg")]
+            converted: home.map(|dir| dir.join(CONVERTED_DIR)),
             written: AtomicU64::new(0),
         }
     }
@@ -188,6 +202,8 @@ impl Cache {
     pub fn off() -> Self {
         Self {
             dir: None,
+            #[cfg(feature = "svg")]
+            converted: None,
             written: AtomicU64::new(0),
         }
     }
@@ -197,10 +213,15 @@ impl Cache {
     /// The directory is created on the first write, like the real one.
     /// A test uses this to keep its files inside a temporary directory, so it
     /// never fills the cache of the user.
+    /// The converted sources live in a `converted` directory under `dir`, so a
+    /// test holds both kinds of entry in one throwaway tree.
     #[must_use]
     pub fn in_dir(dir: impl Into<PathBuf>) -> Self {
+        let dir = dir.into();
         Self {
-            dir: Some(dir.into()),
+            #[cfg(feature = "svg")]
+            converted: Some(dir.join("converted")),
+            dir: Some(dir),
             written: AtomicU64::new(0),
         }
     }
@@ -332,6 +353,66 @@ impl Cache {
         self.entry_file(&canonical, long_side).ok()
     }
 
+    /// The converted SVG document of `key`, when one is stored.
+    ///
+    /// The key is the one [`crate::convert`] builds from the argv and the
+    /// source bytes, so a changed rule or a changed source misses.
+    /// The call reads the whole payload, which a diagram keeps at a few
+    /// hundred kilobytes.
+    /// Run this on a decode worker, never on the main thread.
+    #[cfg(feature = "svg")]
+    #[must_use]
+    pub fn load_converted(&self, key: &str) -> Option<Vec<u8>> {
+        let file = self
+            .converted
+            .as_ref()?
+            .join(format!("{key}.{CONVERTED_EXT}"));
+        fs::read(file).ok()
+    }
+
+    /// Store the converted SVG document of `key`.
+    ///
+    /// The function writes a temporary file first and renames it, so a reader
+    /// never sees a half-written file.
+    /// A payload counts against the same [`WRITE_BUDGET`] as a thumbnail, so a
+    /// run stops storing either kind when it writes too much.
+    /// A converted document has no source stamp: the key already covers the
+    /// bytes it came from.
+    /// Run this on a decode worker.
+    ///
+    /// # Errors
+    ///
+    /// The function errors when the cache is off, this run spent its budget, or
+    /// the write fails.
+    #[cfg(feature = "svg")]
+    pub fn store_converted(&self, key: &str, bytes: &[u8]) -> Result<(), CacheError> {
+        let dir = self.converted.as_ref().ok_or(CacheError::Off)?;
+        let file = dir.join(format!("{key}.{CONVERTED_EXT}"));
+        let len = bytes.len() as u64;
+        // One atomic add owns the budget, so two workers never overshoot it.
+        let mut used = self.written.fetch_add(len, Ordering::Relaxed);
+        if used.saturating_add(len) > WRITE_BUDGET {
+            self.written.fetch_sub(len, Ordering::Relaxed);
+            return Err(CacheError::Full);
+        }
+        used += len;
+        let write = fs::create_dir_all(dir).and_then(|()| {
+            sweep_dead_tmp(dir);
+            let tmp =
+                file.with_extension(format!("{CONVERTED_EXT}.{}.{used}.tmp", std::process::id()));
+            fs::write(&tmp, bytes)
+                .and_then(|()| fs::rename(&tmp, &file))
+                .inspect_err(|_| {
+                    let _ = fs::remove_file(&tmp);
+                })
+        });
+        if let Err(err) = write {
+            self.written.fetch_sub(len, Ordering::Relaxed);
+            return Err(CacheError::Io(err));
+        }
+        Ok(())
+    }
+
     /// The cache file of `canonical` at `long_side`.
     ///
     /// The key hashes the canonical path, so the name is independent of the
@@ -367,8 +448,8 @@ fn sweep_dead_tmp(dir: &Path) {
         .unwrap_or_default();
     for entry in entries.flatten() {
         let path = entry.path();
-        // A temporary file is named `<key>.thumb.<pid>.<n>.tmp`, so only the
-        // `.tmp` tail identifies it.
+        // A temporary file is named `<key>.thumb.<pid>.<n>.tmp` or
+        // `<key>.svg.<pid>.<n>.tmp`, so only the `.tmp` tail identifies it.
         if !path
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("tmp"))
