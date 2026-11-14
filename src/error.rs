@@ -41,9 +41,6 @@ pub enum DecodeError {
     /// A vector file passed the input cap.
     #[display("svg input too large")]
     Input,
-    /// The build has no SVG support.
-    #[display("svg support not compiled in")]
-    VectorOff,
     /// The RGBA buffer did not match its dimensions.
     /// [`crate::DecodedImage::new`] answers this instead of building an image
     /// whose pixel count and buffer disagree.

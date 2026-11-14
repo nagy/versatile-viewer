@@ -23,11 +23,10 @@ use std::{
 
 use derive_more::{Display, Error, From};
 
-#[cfg(feature = "svg")]
-use crate::draw::Color;
 use crate::{
     DecodedImage,
     dim::{ImgH, ImgW},
+    draw::Color,
     error::DecodeError,
     sign::{self, SignError},
 };
@@ -337,16 +336,10 @@ pub fn open_surface(path: &Path) -> Result<Box<dyn Surface>, SurfaceError> {
         Err(_) if crate::convert::claims(path) => return crate::convert::open(path),
         Err(err) => return Err(err.into()),
     };
-    #[cfg(feature = "svg")]
-    if kind == sign::Kind::Vector {
-        return Ok(Box::new(VectorSurface::open(path)?));
+    match kind {
+        sign::Kind::Vector => Ok(Box::new(VectorSurface::open(path)?)),
+        sign::Kind::Raster(format) => Ok(Box::new(ImageSurface::new(path, format))),
     }
-    let Some(format) = kind.raster() else {
-        // A build without the `svg` feature cannot parse a vector document,
-        // and its sniff never claims one.
-        return Err(SurfaceError::Sign(SignError::Unknown));
-    };
-    Ok(Box::new(ImageSurface::new(path, format)))
 }
 
 /// Open a file and, when its source holds more than one plane, show it as a
@@ -479,7 +472,6 @@ impl Surface for ImageSurface {
 /// vector file has no pixel size of its own, so the code bakes one between
 /// 1024 and [`crate::MAX_TEXTURE_SIDE`] on the long side.
 /// The tree stays parsed, so every render paints from it at any scale.
-#[cfg(feature = "svg")]
 #[derive(Debug)]
 pub struct VectorSurface {
     vector: std::sync::Arc<crate::svg::Vector>,
@@ -488,7 +480,6 @@ pub struct VectorSurface {
     background: Option<Color>,
 }
 
-#[cfg(feature = "svg")]
 impl VectorSurface {
     /// Parse `path` into a surface.
     ///
@@ -532,7 +523,6 @@ impl VectorSurface {
     }
 }
 
-#[cfg(feature = "svg")]
 impl Surface for VectorSurface {
     fn plane_count(&self) -> usize {
         1
@@ -941,7 +931,6 @@ mod tests {
         assert!(open_surface(&dir.path().join("gone.png")).is_err());
     }
 
-    #[cfg(feature = "svg")]
     #[test]
     fn a_vector_surface_measures_its_base_raster() {
         let dir = temp_dir();
@@ -967,7 +956,6 @@ mod tests {
         assert!(surface.can_refine());
     }
 
-    #[cfg(feature = "svg")]
     #[test]
     fn a_vector_surface_renders_a_thumbnail_scale() {
         // The grid asks for the thumbnail size, and the tree paints it
@@ -985,7 +973,6 @@ mod tests {
         assert_eq!(thumb.as_rgba().len(), 512 * 256 * 4);
     }
 
-    #[cfg(feature = "svg")]
     #[test]
     fn a_vector_surface_renders_the_region_the_window_shows() {
         let dir = temp_dir();
@@ -1012,14 +999,6 @@ mod tests {
             (zoomed.width, zoomed.height),
             (ImgW::new(1024), ImgH::new(1024))
         );
-    }
-
-    #[cfg(not(feature = "svg"))]
-    #[test]
-    fn a_vector_file_needs_the_svg_feature() {
-        let dir = temp_dir();
-        let path = write_svg(dir.path(), "drawing.svg", SQUARE);
-        assert!(open_surface(&path).is_err());
     }
 
     #[test]

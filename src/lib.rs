@@ -70,10 +70,6 @@
 
 pub mod blurbg;
 pub mod book;
-#[cfg(feature = "svg")]
-pub mod convert;
-#[cfg(not(feature = "svg"))]
-#[path = "convert_off.rs"]
 pub mod convert;
 pub mod dim;
 pub mod draw;
@@ -93,10 +89,6 @@ pub mod render;
 pub mod rotate;
 pub mod sign;
 pub mod surface;
-#[cfg(feature = "svg")]
-pub mod svg;
-#[cfg(not(feature = "svg"))]
-#[path = "svg_off.rs"]
 pub mod svg;
 pub mod texture;
 #[cfg(feature = "cache")]

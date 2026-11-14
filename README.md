@@ -68,11 +68,9 @@ exits, so the next launch starts warm. A stale entry re-decodes, and a deleted
 image leaves its thumbnail to the user.
 
 The `cache` cargo feature (on by default) owns the cache.
-`--no-default-features` decodes every file on every launch. The `svg` cargo
-feature (on by default) owns the SVG path and the converter path beside it,
-because the converter answers an SVG document and that backend paints it.
-`--no-default-features --features cache` leaves both out, so no `.svg` file
-decodes and no file routes through an external program.
+`--no-default-features` decodes every file on every launch. It is the only
+optional feature: the SVG backend and the converter path beside it always
+compile, so a `.svg` file and a file a rule claims open in every build.
 
 ## Architecture
 

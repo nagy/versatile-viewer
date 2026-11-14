@@ -1699,7 +1699,7 @@ mod tests {
     }
 
     /// A vector entry measures its base raster, not its thumbnail.
-    #[cfg(all(feature = "cache", feature = "svg"))]
+    #[cfg(feature = "cache")]
     #[test]
     fn a_vector_entry_measures_its_base_raster() {
         let dir = TempDir::new().unwrap();
@@ -1740,7 +1740,7 @@ mod tests {
 
     /// A cold vector entry learns its shape from the placeholder pass, so the
     /// cell and the image-view fit never wait for the decode.
-    #[cfg(all(feature = "cache", feature = "svg"))]
+    #[cfg(feature = "cache")]
     #[test]
     fn a_cold_vector_entry_measures_before_the_decode() {
         let dir = TempDir::new().unwrap();
@@ -1998,7 +1998,6 @@ mod tests {
         assert!(!is_image_extension(Path::new("noext")));
     }
 
-    #[cfg(feature = "svg")]
     #[test]
     fn a_configured_extension_lists() {
         // A table of this test alone, so the filter never reads the table of

@@ -15,7 +15,7 @@ The binary name is `vv`.
 - Decode JPEG XL with `jxl-oxide` (pure Rust, no libjxl).
 - Decode common formats with the `image` crate.
 - Rasterize SVG and SVGZ with `resvg` (pure Rust, no cairo).
-  The module is `src/svg.rs`, with `src/svg_off.rs` as the stub of a build without the `svg` feature.
+  The module is `src/svg.rs`, and the `resvg`, `usvg`, `tiny-skia`, `flate2` and `fontdb` dependencies stay plain ones, so the backend always compiles.
   A vector file has no pixel size, so it bakes one: `svg::base_side` clamps the declared long side into `BASE_MIN_SIDE` (1024) ..= `MAX_TEXTURE_SIDE` (8192).
   The aspect stays exact, so the base raster and the thumbnail share one shape.
   The base size is the source size: the grid entry, the cache header and the image fit all measure that pair, never the thumbnail.
@@ -55,7 +55,7 @@ The binary name is `vv`.
   `spawn` sets the working directory to the directory of the source (`current_dir`), so a relative `#include`, `#image` or `#read` resolves beside the file, as the Typst CLI roots the project there.
   The CLI answers a compile error on stderr with a non-zero exit, which becomes `SurfaceError::Render` with the first lines of that message, never a crash.
 - A format this viewer does not parse reaches a backend through a converter, `src/convert.rs` (`Converters`, `Rule`, `Converters::open`, `surface`).
-  The `svg` cargo feature (a default feature) owns the module, because that backend paints an SVG answer, and `toml` stays a plain dependency beside it.
+  The module always compiles, because the SVG backend paints its answer, and `toml` stays a plain dependency beside it.
   A converter reads the source bytes on stdin and writes an SVG document or a PDF on stdout, so no format engine links into the binary and a new format needs no rebuild.
   `surface` decides by the head of the answer: `PDF_MAGIC` (`%PDF-`) opens a `PdfSurface`, which keeps one plane per page so `open_book_surface` shows the document as the same book a PDF file shows, and any other answer must parse with `svg::from_str` into one `VectorSurface`.
   A PDF answer ignores the rule's `background`, because a page paints its own paper.
@@ -76,7 +76,6 @@ The binary name is `vv`.
   The reader threads share their buffer (`PipeBytes`) with the worker, so `bytes_until` takes the bytes that arrived when that deadline passes: a pipe a grandchild keeps open costs no picture.
   A failure of any kind becomes `SurfaceError::Render` with the program name and the exit code or the stderr head, and a program that cannot start becomes `SurfaceError::Unsupported`.
   The converted answer caches at `$XDG_CACHE_HOME/vv/converted/<key>.conv`, keyed by `KEY_VERSION` + the argv + the source bytes (`Cache::load_converted`, `Cache::store_converted`), because a grid decode and an image view open of one file run the conversion twice; the entry carries no kind, because `surface` sniffs the head, the payload counts against `thumbcache::WRITE_BUDGET`, a failed store stays silent like `grid::store_thumb`, and a key change invalidates an entry, so no `FORMAT` bump is necessary.
-  `src/convert_off.rs` claims no file and answers `SurfaceError::Unsupported`, so a build without the `svg` feature routes on content alone.
 - Every showable source is a `src/surface.rs` `Surface`: `plane_count`, `bounds`, `render_whole`, `render`, `progressive` and `previews`.
   `open_surface` sniffs the content with `src/sign.rs` and picks the backend: a raster file (`ImageSurface`), a vector file (`VectorSurface`), a PDF (`PdfSurface`) or a path a converter rule claims (`src/convert.rs`, which runs the rule and opens its answer).
   A backend writes `render_whole`; `render` is a provided method that renders the whole plane and crops the region out of it.
@@ -320,11 +319,10 @@ The binary name is `vv`.
 ## Build
 
 - `nix build .#versatile-viewer-doc` makes the rustdoc HTML.
-- `nix flake check` gates clippy (`--all-targets -- --deny warnings`), tests, treefmt, the package build, `checks.gpu` (the ignored headless paints on lavapipe) and `checks.minimal` (`cargo test --no-default-features`, which compiles the `_off` stubs of the thumbnail cache, the SVG backend and the converter backend).
-  The `svg` feature also owns the converter, so its stub and the SVG stub share one gate.
+- `nix flake check` gates clippy (`--all-targets -- --deny warnings`), tests, treefmt, the package build, `checks.gpu` (the ignored headless paints on lavapipe) and `checks.minimal` (`cargo test --no-default-features`, which compiles `src/thumbcache_off.rs`).
   One test gate only: `cargo test` in `checks.default` runs the unit tests, the integration tests and the doctests, so no separate `--doc` check exists.
   `checks.package` builds the package with `doCheck = false`, because the fixup owns the rpath gate and a second `cargo test` would only repeat the suite.
-  `checks.minimal` carries its own `minimalArtifacts` dep set, because `--no-default-features` resolves 58 crates with a different feature set and cargo would recompile them in release on every run.
+  `checks.minimal` carries its own `minimalArtifacts` dep set, because `--no-default-features` drops the cache dependencies and cargo would recompile that feature set in release on every run.
 ## Run
 
 Run `nix run . -- <image-path-or-directory>`.

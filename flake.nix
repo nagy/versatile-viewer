@@ -127,10 +127,9 @@
           };
 
           # The dependency set of the build without the default features.
-          # `--no-default-features` drops the cache and SVG dependencies (and
-          # the converter path with them), so 58 crates resolve with a different
-          # feature set and cargo recompiles them in the release profile on
-          # every gate run.
+          # `--no-default-features` drops the cache dependencies, so a few
+          # crates resolve with a different feature set and cargo recompiles
+          # them in the release profile on every gate run.
           # An artifact set of their own pays that build once.
           minimalArtifacts = craneLib.buildDepsOnly {
             inherit
@@ -142,10 +141,9 @@
             cargoExtraArgs = "--no-default-features";
           };
 
-          # The build without the default features: no thumbnail cache, no SVG,
-          # and so no converter. `src/thumbcache_off.rs`, `src/svg_off.rs` and
-          # `src/convert_off.rs` answer from stubs in that build (the last two
-          # share the one gate), and nothing else in the flake compiles them.
+          # The build without the default features: no thumbnail cache, so
+          # `src/thumbcache_off.rs` answers from its stubs. That is the only
+          # stub the tree keeps.
           minimal = craneLib.cargoTest {
             inherit
               src

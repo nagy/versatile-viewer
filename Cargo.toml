@@ -9,15 +9,8 @@ description = "A fast image (and later, video) viewer: nsxiv meets mpv. JPEG XL 
 # The on-disk thumbnail cache: the XDG lookup, the entry key and the JPEG XL
 # encoder.
 # Without it every launch decodes every file, and the grid still works.
-default = ["cache", "svg"]
+default = ["cache"]
 cache = ["dep:jixel", "dep:sha2", "dep:xdg"]
-# SVG: sniffs the file head, parses with usvg and paints with tiny-skia.
-# Without it src/svg_off.rs never claims a file, so no `.svg` file decodes.
-# The feature also owns the converter path: an external program turns a file of
-# an unknown format into an SVG document, and this backend rasterizes it, so a
-# build without SVG compiles src/convert_off.rs, which claims no file and lets
-# every source route on its content alone.
-svg = ["dep:fontdb", "dep:flate2", "dep:resvg", "dep:tiny-skia", "dep:usvg"]
 
 [dependencies]
 anyhow = "1.0.104"
@@ -138,29 +131,27 @@ resvg = { version = "0.50.0", default-features = false, features = [
   "system-fonts",
   "svgz",
   "text",
-], optional = true }
+] }
 # The rasterizer under resvg: the code paints a usvg tree into a Pixmap.
-tiny-skia = { version = "0.12.0", default-features = false, features = [
-  "std",
-], optional = true }
+tiny-skia = { version = "0.12.0", default-features = false, features = ["std"] }
 # Gzip for a `.svgz` head. The code decompresses itself, so a gzip bomb hits
 # a size cap instead of the allocator.
 flate2 = { version = "1.1.11", default-features = false, features = [
   "rust_backend",
-], optional = true }
+] }
 # The host font database behind `system-fonts`. The code loads it once per
 # process and hands the same Arc to every SVG parse.
 fontdb = { version = "0.24.0", default-features = false, features = [
   "fs",
   "memmap",
-], optional = true }
+] }
 # The parser under resvg: XML, CSS and the tree the painter consumes.
 # The same feature flags as resvg, so one version serves both.
 usvg = { version = "0.50.0", default-features = false, features = [
   "system-fonts",
   "svgz",
   "text",
-], optional = true }
+] }
 
 # The rule table of the converters (`src/convert.rs`): TOML, pure Rust
 # (MIT OR Apache-2.0).

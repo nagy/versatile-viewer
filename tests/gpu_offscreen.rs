@@ -463,7 +463,6 @@ fn an_svg_paints_its_rect() {
 }
 
 /// A converted source paints the paper its rule names, under its own paints.
-#[cfg(feature = "svg")]
 #[test]
 #[ignore = "needs a Vulkan device"]
 fn a_converted_source_paints_on_its_paper() {

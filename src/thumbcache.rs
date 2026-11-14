@@ -59,10 +59,8 @@ use crate::{
 /// The directory under the XDG cache home.
 const DIR: &str = "vv/thumbnails";
 /// The directory of the converted answers, beside the thumbnails.
-#[cfg(feature = "svg")]
 const CONVERTED_DIR: &str = "vv/converted";
 /// File extension of a converted answer.
-#[cfg(feature = "svg")]
 const CONVERTED_EXT: &str = "conv";
 /// File extension of a cached thumbnail.
 const EXT: &str = "thumb";
@@ -161,9 +159,6 @@ pub struct Cache {
     /// The cache directory, or None when the cache is off.
     dir: Option<PathBuf>,
     /// The directory of the converted answers, or None when the cache is off.
-    /// The field exists only with the `svg` feature, because only that build
-    /// compiles a converter to read it.
-    #[cfg(feature = "svg")]
     converted: Option<PathBuf>,
     /// The bytes this run wrote so far, against [`WRITE_BUDGET`].
     written: AtomicU64,
@@ -189,7 +184,6 @@ impl Cache {
         let dir = home.as_ref().map(|dir| dir.join(DIR));
         Self {
             dir,
-            #[cfg(feature = "svg")]
             converted: home.map(|dir| dir.join(CONVERTED_DIR)),
             written: AtomicU64::new(0),
         }
@@ -201,7 +195,6 @@ impl Cache {
     pub fn off() -> Self {
         Self {
             dir: None,
-            #[cfg(feature = "svg")]
             converted: None,
             written: AtomicU64::new(0),
         }
@@ -218,7 +211,6 @@ impl Cache {
     pub fn in_dir(dir: impl Into<PathBuf>) -> Self {
         let dir = dir.into();
         Self {
-            #[cfg(feature = "svg")]
             converted: Some(dir.join("converted")),
             dir: Some(dir),
             written: AtomicU64::new(0),
@@ -361,7 +353,6 @@ impl Cache {
     /// The call reads the whole payload, which a diagram or a short document
     /// keeps at a few hundred kilobytes.
     /// Run this on a decode worker, never on the main thread.
-    #[cfg(feature = "svg")]
     #[must_use]
     pub fn load_converted(&self, key: &str) -> Option<Vec<u8>> {
         let file = self
@@ -385,7 +376,6 @@ impl Cache {
     ///
     /// The function errors when the cache is off, this run spent its budget, or
     /// the write fails.
-    #[cfg(feature = "svg")]
     pub fn store_converted(&self, key: &str, bytes: &[u8]) -> Result<(), CacheError> {
         let dir = self.converted.as_ref().ok_or(CacheError::Off)?;
         let file = dir.join(format!("{key}.{CONVERTED_EXT}"));

@@ -499,7 +499,6 @@ mod tests {
         assert_eq!(done.pixels().unwrap().as_rgba().len(), 4 * 3 * 4);
     }
 
-    #[cfg(feature = "svg")]
     #[test]
     fn a_vector_file_announces_its_base_size_then_paints() {
         // A vector file parses in a few milliseconds and paints in tens, so
