@@ -23,7 +23,7 @@ repaints the region its window shows, at the scale it shows it. A deep zoom
 then never stretches the base raster, because the paint area follows the
 window and not the document. One paint runs at a time, and a repaint runs once
 the view holds still. A cold vector cell measures its shape from a parse of
-the size alone, so the grid and the image fit never wait for the decode.
+the size alone. The grid and the image fit then never wait for the decode.
 
 PDF rasterizes through [hayro], also pure Rust with no C dependency. A
 document shows as a book. The cover page sits alone in the first spread, and
@@ -38,17 +38,11 @@ cover page, so a cell never holds a second page.
 
 A Typst source converts through the [typst] CLI to a PDF. It then renders
 through that same path, so it shows as the same book and zooms sharply for the
-same reasons. The command runs with the directory of the file as project root,
-so `#include`, `#image` and `#read` resolve like the Typst CLI.
+same reasons.
 
 A source of another format converts through an external program. The answer
-shows as one vector picture when it is an SVG document, and as the same book a
-PDF file shows when it is a PDF. A converter reads the source bytes on stdin
-and writes an SVG document or a PDF on stdout, so no format engine links into
-the binary. The viewer ships no rule of its own: write one in the rule table
-below, and every file of that format then lists in the grid and opens as a
-picture. A Mermaid diagram and a Typst document each need one rule, and a
-browserless renderer and the Typst CLI serve them.
+shows as one vector picture when it is an SVG document, and as the same book
+when it is a PDF. A rule names that program.
 
 Thumbnails render in a directory grid that fills the window. They decode in
 parallel on a background pool and sort in natural order (`img2` before
@@ -58,14 +52,16 @@ the blurred background. The grid thumbnails cache in
 `$XDG_CACHE_HOME/vv/thumbnails/`, so a second launch of a directory fills the
 grid from the cache without a decode.
 
-An entry holds a lossy JPEG XL codestream (quality 95, exact alpha), so 512 px
-costs tens of kilobytes instead of a megabyte of raw RGBA8. The entry header
-also carries a [ThumbHash] of the thumb (at most 32 bytes). A warm launch then
-paints every cell from a header read of about 200 bytes, before any decode
-starts. The cached thumbnail is 512 px and the grid thumb is the same size, so
-a warm cell matches a fresh one. The cache keeps its entries after the viewer
-exits, so the next launch starts warm. A stale entry re-decodes, and a deleted
-image leaves its thumbnail to the user.
+An entry holds a lossy JPEG XL codestream (quality 95, exact alpha). A 512 px
+thumb costs tens of kilobytes instead of a megabyte of raw RGBA8. The entry
+header also carries a [ThumbHash] of the thumb (at most 32 bytes). A warm
+launch then paints every cell from a header read of about 200 bytes, before
+any decode starts. The cached thumbnail is 512 px and the grid thumb is the
+same size, so a warm cell matches a fresh one.
+
+The cache keeps its entries after the viewer exits, so the next launch starts
+warm. A stale entry re-decodes, and a deleted image leaves its thumbnail to
+the user.
 
 The cache always compiles. `VV_CACHE=0` turns it off for one run, so every
 launch decodes every file.
@@ -75,8 +71,8 @@ launch decodes every file.
 Every showable source is a `Surface` (`crates/vv-source/src/surface.rs`). An image file is a
 one-plane surface, and a raster file and a vector file differ only in the
 backend behind the trait. A surface renders a `View` (a plane index, an
-optional region and a scale) into an RGBA buffer, and it reports the natural
-size of each plane.
+optional region and a scale) into an RGBA buffer. It reports the natural size
+of each plane.
 
 A grid cell holds an `EntrySource`, which is a file to open lazily. A
 multi-page source wraps in `crates/vv-source/src/book.rs`, which stacks every spread in one
@@ -89,15 +85,14 @@ name. A PDF routes on its `%PDF-` magic to the hayro backend in `crates/vv-sourc
 
 A path that a converter rule claims routes to `crates/vv-source/src/convert.rs`, which runs the
 program of the rule and opens its answer. The content decides first, so a
-converter rule never takes a file this viewer can read. A format that carries
-no magic it knows falls to its rule, and a `.typ` source is plain text with no
-magic, so it needs a rule of its own. A converter reads the source on stdin and
-answers an SVG document or a PDF on stdout. The `%PDF-` head becomes the PDF
-backend, so a document keeps its pages and its book. Any other answer parses
-into the vector backend in `crates/vv-source/src/surface.rs`. The program runs in the directory
-of the source, so a relative path resolves beside the file. The answer caches
-under `$XDG_CACHE_HOME/vv/converted/`, keyed by the source bytes and the argv,
-so a grid decode and an image view open of one file cost one conversion.
+converter rule never takes a file this viewer can read. A format with no magic
+the viewer knows falls to its rule. A `.typ` source is plain text with no
+magic, so it needs a rule of its own.
+
+The `%PDF-` head of the answer becomes the PDF backend. Any other answer parses
+into the vector backend in `crates/vv-source/src/surface.rs`. The answer caches
+under `$XDG_CACHE_HOME/vv/converted/`, keyed by the source bytes and the argv. A
+grid decode and an image view open of one file then cost one conversion.
 
 The grid holds one cell per file, and a document cell shows its cover page.
 
@@ -277,9 +272,8 @@ in the image view until the second press.
 
 A PDF opens as a book, and so does any source a converter answers with a PDF.
 The cover page sits alone, the pages then pair up, and every spread stacks in
-one figure. A zoom past a settled
-ease repaints the region the window shows, at the scale it shows it, so a page
-stays sharp at any zoom.
+one figure. A zoom past a settled ease repaints the region the window shows, at
+the scale it shows it. A page then stays sharp at any zoom.
 
 `Shift+J` and `Shift+K` step one spread down or up on a book. The view eases
 the next spread to the top of the window and stops there. One press moves one
@@ -288,11 +282,12 @@ spread, and the step ends on the first and the last spread. `Page-down` and
 
 ## Converters
 
-A file format this viewer does not parse becomes showable through a program
-that reads the source bytes on stdin and writes an SVG document or a PDF on
-stdout. Rules live in `$XDG_CONFIG_HOME/vv/converters.toml`, and `VV_CONVERTERS`
-names another file. The viewer holds no rule of its own, so a format converts
-only after you name its program.
+A file format this viewer does not parse becomes showable through a program.
+The program reads the source bytes on stdin and writes an SVG document or a PDF
+on stdout. No format engine then links into the binary. Rules live in
+`$XDG_CONFIG_HOME/vv/converters.toml`, and `VV_CONVERTERS` names another file.
+The viewer holds no rule of its own, so a format converts only after you name
+its program.
 
 ```toml
 [defaults]
@@ -320,31 +315,28 @@ The second rule shows a Typst document. The [typst] CLI reads the source on
 stdin and writes a PDF on stdout. A PDF answer keeps one plane per page, so the
 document shows as the same book a PDF file shows. It names twice the clock of a
 diagram, because a large document takes a while. The command runs in the
-directory of the source, so a relative `#include` or `#image` resolves beside
-the file.
+directory of the source, so a relative `#include`, `#image` or `#read` resolves
+beside the file.
 
 The [merman-cli] SVG leaves its canvas unset, like Mermaid core. Either name
 `background` in the rule, as above, or pass `--background white` to the
 command. Without either one the page stays transparent and the viewer
 background shows through.
 
-A format without a rule stays out of the grid. A rule makes its extension
-list, so `diagram.mmd` appears beside the photos and opens as a picture, and so
-does `notes.typ` once a rule claims it.
+A format without a rule stays out of the grid, and no program runs. A rule adds
+its extension to the list, so `diagram.mmd` appears beside the photos and opens
+as a picture. `notes.typ` lists once a rule claims it.
 
 A converter that starts a browser, such as `mmdc`, takes the same shape:
 `command = ["mmdc", "-i", "-", "-o", "-", "-e", "svg"]`.
 
 The command runs without a shell, so each array element stays one argument.
-It runs in the directory of the source, so a relative path resolves beside the
-file. A PDF answer ignores `background`, because a page paints its own paper.
+A PDF answer ignores `background`, because a page paints its own paper.
 
 The converters hold two slots by default, because a browser-backed converter
 costs a second and hundreds of megabytes. The rest of the conversions queue.
-Every conversion has a wall clock and an output cap. A converter that outlives
-either one is killed, so a stuck program never holds a decode worker. A format
-that a rule claims lists in the directory grid like any other file. Without a
-rule the file keeps out of the grid, and no program runs.
+The viewer kills a converter that outlives its wall clock or its output cap, so
+a stuck program never holds a decode worker.
 
 ## Environment variables
 
