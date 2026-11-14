@@ -32,3 +32,14 @@ publish = false
 [workspace.lints.clippy]
 all = "deny"
 pedantic = "warn"
+
+# The profile of the binary and of every member.
+# The split into layers paid one price: a small function that crosses a crate
+# boundary inlines only under link-time optimization (ADR 0004).
+# `thin` collects the bitcode of the whole graph and inlines the hot calls
+# across members, and it keeps the release build of seven crates short.
+# `codegen-units = 2` (the cargo default is 16) gives the inliner more of the
+# graph per unit than 16 does, and it still writes units in parallel.
+[profile.release]
+lto = "thin"
+codegen-units = 2

@@ -101,7 +101,9 @@ error.
 Cross-crate inlining is the price of the split. Every member builds with the
 same profile, so a hot small function that crosses a crate boundary wants
 `lto` in the release profile; the checks and the binary are not hot paths of
-one another.
+one another. The root `Cargo.toml` pays it: `[profile.release]` carries
+`lto = "thin"` and `codegen-units = 2`, so the inliner sees the bitcode of
+the whole graph and the release build stays short.
 
 The flake passes `--workspace --locked` to every cargo invocation, so one
 derivation covers the whole graph, cargo never re-fingerprints it between the

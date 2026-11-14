@@ -344,6 +344,9 @@ The `pub use` line also carries what the public API names, so a caller reaches o
 ## Build
 
 - `nix build .#versatile-viewer-doc` makes the rustdoc HTML of every member.
+- The root `Cargo.toml` carries `[profile.release]` with `lto = "thin"` and `codegen-units = 2`.
+  The layer split pays cross-crate inlining (ADR 0004), so every member builds under one profile that inlines across members.
+  The profile is the whole opt-level policy: no member overrides it.
 - Every cargo invocation of the flake passes `--workspace --locked`, so one derivation covers all seven members, cargo never re-fingerprints the dependency graph between the deps drv and the package drv, and a drifted lockfile fails the build instead of fetching.
   `checks.gpu` narrows to `-p vv-cli --test gpu_offscreen`, because those paints live in the binary crate.
   `pname` stays `versatile-viewer`, so a store path matches the flake attribute that carries it.
