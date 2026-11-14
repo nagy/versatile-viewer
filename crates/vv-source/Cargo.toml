@@ -71,9 +71,13 @@ usvg = { version = "0.50.0", default-features = false, features = [
 ] }
 # The rule table of the converters (`src/convert.rs`): TOML, pure Rust
 # (MIT OR Apache-2.0).
-# `parse` alone, so the writer half of the crate stays out and the code walks
-# the values by hand (no serde derive in this tree).
+# `parse` alone, so the writer half of the crate stays out.
 toml = { version = "0.8.23", default-features = false, features = ["parse"] }
+# The `Deserialize` of that config file. `deny_unknown_fields` on three small
+# structs replaces a hand walk over `toml::Value`, so an unknown key stays an
+# error and a rule inherits `[defaults]` through an `Option` per field.
+# No feature beyond the derive macro: the file has no allocator of its own.
+serde = { version = "1.0.228", features = ["derive"] }
 # The kill of a timed-out converter, which names its whole process group by the
 # negative pid. Only the one syscall wrapper.
 libc = "0.2.191"

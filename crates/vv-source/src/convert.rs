@@ -41,6 +41,9 @@
 //!
 //! The `[defaults]` table reads before every rule, so a rule inherits its
 //! values whatever the order of the file.
+//! Three `serde` structs with `deny_unknown_fields` read the file, so an
+//! unknown key is an error at every level and a rule names each inherited
+//! value as an `Option` of its own.
 //!
 //! The command runs without a shell, so every argument stays one argument and
 //! no config file reaches an interpolation.
@@ -87,6 +90,7 @@ use std::{
 };
 
 use derive_more::{Display, Error, From};
+use serde::Deserialize;
 
 use crate::{
     draw::Color,
@@ -308,24 +312,12 @@ impl Converters {
     /// The function errors when the text is not TOML, holds an unknown key, or
     /// holds a rule without an extension or without a command.
     pub fn parse(text: &str) -> Result<Self, ConvertError> {
-        let root: toml::Table = toml::from_str(text)?;
-        // `[defaults]` first, because every rule inherits its values and a
-        // table reads in key order rather than in file order.
-        let defaults = match root.get("defaults") {
-            Some(value) => Defaults::parse(value)?,
-            None => Defaults::default(),
-        };
-        let mut rules = Vec::new();
-        for (key, value) in &root {
-            match key.as_str() {
-                "defaults" => {}
-                "convert" => {
-                    for rule in array(value, "convert")? {
-                        rules.push(Rule::parse(rule, &defaults)?);
-                    }
-                }
-                other => return Err(unknown(other, "defaults, convert")),
-            }
+        let file: ConfigFile = toml::from_str(text)?;
+        // `[defaults]` first, because every rule inherits its values.
+        let defaults = Defaults::new(&file.defaults)?;
+        let mut rules = Vec::with_capacity(file.convert.len());
+        for rule in &file.convert {
+            rules.push(Rule::new(rule, &defaults)?);
         }
         Ok(Self::from_rules(rules, defaults.slots))
     }
@@ -778,6 +770,36 @@ fn key(rule: &Rule, source: &[u8]) -> String {
     key
 }
 
+/// One config file, as the text states it.
+///
+/// `deny_unknown_fields` is what makes a typo an error instead of a silently
+/// ignored key, and it covers every table of the file.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfigFile {
+    /// The `[defaults]` table, which every rule inherits.
+    #[serde(default)]
+    defaults: DefaultsFile,
+    /// The `[[convert]]` tables, in file order.
+    #[serde(default, rename = "convert")]
+    convert: Vec<RuleFile>,
+}
+
+/// The `[defaults]` table, as the file states it.
+///
+/// A count that the table does not name keeps the built-in default, so an
+/// empty file and a missing file agree.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DefaultsFile {
+    /// The conversions that run at one time.
+    slots: Option<usize>,
+    /// The wall clock of one conversion, in milliseconds.
+    timeout_ms: Option<usize>,
+    /// The most bytes a converter may write to stdout.
+    max_output: Option<usize>,
+}
+
 /// The value of `[defaults]`, which every rule inherits.
 #[derive(Debug, Clone, Copy)]
 struct Defaults {
@@ -800,24 +822,38 @@ impl Default for Defaults {
 }
 
 impl Defaults {
-    /// Read the `[defaults]` table.
+    /// Read the `[defaults]` table over the built-in values.
     ///
     /// # Errors
     ///
-    /// The function errors when the value is no table or holds an unknown key.
-    fn parse(value: &toml::Value) -> Result<Self, ConvertError> {
-        let mut defaults = Self::default();
-        let table = table(value, "defaults")?;
-        for (key, value) in table {
-            match key.as_str() {
-                "slots" => defaults.slots = positive(value, "slots")?,
-                "timeout_ms" => defaults.timeout = millis(value, "timeout_ms")?,
-                "max_output" => defaults.max_output = positive(value, "max_output")?,
-                other => return Err(unknown(other, "slots, timeout_ms, max_output")),
-            }
-        }
-        Ok(defaults)
+    /// The function errors when a count is zero.
+    fn new(file: &DefaultsFile) -> Result<Self, ConvertError> {
+        let plain = Self::default();
+        Ok(Self {
+            slots: positive(file.slots, "slots")?.unwrap_or(plain.slots),
+            timeout: millis(file.timeout_ms, "timeout_ms")?.unwrap_or(plain.timeout),
+            max_output: positive(file.max_output, "max_output")?.unwrap_or(plain.max_output),
+        })
     }
+}
+
+/// One `[[convert]]` table, as the file states it.
+///
+/// Every count stays optional, because a rule inherits the value of
+/// `[defaults]` when it names none of its own.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuleFile {
+    /// The extensions the rule claims.
+    ext: Vec<String>,
+    /// The argv of the program, where the first element is the program.
+    command: Vec<String>,
+    /// The wall clock of one conversion, in milliseconds.
+    timeout_ms: Option<usize>,
+    /// The most bytes the program may write to stdout.
+    max_output: Option<usize>,
+    /// The paper under the paints, `#rrggbb` or `#rrggbbaa`.
+    background: Option<String>,
 }
 
 impl Rule {
@@ -825,118 +861,64 @@ impl Rule {
     ///
     /// # Errors
     ///
-    /// The function errors when the table holds an unknown key, no extension,
-    /// or no command.
-    fn parse(value: &toml::Value, defaults: &Defaults) -> Result<Self, ConvertError> {
-        let mut rule = Self {
-            extensions: Vec::new(),
-            command: Vec::new(),
-            timeout: defaults.timeout,
-            max_output: defaults.max_output,
-            background: None,
-        };
-        let table = table(value, "convert")?;
-        for (key, value) in table {
-            match key.as_str() {
-                "ext" => {
-                    for ext in strings(value, "ext")? {
-                        let ext = ext.trim_start_matches('.').trim().to_lowercase();
-                        if ext.is_empty() {
-                            return Err(ConvertError::Config(
-                                "`ext` holds an empty extension".into(),
-                            ));
-                        }
-                        rule.extensions.push(ext);
-                    }
-                }
-                "command" => rule.command = strings(value, "command")?,
-                "timeout_ms" => rule.timeout = millis(value, "timeout_ms")?,
-                "max_output" => rule.max_output = positive(value, "max_output")?,
-                "background" => rule.background = Some(color(value)?),
-                other => {
-                    return Err(unknown(
-                        other,
-                        "ext, command, timeout_ms, max_output, background",
-                    ));
-                }
+    /// The function errors when the table names no extension, no command, or a
+    /// value out of range.
+    fn new(file: &RuleFile, defaults: &Defaults) -> Result<Self, ConvertError> {
+        let mut extensions = Vec::with_capacity(file.ext.len());
+        for ext in &file.ext {
+            let ext = ext.trim_start_matches('.').trim().to_lowercase();
+            if ext.is_empty() {
+                return Err(ConvertError::Config(
+                    "`ext` holds an empty extension".into(),
+                ));
             }
+            extensions.push(ext);
         }
-        if rule.extensions.is_empty() {
+        if extensions.is_empty() {
             return Err(ConvertError::Config(
                 "a `[[convert]]` rule names no extension".into(),
             ));
         }
-        if rule.command.is_empty() {
+        if file.command.is_empty() {
             return Err(ConvertError::Config(format!(
                 "the rule of `{}` names no command",
-                rule.extensions.join(", ")
+                extensions.join(", ")
             )));
         }
-        Ok(rule)
+        Ok(Self {
+            extensions,
+            command: file.command.clone(),
+            timeout: millis(file.timeout_ms, "timeout_ms")?.unwrap_or(defaults.timeout),
+            max_output: positive(file.max_output, "max_output")?.unwrap_or(defaults.max_output),
+            background: file.background.as_deref().map(color).transpose()?,
+        })
     }
 }
 
-/// A table value, named `key`.
+/// A count that must be one or more.
 ///
 /// # Errors
 ///
-/// The function errors when the value is no table.
-fn table<'a>(value: &'a toml::Value, key: &str) -> Result<&'a toml::Table, ConvertError> {
-    value
-        .as_table()
-        .ok_or_else(|| ConvertError::Config(format!("`{key}` is no table")))
-}
-
-/// An array value, named `key`.
-///
-/// # Errors
-///
-/// The function errors when the value is no array.
-fn array<'a>(value: &'a toml::Value, key: &str) -> Result<&'a Vec<toml::Value>, ConvertError> {
-    value
-        .as_array()
-        .ok_or_else(|| ConvertError::Config(format!("`{key}` is no array")))
-}
-
-/// The strings of an array value, named `key`.
-///
-/// # Errors
-///
-/// The function errors when the value is no array or holds no string.
-fn strings(value: &toml::Value, key: &str) -> Result<Vec<String>, ConvertError> {
-    let mut out = Vec::new();
-    for item in array(value, key)? {
-        let text = item
-            .as_str()
-            .ok_or_else(|| ConvertError::Config(format!("`{key}` holds no string")))?;
-        out.push(text.to_owned());
+/// The function errors when the value is zero.
+fn positive(value: Option<usize>, key: &str) -> Result<Option<usize>, ConvertError> {
+    match value {
+        Some(0) => Err(ConvertError::Config(format!("`{key}` must be positive"))),
+        other => Ok(other),
     }
-    Ok(out)
 }
 
-/// A positive integer value, named `key`.
+/// A millisecond count as a duration.
 ///
 /// # Errors
 ///
-/// The function errors when the value is no positive integer.
-fn positive(value: &toml::Value, key: &str) -> Result<usize, ConvertError> {
-    let number = value
-        .as_integer()
-        .ok_or_else(|| ConvertError::Config(format!("`{key}` is no integer")))?;
-    usize::try_from(number)
-        .ok()
-        .filter(|n| *n > 0)
-        .ok_or_else(|| ConvertError::Config(format!("`{key}` must be positive")))
-}
-
-/// A millisecond count as a duration, named `key`.
-///
-/// # Errors
-///
-/// The function errors when the value is no positive integer.
-fn millis(value: &toml::Value, key: &str) -> Result<Duration, ConvertError> {
-    let ms = positive(value, key)?;
-    Ok(Duration::from_millis(u64::try_from(ms).unwrap_or(u64::MAX)))
+/// The function errors when the value is zero.
+fn millis(value: Option<usize>, key: &str) -> Result<Option<Duration>, ConvertError> {
+    let Some(ms) = positive(value, key)? else {
+        return Ok(None);
+    };
+    Ok(Some(Duration::from_millis(
+        u64::try_from(ms).unwrap_or(u64::MAX),
+    )))
 }
 
 /// A paper color, `#rrggbb` or `#rrggbbaa`.
@@ -944,10 +926,7 @@ fn millis(value: &toml::Value, key: &str) -> Result<Duration, ConvertError> {
 /// # Errors
 ///
 /// The function errors when the value is no hex color of either length.
-fn color(value: &toml::Value) -> Result<Color, ConvertError> {
-    let text = value
-        .as_str()
-        .ok_or_else(|| ConvertError::Config("`background` is no string".into()))?;
+fn color(text: &str) -> Result<Color, ConvertError> {
     let hex = text.strip_prefix('#').unwrap_or(text);
     let bad = || ConvertError::Config("`background` must be `#rrggbb` or `#rrggbbaa`".into());
     // The ASCII test comes first, so every slice below sits on a character
@@ -959,11 +938,6 @@ fn color(value: &toml::Value) -> Result<Color, ConvertError> {
     let (r, g, b) = (channel(0)?, channel(2)?, channel(4)?);
     let a = if hex.len() == 8 { channel(6)? } else { 255 };
     Ok(Color::new(r, g, b, a))
-}
-
-/// The error of an unknown key.
-fn unknown(key: &str, known: &str) -> ConvertError {
-    ConvertError::Config(format!("unknown key `{key}`, known: {known}"))
 }
 
 /// The converter table of this process.
@@ -1133,6 +1107,31 @@ timeout_ms = 30000
         .expect("a valid table");
         let mmd = table.rule(Path::new("flow.mmd")).expect("the mmd rule");
         assert_eq!(mmd.background, None, "the rule states no paper");
+    }
+
+    #[test]
+    fn parse_rejects_a_zero_count() {
+        // A zero slot would queue every conversion forever, and a zero clock
+        // would kill the program before it started.
+        assert!(Converters::parse("[defaults]\nslots = 0\n").is_err());
+        assert!(Converters::parse("[defaults]\ntimeout_ms = 0\n").is_err());
+        assert!(
+            Converters::parse("[[convert]]\next = [\"exr\"]\ncommand = [\"x\"]\nmax_output = 0\n")
+                .is_err()
+        );
+        // A negative count is no `usize`, so the TOML reader rejects it.
+        assert!(Converters::parse("[defaults]\nmax_output = -1\n").is_err());
+    }
+
+    #[test]
+    fn parse_rejects_an_unknown_key_in_a_rule() {
+        assert!(
+            Converters::parse(
+                "[[convert]]\next = [\"exr\"]\ncommand = [\"x\"]\ncolour = \"red\"\n"
+            )
+            .is_err()
+        );
+        assert!(Converters::parse("[defaults]\nslot = 1\n").is_err());
     }
 
     #[test]

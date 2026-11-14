@@ -3399,6 +3399,7 @@ dependencies = [
  "memmap2",
  "rayon",
  "resvg",
+ "serde",
  "sha2",
  "tempfile",
  "tiny-skia",
