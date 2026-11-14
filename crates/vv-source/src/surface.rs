@@ -28,6 +28,7 @@ use crate::{
     dim::{ImgH, ImgW},
     draw::Color,
     error::DecodeError,
+    region,
     sign::{self, SignError},
 };
 
@@ -46,12 +47,7 @@ impl Size {
     /// The whole plane as a [`Crop`].
     #[must_use]
     pub const fn whole(self) -> Crop {
-        Crop {
-            x: 0.0,
-            y: 0.0,
-            w: self.w,
-            h: self.h,
-        }
+        region::crop(0.0, 0.0, self.w, self.h)
     }
 }
 
@@ -626,17 +622,17 @@ fn crop_and_resample(
     let (iw, ih) = (img.width().raw(), img.height().raw());
     // Crop in `img` pixels: surface units times the buffer's own scale.
     let px = |v: f32| (v * img_scale).round();
-    let x = px(region.x.max(0.0)).clamp(0.0, iw as f32) as u32;
-    let y = px(region.y.max(0.0)).clamp(0.0, ih as f32) as u32;
+    let x = px(region.min_x().max(0.0)).clamp(0.0, iw as f32) as u32;
+    let y = px(region.min_y().max(0.0)).clamp(0.0, ih as f32) as u32;
     // Do not trust the caller's region size: a region past the edge crops.
-    let cw = (px(region.w.max(0.0)) as u32).min(iw - x);
-    let ch = (px(region.h.max(0.0)) as u32).min(ih - y);
+    let cw = (px(region.width().max(0.0)) as u32).min(iw - x);
+    let ch = (px(region.height().max(0.0)) as u32).min(ih - y);
     if cw == 0 || ch == 0 {
         return Err(SurfaceError::Buffer);
     }
     // Output size in target-ready pixels, from the (clamped) crop extent.
-    let tw = (region.w * scale).round().max(1.0) as u32;
-    let th = (region.h * scale).round().max(1.0) as u32;
+    let tw = (region.width() * scale).round().max(1.0) as u32;
+    let th = (region.height() * scale).round().max(1.0) as u32;
     let out = if tw == cw && th == ch {
         crop_rows(img.as_rgba(), iw, x, y, cw, ch)
     } else {
@@ -775,12 +771,7 @@ mod tests {
         // scale 1.0 is 4x4 pixels.
         let dir = temp_dir();
         let path = write_png(dir.path(), "img.png", 8, 4);
-        let region = Crop {
-            x: 0.0,
-            y: 0.0,
-            w: 4.0,
-            h: 4.0,
-        };
+        let region = region::crop(0.0, 0.0, 4.0, 4.0);
         let decoded = open_surface(&path)
             .unwrap()
             .render(View::region(0, region, 1.0))
@@ -796,12 +787,7 @@ mod tests {
     fn a_region_off_the_edge_crops_instead_of_failing() {
         let dir = temp_dir();
         let path = write_png(dir.path(), "img.png", 8, 4);
-        let region = Crop {
-            x: 6.0,
-            y: 2.0,
-            w: 8.0,
-            h: 8.0,
-        };
+        let region = region::crop(6.0, 2.0, 8.0, 8.0);
         let decoded = open_surface(&path)
             .unwrap()
             .render(View::region(0, region, 1.0))
@@ -983,12 +969,7 @@ mod tests {
         let surface = open_surface(&path).unwrap();
         // The region arrives in base raster pixels, so the right half starts
         // at x = 512.
-        let right = Crop {
-            x: 512.0,
-            y: 0.0,
-            w: 512.0,
-            h: 512.0,
-        };
+        let right = region::crop(512.0, 0.0, 512.0, 512.0);
         let patch = surface.render(View::region(0, right, 1.0)).unwrap();
         assert_eq!(
             (patch.width(), patch.height()),
@@ -1009,18 +990,8 @@ mod tests {
         // The image view computes its patch as a `region::Crop`, and a surface
         // takes the same type, so no call site converts one shape into
         // another.
-        let crop = crate::region::Crop {
-            x: 1.0,
-            y: 2.0,
-            w: 3.0,
-            h: 4.0,
-        };
-        let whole = Crop {
-            x: 1.0,
-            y: 2.0,
-            w: 3.0,
-            h: 4.0,
-        };
+        let crop = crate::region::crop(1.0, 2.0, 3.0, 4.0);
+        let whole = region::crop(1.0, 2.0, 3.0, 4.0);
         assert_eq!(crop, whole);
     }
 
@@ -1064,12 +1035,7 @@ mod tests {
     fn default_render_crops_a_region_from_the_whole_plane() {
         // WholeOnly has no region anchor; the trait default must render the
         // whole plane and crop the requested region out of it.
-        let region = Crop {
-            x: 2.0,
-            y: 1.0,
-            w: 4.0,
-            h: 2.0,
-        };
+        let region = region::crop(2.0, 1.0, 4.0, 2.0);
         let out = WholeOnly.render(View::region(0, region, 1.0)).unwrap();
         assert_eq!((out.width(), out.height()), (ImgW::new(4), ImgH::new(2)));
         assert_eq!(out.as_rgba().len(), 4 * 2 * 4);
@@ -1077,12 +1043,7 @@ mod tests {
 
     #[test]
     fn default_render_scales_a_region() {
-        let region = Crop {
-            x: 0.0,
-            y: 0.0,
-            w: 4.0,
-            h: 2.0,
-        };
+        let region = region::crop(0.0, 0.0, 4.0, 2.0);
         let out = WholeOnly.render(View::region(0, region, 2.0)).unwrap();
         assert_eq!((out.width(), out.height()), (ImgW::new(8), ImgH::new(4)));
     }
@@ -1126,12 +1087,7 @@ mod tests {
 
     #[test]
     fn a_backend_without_an_anchor_fails_loudly_on_a_region() {
-        let region = Crop {
-            x: 0.0,
-            y: 0.0,
-            w: 2.0,
-            h: 2.0,
-        };
+        let region = region::crop(0.0, 0.0, 2.0, 2.0);
         let err = NoAnchor.render(View::region(0, region, 1.0));
         assert!(matches!(err, Err(SurfaceError::Unsupported(_))));
     }

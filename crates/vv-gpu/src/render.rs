@@ -135,10 +135,10 @@ impl QuadInstance {
         Self {
             p: quad.p.map(|point| [point.x, point.y]),
             src: [
-                (f64::from(src.x) / width) as f32,
-                (f64::from(src.y) / height) as f32,
-                (f64::from(src.right()) / width) as f32,
-                (f64::from(src.bottom()) / height) as f32,
+                (f64::from(src.min_x()) / width) as f32,
+                (f64::from(src.min_y()) / height) as f32,
+                (f64::from(src.max_x()) / width) as f32,
+                (f64::from(src.max_y()) / height) as f32,
             ],
             tint: tint.to_f32(),
         }
@@ -344,18 +344,18 @@ impl Renderer {
         // sides span only the gap between them, exactly like raylib's own
         // outline.
         let half = thickness / 2.0;
-        let (left, right) = (rect.x + half, rect.right() - half);
-        let (top, bottom) = (rect.y + half, rect.bottom() - half);
+        let (left, right) = (rect.min_x() + half, rect.max_x() - half);
+        let (top, bottom) = (rect.min_y() + half, rect.max_y() - half);
         // The horizontal edges take the band's center line, from edge to edge.
         self.line(
-            Vec2::new(rect.x, top),
-            Vec2::new(rect.right(), top),
+            Vec2::new(rect.min_x(), top),
+            Vec2::new(rect.max_x(), top),
             thickness,
             color,
         );
         self.line(
-            Vec2::new(rect.x, bottom),
-            Vec2::new(rect.right(), bottom),
+            Vec2::new(rect.min_x(), bottom),
+            Vec2::new(rect.max_x(), bottom),
             thickness,
             color,
         );
@@ -691,6 +691,7 @@ fn instance_buffer(device: &wgpu::Device, capacity: u32) -> wgpu::Buffer {
 #[allow(clippy::float_cmp)] // the asserted values are exact window arithmetic
 mod tests {
     use super::*;
+    use crate::dim;
 
     /// The instance stride keeps every attribute inside its alignment.
     #[test]
@@ -720,10 +721,10 @@ mod tests {
     /// A textured instance normalizes its source rect to the texture.
     #[test]
     fn a_textured_instance_normalizes_its_source() {
-        let quad = Quad::rect(Rect::new(0.0, 0.0, 10.0, 20.0));
+        let quad = Quad::rect(dim::rect(0.0, 0.0, 10.0, 20.0));
         let inst = QuadInstance::textured(
             quad,
-            Rect::new(5.0, 10.0, 20.0, 40.0),
+            dim::rect(5.0, 10.0, 20.0, 40.0),
             (40, 80),
             Color::WHITE,
         );
@@ -737,7 +738,7 @@ mod tests {
     #[test]
     fn a_solid_instance_carries_the_tint() {
         let inst = QuadInstance::solid(
-            Quad::rect(Rect::new(1.0, 2.0, 3.0, 4.0)),
+            Quad::rect(dim::rect(1.0, 2.0, 3.0, 4.0)),
             Color::new(0, 51, 255, 128),
         );
         assert_eq!(inst.src, [0.0, 0.0, 1.0, 1.0]);

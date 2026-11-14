@@ -1317,7 +1317,7 @@ impl Viewer {
                 } else if self.debug {
                     eprintln!(
                         "vv: esc dropped region {:?}, drag {}",
-                        kept.map(|r| (r.x, r.y, r.w, r.h)),
+                        kept.map(|r| (r.min_x(), r.min_y(), r.width(), r.height())),
                         dragging.is_some()
                     );
                 }
@@ -1979,7 +1979,12 @@ impl Viewer {
                     if self.debug {
                         eprintln!(
                             "vv: region release {:?}",
-                            self.st.selection.map(|r| (r.x, r.y, r.w, r.h))
+                            self.st.selection.map(|r| (
+                                r.min_x(),
+                                r.min_y(),
+                                r.width(),
+                                r.height()
+                            ))
                         );
                     }
                 }

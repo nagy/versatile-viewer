@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use crate::{
     DecodedImage,
-    dim::{LongSide, Rect, WinH, WinW},
+    dim::{self, LongSide, Rect, WinH, WinW},
     downscale_rgba_ref,
     draw::{Color, Turn},
     render::Renderer,
@@ -268,7 +268,7 @@ impl BlurBg {
         if let Some(old) = &self.old {
             r.texture_pro(
                 old,
-                Rect::sized(old.width() as f32, old.height() as f32),
+                dim::whole(old.width() as f32, old.height() as f32),
                 cover_rect(old.width(), old.height(), win_w, win_h),
                 Turn::NONE,
                 Color::new(rgb, rgb, rgb, 255),
@@ -280,7 +280,7 @@ impl BlurBg {
         let t = progress * progress * (3.0 - 2.0 * progress); // smoothstep
         r.texture_pro(
             tex,
-            Rect::sized(tex.width() as f32, tex.height() as f32),
+            dim::whole(tex.width() as f32, tex.height() as f32),
             cover_rect(tex.width(), tex.height(), win_w, win_h),
             Turn::NONE,
             Color::new(rgb, rgb, rgb, (t * 255.0) as u8),
@@ -296,7 +296,7 @@ const fn cover_rect(w: u32, h: u32, win_w: WinW, win_h: WinH) -> Rect {
     let (fw, fh) = (w as f32, h as f32);
     let (win_w, win_h) = (win_w.raw(), win_h.raw());
     let s = (win_w / fw).max(win_h / fh);
-    Rect::new(
+    dim::rect(
         (win_w - fw * s) / 2.0,
         (win_h - fh * s) / 2.0,
         fw * s,
@@ -310,7 +310,9 @@ mod tests {
     use crate::dim::{ImgH, ImgW};
 
     // Compile-time check that these stay const-evaluable.
-    const _: f32 = cover_rect(64, 32, WinW::new(800.0), WinH::new(600.0)).width;
+    const _: f32 = cover_rect(64, 32, WinW::new(800.0), WinH::new(600.0))
+        .size
+        .width;
 
     #[test]
     fn small_blur_dims_and_size() {
@@ -341,12 +343,12 @@ mod tests {
         // 2:1 texture in an 800x600 window: height limits -> 1200x600,
         // centered (x overflows equally to both sides).
         let r = cover_rect(64, 32, WinW::new(800.0), WinH::new(600.0));
-        assert_eq!((r.width, r.height), (1200.0, 600.0));
-        assert_eq!((r.x, r.y), (-200.0, 0.0));
+        assert_eq!((r.width(), r.height()), (1200.0, 600.0));
+        assert_eq!((r.min_x(), r.min_y()), (-200.0, 0.0));
         // Tall texture: width limits instead.
         let r = cover_rect(32, 64, WinW::new(800.0), WinH::new(600.0));
-        assert_eq!((r.width, r.height), (800.0, 1600.0));
-        assert_eq!((r.x, r.y), (0.0, -500.0));
+        assert_eq!((r.width(), r.height()), (800.0, 1600.0));
+        assert_eq!((r.min_x(), r.min_y()), (0.0, -500.0));
     }
 
     #[test]

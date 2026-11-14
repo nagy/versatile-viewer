@@ -175,7 +175,7 @@ impl PdfSurface {
             // Scale first, then move the requested region to the origin.
             // The page transform handles rotated and cropped pages.
             let transform = Affine::scale(f64::from(scale))
-                * Affine::translate((-f64::from(region.x), -f64::from(region.y)))
+                * Affine::translate((-f64::from(region.min_x()), -f64::from(region.min_y())))
                 * page_ref.initial_transform(true).to_kurbo();
             render_into(
                 page_ref,
@@ -267,7 +267,10 @@ impl Surface for PdfSurface {
 /// pixel-budget clamp.
 /// The returned scale is at least as small as the requested one.
 fn pixel_dimensions(region: Crop, scale: f32) -> (u16, u16, f32) {
-    let (rw, rh) = (f64::from(region.w.max(0.0)), f64::from(region.h.max(0.0)));
+    let (rw, rh) = (
+        f64::from(region.width().max(0.0)),
+        f64::from(region.height().max(0.0)),
+    );
     let mut scale = f64::from(scale);
     let area = (rw * rh).max(1.0);
     scale = scale
@@ -338,7 +341,7 @@ trailer<</Root 1 0 R/Size 8>>";
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::surface::open_surface;
+    use crate::{region, surface::open_surface};
 
     #[test]
     fn open_reports_one_page_and_its_size() {
@@ -387,13 +390,8 @@ pub(crate) mod tests {
     #[test]
     fn region_render_crops_and_scales() {
         let surface = PdfSurface::from_bytes(MINIMAL_PDF.to_vec()).unwrap();
-        let region = Crop {
-            x: 70.0,
-            y: 70.0,
-            w: 100.0,
-            h: 30.0,
-        };
-        let image = surface.render(View::region(0, region, 2.0)).unwrap();
+        let crop = region::crop(70.0, 70.0, 100.0, 30.0);
+        let image = surface.render(View::region(0, crop, 2.0)).unwrap();
         assert_eq!(
             (image.width(), image.height()),
             (ImgW::new(200), ImgH::new(60))
@@ -405,13 +403,8 @@ pub(crate) mod tests {
         // Crop the page exactly around the text and confirm the ink lands
         // inside the crop: the region path must not shift the content.
         let surface = PdfSurface::from_bytes(MINIMAL_PDF.to_vec()).unwrap();
-        let region = Crop {
-            x: 70.0,
-            y: 70.0,
-            w: 100.0,
-            h: 30.0,
-        };
-        let image = surface.render(View::region(0, region, 1.0)).unwrap();
+        let crop = region::crop(70.0, 70.0, 100.0, 30.0);
+        let image = surface.render(View::region(0, crop, 1.0)).unwrap();
         assert!(
             image
                 .as_rgba()

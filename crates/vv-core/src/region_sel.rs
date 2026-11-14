@@ -19,7 +19,11 @@
 //! view darkens the rest of the picture with one veil, and [`corners`] draws
 //! the bright border of the rect itself.
 
-use crate::{TAP_SLACK, draw::Vec2, region::Crop};
+use crate::{
+    TAP_SLACK,
+    draw::Vec2,
+    region::{self, Crop},
+};
 
 /// What a `v` press does with the region.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -119,7 +123,7 @@ impl Drag {
 #[must_use]
 pub fn press(point: Vec2, grab: Vec2, img: Vec2, kept: Option<Crop>, square: bool) -> Drag {
     let anchor = clamp(point, img);
-    match kept.filter(|rect| rect.contains_point(anchor)) {
+    match kept.filter(|rect| region::contains_point(rect, anchor)) {
         Some(from) => Drag::moving(anchor, grab, from),
         None => Drag::new(anchor, grab, square),
     }
@@ -138,10 +142,10 @@ pub fn clamp(point: Vec2, img: Vec2) -> Vec2 {
 #[must_use]
 pub fn corners(rect: Crop) -> [Vec2; 4] {
     [
-        Vec2::new(rect.x, rect.y),
-        Vec2::new(rect.right(), rect.y),
-        Vec2::new(rect.right(), rect.bottom()),
-        Vec2::new(rect.x, rect.bottom()),
+        Vec2::new(rect.min_x(), rect.min_y()),
+        Vec2::new(rect.max_x(), rect.min_y()),
+        Vec2::new(rect.max_x(), rect.max_y()),
+        Vec2::new(rect.min_x(), rect.max_y()),
     ]
 }
 
@@ -171,12 +175,12 @@ pub fn around(outer: Crop, inner: Crop) -> [[Vec2; 4]; 4] {
 
 /// The rect that two opposite corners span, in any drag direction.
 fn span(a: Vec2, b: Vec2) -> Crop {
-    Crop {
-        x: a.x.min(b.x),
-        y: a.y.min(b.y),
-        w: (b.x - a.x).abs(),
-        h: (b.y - a.y).abs(),
-    }
+    region::crop(
+        a.x.min(b.x),
+        a.y.min(b.y),
+        (b.x - a.x).abs(),
+        (b.y - a.y).abs(),
+    )
 }
 
 /// The square that two opposite corners span, shrunk to the room the plane
@@ -200,24 +204,24 @@ fn square(anchor: Vec2, corner: Vec2, img: Vec2) -> Crop {
 /// The rect keeps its size, so a move that reaches an edge stops there and
 /// never shrinks.
 fn shift(rect: Crop, delta: Vec2, img: Vec2) -> Crop {
-    Crop {
-        x: (rect.x + delta.x).clamp(0.0, (img.x - rect.w).max(0.0)),
-        y: (rect.y + delta.y).clamp(0.0, (img.y - rect.h).max(0.0)),
-        w: rect.w,
-        h: rect.h,
-    }
+    region::crop(
+        (rect.min_x() + delta.x).clamp(0.0, (img.x - rect.width()).max(0.0)),
+        (rect.min_y() + delta.y).clamp(0.0, (img.y - rect.height()).max(0.0)),
+        rect.width(),
+        rect.height(),
+    )
 }
 
 /// Clip a rect into another one, so the veil never reaches past the picture.
 fn inside(rect: Crop, outer: Crop) -> Crop {
-    let x = rect.x.clamp(outer.x, outer.right());
-    let y = rect.y.clamp(outer.y, outer.bottom());
-    Crop {
+    let x = rect.min_x().clamp(outer.min_x(), outer.max_x());
+    let y = rect.min_y().clamp(outer.min_y(), outer.max_y());
+    region::crop(
         x,
         y,
-        w: rect.w.min(outer.right() - x).max(0.0),
-        h: rect.h.min(outer.bottom() - y).max(0.0),
-    }
+        rect.width().min(outer.max_x() - x).max(0.0),
+        rect.height().min(outer.max_y() - y).max(0.0),
+    )
 }
 
 /// The area of a quad, by the shoelace formula.
@@ -249,25 +253,25 @@ mod tests {
     fn a_drag_spans_its_corners_in_any_direction() {
         let a = Vec2::new(200.0, 100.0);
         let out = drag(a).rect(Vec2::new(500.0, 400.0), plane());
-        assert_eq!((out.x, out.y), (200.0, 100.0));
-        assert_eq!((out.w, out.h), (300.0, 300.0));
+        assert_eq!((out.min_x(), out.min_y()), (200.0, 100.0));
+        assert_eq!((out.width(), out.height()), (300.0, 300.0));
         // A drag that runs up and to the left reads the same way.
         let back = drag(a).rect(Vec2::new(50.0, 20.0), plane());
-        assert_eq!((back.x, back.y), (50.0, 20.0));
-        assert_eq!((back.w, back.h), (150.0, 80.0));
+        assert_eq!((back.min_x(), back.min_y()), (50.0, 20.0));
+        assert_eq!((back.width(), back.height()), (150.0, 80.0));
     }
 
     #[test]
     fn a_drag_clamps_to_the_plane() {
         let a = Vec2::new(200.0, 100.0);
         let r = drag(a).rect(Vec2::new(5000.0, -80.0), plane());
-        assert_eq!((r.x, r.y), (200.0, 0.0));
-        assert_eq!((r.w, r.h), (800.0, 100.0));
+        assert_eq!((r.min_x(), r.min_y()), (200.0, 0.0));
+        assert_eq!((r.width(), r.height()), (800.0, 100.0));
         // An anchor that a resize pushed past the plane clamps too.
         let past = Drag::new(Vec2::new(2000.0, 900.0), Vec2::ZERO, false);
         let r = past.rect(Vec2::new(2000.0, 900.0), plane());
         assert!(r.is_empty());
-        assert_eq!((r.x, r.y), (1000.0, 500.0));
+        assert_eq!((r.min_x(), r.min_y()), (1000.0, 500.0));
     }
 
     #[test]
@@ -275,14 +279,14 @@ mod tests {
         let a = Vec2::new(200.0, 100.0);
         let square = Drag::new(a, Vec2::ZERO, true);
         let r = square.rect(Vec2::new(500.0, 200.0), plane());
-        assert_eq!((r.w, r.h), (300.0, 300.0));
+        assert_eq!((r.width(), r.height()), (300.0, 300.0));
         // The taller travel wins the same way.
         let r = square.rect(Vec2::new(260.0, 400.0), plane());
-        assert_eq!((r.w, r.h), (300.0, 300.0));
+        assert_eq!((r.width(), r.height()), (300.0, 300.0));
         // A corner past the plane still lands inside it.
         let r = square.rect(Vec2::new(900.0, 400.0), plane());
-        assert_eq!((r.x, r.y), (200.0, 100.0));
-        assert_eq!((r.w, r.h), (400.0, 400.0));
+        assert_eq!((r.min_x(), r.min_y()), (200.0, 100.0));
+        assert_eq!((r.width(), r.height()), (400.0, 400.0));
     }
 
     #[test]
@@ -291,12 +295,12 @@ mod tests {
         // rightward cannot pass it.
         let square = Drag::new(Vec2::new(990.0, 10.0), Vec2::ZERO, true);
         let r = square.rect(Vec2::new(1500.0, 400.0), plane());
-        assert_eq!((r.w, r.h), (10.0, 10.0));
-        assert_eq!((r.x, r.y), (990.0, 10.0));
+        assert_eq!((r.width(), r.height()), (10.0, 10.0));
+        assert_eq!((r.min_x(), r.min_y()), (990.0, 10.0));
         // The same anchor growing leftward keeps the room the left side has.
         let r = square.rect(Vec2::new(0.0, 400.0), plane());
-        assert_eq!((r.w, r.h), (490.0, 490.0));
-        assert_eq!((r.x, r.y), (500.0, 10.0));
+        assert_eq!((r.width(), r.height()), (490.0, 490.0));
+        assert_eq!((r.min_x(), r.min_y()), (500.0, 10.0));
     }
 
     #[test]
@@ -310,12 +314,7 @@ mod tests {
     #[test]
     fn a_press_inside_the_region_moves_it() {
         let img = plane();
-        let kept = Crop {
-            x: 100.0,
-            y: 100.0,
-            w: 200.0,
-            h: 100.0,
-        };
+        let kept = region::crop(100.0, 100.0, 200.0, 100.0);
         // A press on the border counts as inside, so the edge still moves it.
         let inside = press(Vec2::new(300.0, 150.0), Vec2::ZERO, img, Some(kept), false);
         assert!(matches!(inside.press, VPress::Move { .. }));
@@ -333,24 +332,19 @@ mod tests {
     #[test]
     fn a_move_carries_the_rect_and_stops_at_the_edge() {
         let img = plane();
-        let kept = Crop {
-            x: 100.0,
-            y: 100.0,
-            w: 200.0,
-            h: 100.0,
-        };
+        let kept = region::crop(100.0, 100.0, 200.0, 100.0);
         let grab = Vec2::new(150.0, 150.0);
         let d = press(grab, Vec2::ZERO, img, Some(kept), false);
         // The rect follows the pointer and keeps its size.
         let moved = d.rect(Vec2::new(250.0, 250.0), img);
         assert_eq!(
-            (moved.x, moved.y, moved.w, moved.h),
+            (moved.min_x(), moved.min_y(), moved.width(), moved.height()),
             (200.0, 200.0, 200.0, 100.0)
         );
         // A move past the edge stops there and never shrinks.
         let far = d.rect(Vec2::new(5000.0, 5000.0), img);
-        assert_eq!((far.right(), far.bottom()), (img.x, img.y));
-        assert_eq!((far.w, far.h), (200.0, 100.0));
+        assert_eq!((far.max_x(), far.max_y()), (img.x, img.y));
+        assert_eq!((far.width(), far.height()), (200.0, 100.0));
         // A tap keeps the rect the move grabbed, and a span tap commits
         // nothing.
         assert_eq!(d.tap_rect(), Some(kept));
@@ -359,18 +353,8 @@ mod tests {
 
     #[test]
     fn the_bands_cover_the_plane_around_the_selection() {
-        let outer = Crop {
-            x: 0.0,
-            y: 0.0,
-            w: 1000.0,
-            h: 500.0,
-        };
-        let inner = Crop {
-            x: 100.0,
-            y: 50.0,
-            w: 200.0,
-            h: 100.0,
-        };
+        let outer = region::crop(0.0, 0.0, 1000.0, 500.0);
+        let inner = region::crop(100.0, 50.0, 200.0, 100.0);
         let bands = around(outer, inner);
         // One band covers each side, with no band over the selection.
         assert_eq!(
@@ -395,36 +379,16 @@ mod tests {
 
     #[test]
     fn an_empty_selection_leaves_the_whole_plane_dimmed() {
-        let outer = Crop {
-            x: 0.0,
-            y: 0.0,
-            w: 1000.0,
-            h: 500.0,
-        };
-        let empty = Crop {
-            x: 0.0,
-            y: 0.0,
-            w: 0.0,
-            h: 0.0,
-        };
+        let outer = region::crop(0.0, 0.0, 1000.0, 500.0);
+        let empty = region::crop(0.0, 0.0, 0.0, 0.0);
         let area: f32 = around(outer, empty).iter().map(quad_area).sum();
         assert_eq!(area, 1000.0 * 500.0);
     }
 
     #[test]
     fn a_selection_that_touches_a_side_leaves_that_band_empty() {
-        let outer = Crop {
-            x: 0.0,
-            y: 0.0,
-            w: 1000.0,
-            h: 500.0,
-        };
-        let inner = Crop {
-            x: 0.0,
-            y: 0.0,
-            w: 1000.0,
-            h: 500.0,
-        };
+        let outer = region::crop(0.0, 0.0, 1000.0, 500.0);
+        let inner = region::crop(0.0, 0.0, 1000.0, 500.0);
         let area: f32 = around(outer, inner).iter().map(quad_area).sum();
         assert_eq!(area, 0.0);
     }
@@ -437,17 +401,12 @@ mod property_tests {
     use super::*;
 
     fn plane() -> Crop {
-        Crop {
-            x: 0.0,
-            y: 0.0,
-            w: 1000.0,
-            h: 500.0,
-        }
+        region::crop(0.0, 0.0, 1000.0, 500.0)
     }
 
     fn rect() -> impl Strategy<Value = Crop> {
         (0.0f32..1000.0, 0.0f32..500.0, 0.0f32..1000.0, 0.0f32..500.0)
-            .prop_map(|(x, y, w, h)| Crop { x, y, w, h })
+            .prop_map(|(x, y, w, h)| region::crop(x, y, w, h))
     }
 
     proptest! {
@@ -458,7 +417,7 @@ mod property_tests {
             let outer = plane();
             let keep = inside(raw, outer);
             let dimmed: f32 = around(outer, raw).iter().map(quad_area).sum();
-            let want = outer.w * outer.h - keep.w * keep.h;
+            let want = outer.width() * outer.height() - keep.width() * keep.height();
             // The shoelace sum runs in f32 over half a megapixel, so the
             // check holds the rounding of that sum and nothing else.
             prop_assert!((dimmed - want).abs() <= want * 1e-5 + 1.0);
@@ -471,8 +430,8 @@ mod property_tests {
             let outer = plane();
             for quad in around(outer, raw) {
                 for p in quad {
-                    prop_assert!((0.0..=outer.w).contains(&p.x));
-                    prop_assert!((0.0..=outer.h).contains(&p.y));
+                    prop_assert!((0.0..=outer.width()).contains(&p.x));
+                    prop_assert!((0.0..=outer.height()).contains(&p.y));
                 }
             }
         }
@@ -489,19 +448,14 @@ mod property_tests {
             py in -500.0f32..1000.0,
         ) {
             let img = Vec2::new(1000.0, 500.0);
-            let rect = Crop {
-                x,
-                y,
-                w: w.min(img.x - x),
-                h: h.min(img.y - y),
-            };
-            let grab = Vec2::new(x + rect.w / 2.0, y + rect.h / 2.0);
+            let rect = region::crop(x, y, w.min(img.x - x), h.min(img.y - y));
+            let grab = Vec2::new(x + rect.width() / 2.0, y + rect.height() / 2.0);
             let moved = Drag::moving(grab, Vec2::ZERO, rect).rect(Vec2::new(px, py), img);
-            prop_assert!((moved.w - rect.w).abs() < 1e-3);
-            prop_assert!((moved.h - rect.h).abs() < 1e-3);
-            prop_assert!(moved.x >= -1e-3 && moved.y >= -1e-3);
-            prop_assert!(moved.right() <= img.x + 1e-3);
-            prop_assert!(moved.bottom() <= img.y + 1e-3);
+            prop_assert!((moved.width() - rect.width()).abs() < 1e-3);
+            prop_assert!((moved.height() - rect.height()).abs() < 1e-3);
+            prop_assert!(moved.min_x() >= -1e-3 && moved.min_y() >= -1e-3);
+            prop_assert!(moved.max_x() <= img.x + 1e-3);
+            prop_assert!(moved.max_y() <= img.y + 1e-3);
         }
 
         /// A drag always answers a rect inside the plane, whatever the
@@ -517,11 +471,11 @@ mod property_tests {
             let img = Vec2::new(1000.0, 500.0);
             let d = Drag::new(Vec2::new(ax, ay), Vec2::ZERO, square);
             let r = d.rect(Vec2::new(x, y), img);
-            prop_assert!(r.x >= 0.0 && r.y >= 0.0);
-            prop_assert!(r.right() <= img.x + 1e-3);
-            prop_assert!(r.bottom() <= img.y + 1e-3);
+            prop_assert!(r.min_x() >= 0.0 && r.min_y() >= 0.0);
+            prop_assert!(r.max_x() <= img.x + 1e-3);
+            prop_assert!(r.max_y() <= img.y + 1e-3);
             if square {
-                prop_assert!((r.w - r.h).abs() < 1e-3);
+                prop_assert!((r.width() - r.height()).abs() < 1e-3);
             }
         }
     }

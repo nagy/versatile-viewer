@@ -37,7 +37,7 @@
 use std::fmt::Write as _;
 
 use vv_core::{
-    dim::Rect,
+    dim::{self, Rect},
     draw::{Color, Quad, Turn, Vec2},
 };
 use vv_gpu::{render::Renderer, texture::Filter};
@@ -224,8 +224,8 @@ impl Pixels {
 
     /// Does every pixel of this rect answer `color`?
     fn rect_is(&self, rect: Rect, color: [u8; 4]) -> bool {
-        let (x0, y0) = (rect.x as usize, rect.y as usize);
-        let (x1, y1) = (rect.right() as usize, rect.bottom() as usize);
+        let (x0, y0) = (rect.min_x() as usize, rect.min_y() as usize);
+        let (x1, y1) = (rect.max_x() as usize, rect.max_y() as usize);
         (y0..y1).all(|y| (x0..x1).all(|x| self.at(x, y) == color))
     }
 }
@@ -264,7 +264,7 @@ fn an_empty_frame_clears_to_the_background() {
     canvas.begin(CLEAR);
     let pixels = canvas.print();
     assert!(
-        pixels.rect_is(Rect::new(0.0, 0.0, 8.0, 4.0), [0x06, 0x23, 0x29, 0xff]),
+        pixels.rect_is(dim::rect(0.0, 0.0, 8.0, 4.0), [0x06, 0x23, 0x29, 0xff]),
         "the clear color fills the frame"
     );
 }
@@ -275,7 +275,7 @@ fn an_empty_frame_clears_to_the_background() {
 fn a_solid_rect_lands_on_its_pixels() {
     let mut canvas = canvas!(16, 16);
     canvas.begin(CLEAR);
-    let rect = Rect::new(4.0, 6.0, 8.0, 4.0);
+    let rect = dim::rect(4.0, 6.0, 8.0, 4.0);
     canvas.renderer.fill_rect(rect, Color::WHITE);
     let pixels = canvas.print();
     assert!(
@@ -295,7 +295,7 @@ fn a_half_alpha_fill_blends_with_the_clear() {
     // White at half alpha over black: every channel reads about half.
     canvas.begin(Color::BLACK);
     canvas.renderer.fill_rect(
-        Rect::new(0.0, 0.0, 4.0, 4.0),
+        dim::rect(0.0, 0.0, 4.0, 4.0),
         Color::new(255, 255, 255, 128),
     );
     let pixels = canvas.print();
@@ -331,8 +331,8 @@ fn a_texture_keeps_its_texels_at_one_to_one() {
     // Four window pixels per texel, on whole pixels: nearest keeps the blocks.
     canvas.renderer.texture_pro(
         &texture,
-        Rect::new(0.0, 0.0, 2.0, 2.0),
-        Rect::new(0.0, 0.0, 8.0, 8.0),
+        dim::rect(0.0, 0.0, 2.0, 2.0),
+        dim::rect(0.0, 0.0, 8.0, 8.0),
         Turn::NONE,
         Color::WHITE,
         Filter::Nearest,
@@ -357,15 +357,15 @@ fn a_source_rect_crops_the_texture() {
     // The lower-right texel, stretched over the whole frame.
     canvas.renderer.texture_pro(
         &texture,
-        Rect::new(1.0, 1.0, 1.0, 1.0),
-        Rect::new(0.0, 0.0, 4.0, 4.0),
+        dim::rect(1.0, 1.0, 1.0, 1.0),
+        dim::rect(0.0, 0.0, 4.0, 4.0),
         Turn::NONE,
         Color::WHITE,
         Filter::Nearest,
     );
     let pixels = canvas.print();
     assert!(
-        pixels.rect_is(Rect::new(0.0, 0.0, 4.0, 4.0), [255, 255, 255, 255]),
+        pixels.rect_is(dim::rect(0.0, 0.0, 4.0, 4.0), [255, 255, 255, 255]),
         "the cropped texel fills the dest rect"
     );
 }
@@ -377,8 +377,8 @@ fn a_turned_quad_reaches_its_own_corners() {
     let mut canvas = canvas!(40, 40);
     canvas.begin(Color::BLACK);
     // A 20 by 10 rect turned a quarter around its center becomes 10 by 20.
-    let dest = Rect::new(20.0, 20.0, 20.0, 10.0);
-    let quad = Quad::pro(dest, Turn::new(dest.center_origin(), 90.0));
+    let dest = dim::rect(20.0, 20.0, 20.0, 10.0);
+    let quad = Quad::pro(dest, Turn::new(dim::center_origin(dest), 90.0));
     canvas.renderer.fill(quad, Color::WHITE);
     let pixels = canvas.print();
     // The 20 by 10 rect becomes 10 by 20 around its center, so the turn
@@ -422,11 +422,11 @@ fn paint_plane(canvas: &mut Canvas, surface: &dyn vv_source::surface::Surface) -
     // Fit the plane into the frame.
     let scale = (win_w / width as f32).min(win_h / height as f32);
     let (dw, dh) = (width as f32 * scale, height as f32 * scale);
-    let dest = Rect::new((win_w - dw) / 2.0, (win_h - dh) / 2.0, dw, dh);
+    let dest = dim::rect((win_w - dw) / 2.0, (win_h - dh) / 2.0, dw, dh);
     canvas.begin(CLEAR);
     canvas.renderer.texture_pro(
         &texture,
-        Rect::sized(width as f32, height as f32),
+        dim::whole(width as f32, height as f32),
         dest,
         Turn::NONE,
         Color::WHITE,
@@ -455,7 +455,7 @@ fn an_svg_paints_its_rect() {
         "the SVG fills the frame"
     );
     assert_eq!(
-        pixels.at(dest.x as usize, dest.y as usize),
+        pixels.at(dest.min_x() as usize, dest.min_y() as usize),
         [0xff, 0, 0, 255],
         "the edge counts too"
     );
@@ -495,8 +495,8 @@ fn a_converted_source_paints_on_its_paper() {
     let surface = table.open(&path).expect("the converted surface");
     let dest = paint_plane(&mut canvas, surface.as_ref());
     let pixels = canvas.print();
-    let (x0, y0) = (dest.x as usize, dest.y as usize);
-    let (x1, y1) = (dest.right() as usize, dest.bottom() as usize);
+    let (x0, y0) = (dest.min_x() as usize, dest.min_y() as usize);
+    let (x1, y1) = (dest.max_x() as usize, dest.max_y() as usize);
     assert_eq!(
         pixels.at(x1 - 2, y1 - 2),
         [255, 255, 255, 255],
@@ -597,8 +597,8 @@ fn a_pdf_page_paints_its_content() {
     let dest = paint_surface(&mut canvas, &path);
     let pixels = canvas.print();
     let middle = (
-        (dest.x + dest.width / 2.0) as usize,
-        (dest.y + dest.height / 2.0) as usize,
+        (dest.min_x() + dest.width() / 2.0) as usize,
+        (dest.min_y() + dest.height() / 2.0) as usize,
     );
     let [r, g, b, a] = pixels.at(middle.0, middle.1);
     assert!(g > 100 && r < 80 && b < 80, "the page draws its green fill");
@@ -622,8 +622,8 @@ fn a_fractional_destination_blends_the_texels() {
     canvas.begin(Color::BLACK);
     canvas.renderer.texture_pro(
         &texture,
-        Rect::sized(2.0, 2.0),
-        Rect::new(0.0, 0.0, 2.0, 2.0),
+        dim::whole(2.0, 2.0),
+        dim::rect(0.0, 0.0, 2.0, 2.0),
         Turn::NONE,
         Color::WHITE,
         Filter::Linear,
@@ -636,8 +636,8 @@ fn a_fractional_destination_blends_the_texels() {
     canvas.begin(Color::BLACK);
     canvas.renderer.texture_pro(
         &texture,
-        Rect::sized(2.0, 2.0),
-        Rect::new(0.5, 0.0, 2.0, 2.0),
+        dim::whole(2.0, 2.0),
+        dim::rect(0.5, 0.0, 2.0, 2.0),
         Turn::NONE,
         Color::WHITE,
         Filter::Linear,
@@ -695,8 +695,8 @@ fn a_loader_worker_uploads_its_own_frame() {
     canvas.begin(Color::BLACK);
     canvas.renderer.texture_pro(
         &texture,
-        Rect::sized(64.0, 64.0),
-        Rect::new(0.0, 0.0, 32.0, 32.0),
+        dim::whole(64.0, 64.0),
+        dim::rect(0.0, 0.0, 32.0, 32.0),
         Turn::NONE,
         Color::WHITE,
         Filter::Linear,
@@ -720,12 +720,7 @@ fn the_region_veil_dims_only_outside_the_selection() {
     use vv_core::{DIM_LEVEL, DIM_VEIL, draw::Vec2, region, region_sel};
 
     let mut canvas = canvas!(64, 64);
-    let selection = region::Crop {
-        x: 16.0,
-        y: 16.0,
-        w: 32.0,
-        h: 32.0,
-    };
+    let selection = region::crop(16.0, 16.0, 32.0, 32.0);
     for angle in [0.0_f32, 30.0] {
         let frame = region::Frame {
             img: Vec2::new(64.0, 64.0),
@@ -736,17 +731,12 @@ fn the_region_veil_dims_only_outside_the_selection() {
         };
         canvas.begin(Color::BLACK);
         // The picture: a white plane, turned like the draw turns it.
-        let dest = Rect::new(32.0, 32.0, 64.0, 64.0);
+        let dest = dim::rect(32.0, 32.0, 64.0, 64.0);
         canvas.renderer.fill(
-            Quad::pro(dest, Turn::new(dest.center_origin(), angle)),
+            Quad::pro(dest, Turn::new(dim::center_origin(dest), angle)),
             Color::WHITE,
         );
-        let outer = region::Crop {
-            x: 0.0,
-            y: 0.0,
-            w: frame.img.x,
-            h: frame.img.y,
-        };
+        let outer = region::crop(0.0, 0.0, frame.img.x, frame.img.y);
         for band in region_sel::around(outer, selection) {
             let corners = band.map(|point| frame.to_screen(point));
             canvas.renderer.fill(Quad::new(corners), DIM_VEIL);
@@ -783,7 +773,7 @@ fn the_region_veil_dims_only_outside_the_selection() {
 fn a_stroke_rect_stays_inside_its_rect() {
     let mut canvas = canvas!(32, 32);
     canvas.begin(Color::BLACK);
-    let rect = Rect::new(8.0, 8.0, 16.0, 16.0);
+    let rect = dim::rect(8.0, 8.0, 16.0, 16.0);
     canvas.renderer.stroke_rect(rect, 4.0, Color::WHITE);
     let pixels = canvas.print();
     // The band: the four outer pixels of the rect on every side.

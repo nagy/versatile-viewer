@@ -111,6 +111,7 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   A backend with a region anchor (the vector tree, the PDF rasterizer) overrides `render` to pay only for the pixels the caller asked for, and returns `SurfaceError::Unsupported` rather than the whole plane for a region it cannot serve.
   A `View` names a plane, an optional `region::Crop` and a scale (output pixels per surface unit), so the grid asks for a thumbnail, the loader for the whole plane and the image view for the patch it shows.
   `region::Crop` is the one rectangle type of a source and of the view, and `surface::Crop` re-exports it, so no call site converts one rect shape into another.
+  The type is `euclid::Rect<f32, dim::SurfaceSpace>`, so a crop and a window rect never pass for one another.
   `crates/vv-source/src/sign.rs` owns the content sniffing (`detect`, `Kind`, `Format`, `file_magic`, `is_common_magic`, `dimensions`), and both the surface layer and `svg.rs` use it.
   `detect` reads the magic once and answers a `Kind`: `Kind::Vector` for an SVG document, or `Kind::Raster(Format)` with the decoder that reads the file.
   The raster backend keeps that `Format`, so its header read and its progressive open never sniff the same bytes again.
@@ -186,11 +187,16 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   Each module owns its error enum: `crates/vv-pixels/src/error.rs` (`DecodeError`), `crates/vv-source/src/sign.rs` (`SignError`), `crates/vv-source/src/surface.rs` (`SurfaceError`), `crates/vv-source/src/pdf.rs` (`PdfError`), `crates/vv-view/src/grid.rs` (`GridError`), `crates/vv-view/src/loader.rs` (`LoadError`), `crates/vv-mcp/src/mcp.rs` (`SpawnError`), `crates/vv-cache/src/lib.rs` (`CacheError`), `crates/vv-source/src/convert.rs` (`ConvertError`, the rule table of the config file).
   `crates/vv-source/src/convert.rs` keeps the same split for the conversion: a failed or timed-out program, a flood past its output cap and an answer that is neither a PDF nor an SVG document become `SurfaceError::Render`, and a source past its cap or a program that cannot start becomes `SurfaceError::Unsupported`. Its own `ConvertError` covers the rule table alone, and that never reaches a surface.
   `main.rs` keeps `anyhow`.
-- Wrap raw pixel and window primitives in the `crates/vv-core/src/dim.rs` newtypes (`ImgW`, `ImgH`, `WinW`, `WinH`, `LongSide`, `PreviewPx`, `Delay`, `Rate`, `RampTime`, `Rect`).
+- Wrap raw pixel and window primitives in the `crates/vv-core/src/dim.rs` newtypes (`ImgW`, `ImgH`, `WinW`, `WinH`, `LongSide`, `PreviewPx`, `Rate`).
+  A span of time is `std::time::Duration` and never a float newtype, so the auto-repeat delay (`keyrepeat::settings`) and the ramp length (`tween::Ramp::tick`, `RAMP_TIME`) read a `Duration` beside `QUIET` and `PREFETCH_GIVE_UP`.
+  `Rate` stays a newtype, because a repeat rate is a frequency and not a span.
   The newtype accessor is `raw()`, never `get()`: `ImgW::new(4).raw() == 4`.
   `raw()` names a wgpu texture extent and `as_f32()` crosses into the window mapping, so the draw and upload code never casts a dimension by hand.
   Public API boundaries take the newtype, not the bare primitive.
-  `Rect` is an axis-aligned rectangle in window pixels, with `x`, `y`, `width`, `height` and the `right`/`bottom` edge helpers, and `draw::Quad` is the only thing that turns one into corners.
+  A rectangle is `euclid`'s, not a local type: `dim::Rect` is `euclid::Rect<f32, WindowSpace>` and `region::Crop` is `euclid::Rect<f32, SurfaceSpace>`, so the two space tags refuse a mix at compile time and the edges, the size and the containment come from that crate.
+  `dim::rect(x, y, w, h)` is the four-number constructor, `dim::whole(w, h)` the rect of a whole texture at the origin, and `region::crop(x, y, w, h)` the same for surface units.
+  `dim::center_square`, `dim::center_origin` and `dim::contains_point` are the three readings the viewer adds: a square crop of a cell, the origin that keeps a turned draw in place, and the containment where the far edge counts as inside, which `euclid::Rect::contains` excludes.
+  `draw::Quad` is the only thing that turns a rect into corners.
 - `DecodedImage` (`crates/vv-pixels/src/lib.rs`) keeps its fields private: `DecodedImage::new(width, height, data)` is the only checked entrance, and it answers `DecodeError::Buffer` unless `data` holds exactly `width * height * 4` bytes.
   Read the pixels with `as_rgba`, the extents with `width` and `height`, and consume it with `into_rgba` or `into_parts`.
   A crate path that just computed both the buffer and its size uses `DecodedImage::from_exact`, which debug-asserts the pair, so a wrong buffer still trips a test build.
@@ -283,7 +289,7 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   `crates/vv-gpu/src/gpu.rs` owns the instance, adapter, device, queue and swapchain.
   `crates/vv-gpu/src/render.rs` owns the pipeline, the batch and the draw calls.
   `crates/vv-gpu/src/texture.rs` owns one uploaded picture and its two filter groups.
-  `crates/vv-core/src/draw.rs` owns `Vec2`, `Color` and `Quad`, the CPU-side geometry.
+  `crates/vv-core/src/draw.rs` owns `Vec2` (a re-export of `glam::Vec2`), `turned` (the one degree-to-radian helper of a y-down space), `Color` and `Quad`, the CPU-side geometry.
   `crates/vv-view/src/input.rs` owns the held keys, the frame edges and the pointer.
   `crates/vv-view/src/view.rs` owns the image view itself: `ViewState` (what it shows and how it frames it), the region patch, the spread column and the `v` selection drawing.
   It is `pub(crate)`, holds no window and no device, and `crates/vv-view/src/viewer.rs` drives it.
@@ -390,7 +396,7 @@ A source that paints no paper carries it in its pixels, so no clear color ever h
   The release snaps the angle with `snap_deg` when it lands within `SNAP_DEGREES` (2) of a quarter turn, and that release is the only place that snaps.
   A drag therefore turns freely and never jumps mid-drag.
   The scale and the pan stay as they are, so a turned image shows its corners past the window edge.
-  The draw passes the image center as the dest position and `Rect::center_origin` as the origin, because `Renderer::texture_pro` turns the quad around the dest position.
+  The draw passes the image center as the dest position and `dim::center_origin(dest)` as the origin, because `Renderer::texture_pro` turns the quad around the dest position.
   A dest corner plus a half-size origin throws the image into the top-left corner.
   `f` hit-tests a turned image through `unrotate_point`.
   Do not rotate pixels on the main thread: the turn is a draw transform.

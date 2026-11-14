@@ -3,169 +3,39 @@
 //! [`Vec2`] is the one point type of the code. It measures window pixels in the
 //! draw code, surface units in the image view and pixels of a plane in the
 //! decoders, and every one of those units stays an `f32` pair.
+//! The type is `glam`'s, re-exported here, so the arithmetic, the rounding, the
+//! length and the interpolation come from that crate instead of a local copy.
+//! [`turned`] is the one helper beside it: `glam` measures a turn in radians
+//! counter-clockwise in a y-up space, and every draw rotation of the viewer
+//! names degrees clockwise in a y-down space.
 //! [`Color`] keeps the eight-bit channels the decoders write, so a tint or a
 //! background passes to a texture or to a fill without a conversion.
 //!
 //! Both types are plain values with no GPU handle, so the whole module is
 //! testable without a display.
 
-use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
+pub use glam::Vec2;
 
-use crate::dim::Rect;
+use crate::dim::{self, Rect};
 
-/// A point or a size in a two-axis unit, as an `f32` pair.
+/// The same vector turned by `degrees`, clockwise in a y-down space.
 ///
-/// The fields are public because the draw code reads a coordinate by name, and
-/// because a rect corner and a window position never swap in the type.
+/// The space grows down, so a positive angle turns toward the right of the
+/// screen, which is the sign every draw rotation of the viewer uses.
+/// `glam` measures radians counter-clockwise in a y-up space, so the two signs
+/// meet here, in one place.
 ///
 /// # Examples
 ///
 /// ```
-/// # use vv_core::draw::Vec2;
-/// let v = Vec2::new(3.0, 4.0);
-/// assert_eq!(v.length(), 5.0);
-/// assert_eq!((v + Vec2::new(1.0, 1.0)), Vec2::new(4.0, 5.0));
-/// assert_eq!((v * 2.0), Vec2::new(6.0, 8.0));
-/// assert_eq!(-v, Vec2::new(-3.0, -4.0));
+/// # use vv_core::draw::{Vec2, turned};
+/// let x = Vec2::new(1.0, 0.0);
+/// assert!(turned(x, 90.0).abs_diff_eq(Vec2::new(0.0, 1.0), 1e-6));
+/// assert!(turned(x, 360.0).abs_diff_eq(x, 1e-5));
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct Vec2 {
-    /// The horizontal part.
-    pub x: f32,
-    /// The vertical part, which grows down in window pixels.
-    pub y: f32,
-}
-
-impl Vec2 {
-    /// A pair from its two parts.
-    #[must_use]
-    pub const fn new(x: f32, y: f32) -> Self {
-        Self { x, y }
-    }
-
-    /// The origin: zero travel on both axes.
-    pub const ZERO: Self = Self { x: 0.0, y: 0.0 };
-
-    /// The length of the vector.
-    #[must_use]
-    pub fn length(self) -> f32 {
-        self.x.hypot(self.y)
-    }
-
-    /// The squared length, which skips the square root.
-    #[must_use]
-    pub fn length_squared(self) -> f32 {
-        self.x * self.x + self.y * self.y
-    }
-
-    /// The distance to another point.
-    #[must_use]
-    pub fn distance(self, other: Self) -> f32 {
-        (self - other).length()
-    }
-
-    /// The dot product of two vectors.
-    #[must_use]
-    pub fn dot(self, other: Self) -> f32 {
-        self.x * other.x + self.y * other.y
-    }
-
-    /// The point some fraction of the way from `self` to `other`.
-    #[must_use]
-    pub fn lerp(self, other: Self, t: f32) -> Self {
-        Self::new(
-            self.x + (other.x - self.x) * t,
-            self.y + (other.y - self.y) * t,
-        )
-    }
-
-    /// The same vector turned by `degrees`, clockwise in a y-down space.
-    #[must_use]
-    pub fn turned(self, degrees: f32) -> Self {
-        let radians = degrees.to_radians();
-        let (sin, cos) = radians.sin_cos();
-        Self::new(self.x * cos - self.y * sin, self.x * sin + self.y * cos)
-    }
-
-    /// The point rounded to whole pixels on both axes.
-    #[must_use]
-    pub fn round(self) -> Self {
-        Self::new(self.x.round(), self.y.round())
-    }
-
-    /// Is the point within `tolerance` of another, on both axes?
-    #[must_use]
-    pub fn is_within(self, other: Self, tolerance: f32) -> bool {
-        (self.x - other.x).abs() <= tolerance && (self.y - other.y).abs() <= tolerance
-    }
-}
-
-impl Add for Vec2 {
-    type Output = Self;
-
-    fn add(self, other: Self) -> Self {
-        Self::new(self.x + other.x, self.y + other.y)
-    }
-}
-
-impl Sub for Vec2 {
-    type Output = Self;
-
-    fn sub(self, other: Self) -> Self {
-        Self::new(self.x - other.x, self.y - other.y)
-    }
-}
-
-impl Neg for Vec2 {
-    type Output = Self;
-
-    fn neg(self) -> Self {
-        Self::new(-self.x, -self.y)
-    }
-}
-
-impl Mul<f32> for Vec2 {
-    type Output = Self;
-
-    fn mul(self, factor: f32) -> Self {
-        Self::new(self.x * factor, self.y * factor)
-    }
-}
-
-impl Div<f32> for Vec2 {
-    type Output = Self;
-
-    fn div(self, divisor: f32) -> Self {
-        Self::new(self.x / divisor, self.y / divisor)
-    }
-}
-
-impl AddAssign for Vec2 {
-    fn add_assign(&mut self, other: Self) {
-        self.x += other.x;
-        self.y += other.y;
-    }
-}
-
-impl SubAssign for Vec2 {
-    fn sub_assign(&mut self, other: Self) {
-        self.x -= other.x;
-        self.y -= other.y;
-    }
-}
-
-impl MulAssign<f32> for Vec2 {
-    fn mul_assign(&mut self, factor: f32) {
-        self.x *= factor;
-        self.y *= factor;
-    }
-}
-
-impl DivAssign<f32> for Vec2 {
-    fn div_assign(&mut self, divisor: f32) {
-        self.x /= divisor;
-        self.y /= divisor;
-    }
+#[must_use]
+pub fn turned(v: Vec2, degrees: f32) -> Vec2 {
+    v.rotate_angle(degrees.to_radians())
 }
 
 /// One color of the viewer, as four eight-bit channels.
@@ -296,9 +166,9 @@ impl Turn {
 /// # Examples
 ///
 /// ```
-/// # use vv_core::dim::Rect;
+/// # use vv_core::dim;
 /// # use vv_core::draw::{Quad, Vec2};
-/// let quad = Quad::rect(Rect::new(10.0, 20.0, 30.0, 40.0));
+/// let quad = Quad::rect(dim::rect(10.0, 20.0, 30.0, 40.0));
 /// assert_eq!(quad.p[0], Vec2::new(10.0, 20.0));
 /// assert_eq!(quad.p[2], Vec2::new(40.0, 60.0));
 /// // A triangle repeats its first corner, so its second triangle is empty.
@@ -321,8 +191,8 @@ impl Quad {
     /// The quad of an axis-aligned rectangle.
     #[must_use]
     pub fn rect(rect: Rect) -> Self {
-        let (x, y) = (rect.x, rect.y);
-        let (right, bottom) = (rect.right(), rect.bottom());
+        let (x, y) = (rect.min_x(), rect.min_y());
+        let (right, bottom) = (rect.max_x(), rect.max_y());
         Self::new([
             Vec2::new(x, y),
             Vec2::new(right, y),
@@ -339,13 +209,13 @@ impl Quad {
     /// A zero angle and a half-size origin therefore draw the plain rect.
     #[must_use]
     pub fn pro(dest: Rect, turn: Turn) -> Self {
-        let rect = Rect::new(
-            dest.x - turn.origin.x,
-            dest.y - turn.origin.y,
-            dest.width,
-            dest.height,
+        let pulled = dim::rect(
+            dest.min_x() - turn.origin.x,
+            dest.min_y() - turn.origin.y,
+            dest.width(),
+            dest.height(),
         );
-        Self::turned(rect, Vec2::new(dest.x, dest.y), turn.angle)
+        Self::turned(pulled, Vec2::new(dest.min_x(), dest.min_y()), turn.angle)
     }
 
     /// The quad of a rectangle turned `degrees` clockwise around `pivot`.
@@ -360,10 +230,7 @@ impl Quad {
         if degrees == 0.0 {
             return axis;
         }
-        Self::new(
-            axis.p
-                .map(|corner| pivot + (corner - pivot).turned(degrees)),
-        )
+        Self::new(axis.p.map(|corner| pivot + turned(corner - pivot, degrees)))
     }
 
     /// The quad of a triangle, with the last corner repeated.
@@ -415,24 +282,24 @@ mod tests {
     /// A dest rect and its origin land where the draw puts them.
     #[test]
     fn a_turned_dest_keeps_its_origin_on_the_position() {
-        let dest = Rect::new(100.0, 50.0, 40.0, 20.0);
+        let dest = dim::rect(100.0, 50.0, 40.0, 20.0);
         let plain = Quad::pro(dest, Turn::new(Vec2::new(20.0, 10.0), 0.0));
         assert_eq!(plain.p[0], Vec2::new(80.0, 40.0));
         assert_eq!(plain.p[2], Vec2::new(120.0, 60.0));
         // A quarter turn keeps the origin at the dest position and moves the
         // corners a quarter around it.
         let turned = Quad::pro(dest, Turn::new(Vec2::new(20.0, 10.0), 90.0));
-        assert!(turned.p[0].is_within(Vec2::new(110.0, 30.0), 1e-5));
-        assert!(turned.p[2].is_within(Vec2::new(90.0, 70.0), 1e-5));
+        assert!(turned.p[0].abs_diff_eq(Vec2::new(110.0, 30.0), 1e-5));
+        assert!(turned.p[2].abs_diff_eq(Vec2::new(90.0, 70.0), 1e-5));
     }
 
     /// A quarter turn maps the axes onto each other in a y-down space.
     #[test]
     fn a_quarter_turn_moves_the_axes() {
         let x = Vec2::new(1.0, 0.0);
-        let turned = x.turned(90.0);
-        assert!(turned.is_within(Vec2::new(0.0, 1.0), 1e-6));
-        assert!(x.turned(360.0).is_within(x, 1e-5));
+        let quarter = turned(x, 90.0);
+        assert!(quarter.abs_diff_eq(Vec2::new(0.0, 1.0), 1e-6));
+        assert!(turned(x, 360.0).abs_diff_eq(x, 1e-5));
     }
 
     /// A line is a quad of `thickness` around its segment, and a point is no
@@ -442,10 +309,10 @@ mod tests {
         let line = Quad::line(Vec2::new(10.0, 20.0), Vec2::new(30.0, 20.0), 4.0);
         // A horizontal line grows up and down by half its thickness, so the
         // corners sit on 18 and 22, in perimeter order from the start point.
-        assert!(line.p[0].is_within(Vec2::new(10.0, 22.0), 1e-6));
-        assert!(line.p[1].is_within(Vec2::new(30.0, 22.0), 1e-6));
-        assert!(line.p[2].is_within(Vec2::new(30.0, 18.0), 1e-6));
-        assert!(line.p[3].is_within(Vec2::new(10.0, 18.0), 1e-6));
+        assert!(line.p[0].abs_diff_eq(Vec2::new(10.0, 22.0), 1e-6));
+        assert!(line.p[1].abs_diff_eq(Vec2::new(30.0, 22.0), 1e-6));
+        assert!(line.p[2].abs_diff_eq(Vec2::new(30.0, 18.0), 1e-6));
+        assert!(line.p[3].abs_diff_eq(Vec2::new(10.0, 18.0), 1e-6));
         // A zero-length line answers an empty quad at its point, so the draw
         // never divides by zero.
         let point = Quad::line(Vec2::new(5.0, 5.0), Vec2::new(5.0, 5.0), 4.0);
@@ -453,7 +320,7 @@ mod tests {
             point
                 .p
                 .iter()
-                .all(|p| p.is_within(Vec2::new(5.0, 5.0), 1e-6))
+                .all(|p| p.abs_diff_eq(Vec2::new(5.0, 5.0), 1e-6))
         );
     }
 

@@ -12,11 +12,7 @@
 //! It falls back to the Xorg defaults (660 ms delay, 20 repeats/s) when it
 //! cannot read them (Wayland, no X).
 
-use std::{
-    process::Command,
-    sync::OnceLock,
-    time::Duration,
-};
+use std::{process::Command, sync::OnceLock, time::Duration};
 
 use crate::dim::Rate;
 
@@ -101,7 +97,8 @@ fn xset_settings() -> Option<(Duration, Rate)> {
     let mut rate = None;
     for line in text.lines() {
         if delay.is_none() {
-            delay = num_after(line, "auto repeat delay:").map(|ms| Duration::from_millis(u64::from(ms)));
+            delay = num_after(line, "auto repeat delay:")
+                .map(|ms| Duration::from_millis(u64::from(ms)));
         }
         if rate.is_none() {
             rate = num_after(line, "repeat rate:").map(|r| Rate::new(r as f32));
@@ -148,9 +145,27 @@ mod tests {
         // Edge caught by the event queue fires once even though the key is
         // already up when polled (IsKeyDown false).
         let mut st = RepeatState::default();
-        assert!(st.tick(true, false, 0.0, Duration::from_millis(660), Rate::new(20.0)));
-        assert!(!st.tick(false, false, 0.01, Duration::from_millis(660), Rate::new(20.0)));
-        assert!(!st.tick(false, false, 1.0, Duration::from_millis(660), Rate::new(20.0)));
+        assert!(st.tick(
+            true,
+            false,
+            0.0,
+            Duration::from_millis(660),
+            Rate::new(20.0)
+        ));
+        assert!(!st.tick(
+            false,
+            false,
+            0.01,
+            Duration::from_millis(660),
+            Rate::new(20.0)
+        ));
+        assert!(!st.tick(
+            false,
+            false,
+            1.0,
+            Duration::from_millis(660),
+            Rate::new(20.0)
+        ));
     }
 
     #[test]

@@ -35,11 +35,11 @@
 //! // The whole document fits the window at this scale, so the crop covers it
 //! // all.
 //! let whole = frame(0.5).crop(0.0);
-//! assert_eq!((whole.w, whole.h), (1024.0, 512.0));
+//! assert_eq!((whole.width(), whole.height()), (1024.0, 512.0));
 //! // Zoomed in, the crop covers the window only, around the image center.
 //! let zoomed = frame(4.0).crop(0.0);
-//! assert!((zoomed.w - 200.0).abs() < 1e-3);
-//! assert!((zoomed.h - 150.0).abs() < 1e-3);
+//! assert!((zoomed.width() - 200.0).abs() < 1e-3);
+//! assert!((zoomed.height() - 150.0).abs() < 1e-3);
 //! ```
 
 use std::time::Duration;
@@ -73,62 +73,28 @@ pub const QUIET: Duration = Duration::from_millis(150);
 
 /// An axis-aligned rectangle in surface units.
 ///
-/// `x` and `y` give the top-left corner, and the axes grow right and down,
+/// The origin gives the top-left corner, and the axes grow right and down,
 /// like the base raster the region belongs to.
 /// The unit is the plane's own: base raster pixels for an image or a vector
 /// file, and PostScript points for a document page.
-/// The surface `View` carries this same type, so the view and a backend
-/// pass one value and never convert between two rect shapes.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Crop {
-    /// The left edge, in surface units.
-    pub x: f32,
-    /// The top edge, in surface units.
-    pub y: f32,
-    /// The width, in surface units.
-    pub w: f32,
-    /// The height, in surface units.
-    pub h: f32,
+/// [`SurfaceSpace`] tags the type, so a window rect never passes where a crop
+/// belongs, and the surface `View` carries this same type, so the view and a
+/// backend pass one value and never convert between two rect shapes.
+pub type Crop = euclid::Rect<f32, crate::dim::SurfaceSpace>;
+
+/// A crop rect from its top-left corner and its size.
+#[must_use]
+pub const fn crop(x: f32, y: f32, w: f32, h: f32) -> Crop {
+    Crop::new(euclid::point2(x, y), euclid::size2(w, h))
 }
 
-impl Crop {
-    /// The right edge.
-    #[must_use]
-    pub fn right(&self) -> f32 {
-        self.x + self.w
-    }
-
-    /// The bottom edge.
-    #[must_use]
-    pub fn bottom(&self) -> f32 {
-        self.y + self.h
-    }
-
-    /// Whether this rect covers all of `other`.
-    #[must_use]
-    pub fn contains_rect(&self, other: &Self) -> bool {
-        other.x >= self.x
-            && other.y >= self.y
-            && other.right() <= self.right()
-            && other.bottom() <= self.bottom()
-    }
-
-    /// Whether a source point lies inside this rect.
-    ///
-    /// The edges count as inside, so a press on the border grabs the rect.
-    #[must_use]
-    pub fn contains_point(&self, point: Vec2) -> bool {
-        point.x >= self.x
-            && point.y >= self.y
-            && point.x <= self.right()
-            && point.y <= self.bottom()
-    }
-
-    /// Whether the rect covers no pixels.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.w <= 0.0 || self.h <= 0.0
-    }
+/// Whether a source point lies inside `rect`.
+///
+/// The edges count as inside, so a press on the border grabs the rect, while
+/// `euclid` puts the far edge outside.
+#[must_use]
+pub fn contains_point(rect: &Crop, point: Vec2) -> bool {
+    crate::dim::contains_point(rect, point.x, point.y)
 }
 
 /// One window mapping of a plane: the numbers the draw uses, bundled.
@@ -208,12 +174,7 @@ impl Frame {
     pub fn crop(&self, margin: f32) -> Crop {
         let margin = margin.max(0.0);
         if !(self.has_drawable_plane() && self.win.x > 0.0 && self.win.y > 0.0) {
-            return Crop {
-                x: 0.0,
-                y: 0.0,
-                w: 0.0,
-                h: 0.0,
-            };
+            return crop(0.0, 0.0, 0.0, 0.0);
         }
         let (x0, y0) = (-margin * self.win.x, -margin * self.win.y);
         let (x1, y1) = (self.win.x * (1.0 + margin), self.win.y * (1.0 + margin));
@@ -238,12 +199,7 @@ impl Frame {
         let y = min.y.clamp(0.0, self.img.y);
         let right = max.x.clamp(x, self.img.x);
         let bottom = max.y.clamp(y, self.img.y);
-        Crop {
-            x,
-            y,
-            w: right - x,
-            h: bottom - y,
-        }
+        crop(x, y, right - x, bottom - y)
     }
 }
 
@@ -334,19 +290,19 @@ mod tests {
     #[test]
     fn a_fit_scale_covers_the_whole_document() {
         let whole = frame(Vec2::ZERO, 600.0 / 1024.0, 0.0).crop(0.0);
-        assert!((whole.w - 1024.0).abs() < 1.0);
-        assert!((whole.h - 512.0).abs() < 1.0);
-        assert!(whole.x.abs() < 1.0 && whole.y.abs() < 1.0);
+        assert!((whole.width() - 1024.0).abs() < 1.0);
+        assert!((whole.height() - 512.0).abs() < 1.0);
+        assert!(whole.min_x().abs() < 1.0 && whole.min_y().abs() < 1.0);
     }
 
     #[test]
     fn a_zoomed_crop_covers_about_one_window() {
         let zoomed = frame(Vec2::ZERO, 4.0, 0.0).crop(0.0);
         // 800/4 by 600/4 source pixels, centered.
-        assert!((zoomed.w - 200.0).abs() < 1e-3);
-        assert!((zoomed.h - 150.0).abs() < 1e-3);
-        assert!((zoomed.x - 412.0).abs() < 1e-3);
-        assert!((zoomed.y - 181.0).abs() < 1e-3);
+        assert!((zoomed.width() - 200.0).abs() < 1e-3);
+        assert!((zoomed.height() - 150.0).abs() < 1e-3);
+        assert!((zoomed.min_x() - 412.0).abs() < 1e-3);
+        assert!((zoomed.min_y() - 181.0).abs() < 1e-3);
     }
 
     #[test]
@@ -354,11 +310,11 @@ mod tests {
         let plain = frame(Vec2::ZERO, 4.0, 0.0).crop(0.0);
         let grown = frame(Vec2::ZERO, 4.0, 0.0).crop(MARGIN);
         assert!(grown.contains_rect(&plain));
-        assert!(grown.w > plain.w && grown.h > plain.h);
+        assert!(grown.width() > plain.width() && grown.height() > plain.height());
         // A pan far outside the document still clips to it.
         let out = frame(Vec2::new(9000.0, 9000.0), 1.0, 0.0).crop(MARGIN);
-        assert!(out.w <= 1024.0 && out.h <= 512.0);
-        assert!(out.x >= 0.0 && out.y >= 0.0);
+        assert!(out.width() <= 1024.0 && out.height() <= 512.0);
+        assert!(out.min_x() >= 0.0 && out.min_y() >= 0.0);
     }
 
     #[test]
@@ -411,15 +367,7 @@ mod tests {
         let far = Patch::new(frame(Vec2::new(300.0, 0.0), 4.0, 0.0).crop(0.0), 4.0);
         assert!(worth_painting(&far, Some(&painted)));
         // An empty need never pays.
-        let none = Patch::new(
-            Crop {
-                x: 0.0,
-                y: 0.0,
-                w: 0.0,
-                h: 0.0,
-            },
-            4.0,
-        );
+        let none = Patch::new(crop(0.0, 0.0, 0.0, 0.0), 4.0);
         assert!(!worth_painting(&none, None));
     }
 
@@ -473,15 +421,7 @@ mod tests {
             }
         ));
         // An empty need is never held.
-        let none = Patch::new(
-            Crop {
-                x: 0.0,
-                y: 0.0,
-                w: 0.0,
-                h: 0.0,
-            },
-            4.0,
-        );
+        let none = Patch::new(crop(0.0, 0.0, 0.0, 0.0), 4.0);
         assert!(!patch_reaches_window(&none, &covering));
     }
 }
@@ -517,13 +457,13 @@ mod property_tests {
         let painted = frame.crop(MARGIN);
         let needed = frame.crop(0.0);
         assert!(painted.contains_rect(&needed));
-        assert!(painted.x >= 0.0 && painted.y >= 0.0);
-        assert!(painted.right() <= 1024.0 + 1e-3);
-        assert!(painted.bottom() <= 512.0 + 1e-3);
+        assert!(painted.min_x() >= 0.0 && painted.min_y() >= 0.0);
+        assert!(painted.max_x() <= 1024.0 + 1e-3);
+        assert!(painted.max_y() <= 512.0 + 1e-3);
         let (w, h) = (frame.win.x, frame.win.y);
         let limit = (1.0 + 2.0 * MARGIN) * (w * w + h * h).sqrt();
-        assert!(painted.w * frame.scale <= limit * (1.0 + 1e-3));
-        assert!(painted.h * frame.scale <= limit * (1.0 + 1e-3));
+        assert!(painted.width() * frame.scale <= limit * (1.0 + 1e-3));
+        assert!(painted.height() * frame.scale <= limit * (1.0 + 1e-3));
     }
 
     /// A past failure of the paint bounds, at the pan that reached them.
@@ -571,9 +511,9 @@ mod property_tests {
             let painted = frame.crop(MARGIN);
             let needed = frame.crop(0.0);
             prop_assert!(painted.contains_rect(&needed));
-            prop_assert!(painted.x >= 0.0 && painted.y >= 0.0);
-            prop_assert!(painted.right() <= 1024.0 + 1e-3);
-            prop_assert!(painted.bottom() <= 512.0 + 1e-3);
+            prop_assert!(painted.min_x() >= 0.0 && painted.min_y() >= 0.0);
+            prop_assert!(painted.max_x() <= 1024.0 + 1e-3);
+            prop_assert!(painted.max_y() <= 512.0 + 1e-3);
         }
 
         /// The painted area stays bounded by the window, so a deeper zoom
@@ -590,8 +530,8 @@ mod property_tests {
             // and the rounding of the sine and cosine pushes the product past
             // it by a few floating-point steps. The slack covers that rounding
             // and nothing else.
-            prop_assert!(painted.w * scale <= limit * (1.0 + 1e-3));
-            prop_assert!(painted.h * scale <= limit * (1.0 + 1e-3));
+            prop_assert!(painted.width() * scale <= limit * (1.0 + 1e-3));
+            prop_assert!(painted.height() * scale <= limit * (1.0 + 1e-3));
         }
     }
 }

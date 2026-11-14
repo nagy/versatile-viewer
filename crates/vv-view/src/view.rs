@@ -38,7 +38,7 @@ use winit::event::MouseButton;
 use crate::{
     DIM_VEIL, DecodedImage,
     blurbg::BlurBg,
-    dim::{PreviewPx, Rect, WinH, WinW},
+    dim::{self, PreviewPx, Rect, WinH, WinW},
     draw::{Color, Quad, Turn, Vec2},
     grid::{DecodeFailure, EntrySource, Grid},
     input::Input,
@@ -587,12 +587,12 @@ impl ViewState {
         let Some(first) = source.spread_box(0) else {
             return false;
         };
-        if count < 2 || !(first.h.is_finite() && first.h > 0.0) {
+        if count < 2 || !(first.height().is_finite() && first.height() > 0.0) {
             return false;
         }
         let column = Column::new(self.img, scale, win_h);
         let row = column
-            .spread_at_top(self.target_pan.y, first.h)
+            .spread_at_top(self.target_pan.y, first.height())
             .min(count - 1);
         let next = row as isize + step;
         if next < 0 || next as usize >= count {
@@ -601,7 +601,7 @@ impl ViewState {
         let Some(target) = source.spread_box(next as usize) else {
             return false;
         };
-        self.target_pan = Vec2::new(0.0, column.pan_of(target.y));
+        self.target_pan = Vec2::new(0.0, column.pan_of(target.min_y()));
         self.spread_glide = Some(self.target_pan);
         true
     }
@@ -1052,14 +1052,14 @@ pub fn draw_turned(
     angle: f32,
     filter: Filter,
 ) {
-    let src = Rect::sized(texture.width() as f32, texture.height() as f32);
+    let src = dim::whole(texture.width() as f32, texture.height() as f32);
     let (dw, dh) = (img.w * scale, img.h * scale);
-    let dest = Rect::new(center.x, center.y, dw, dh);
+    let dest = dim::rect(center.x, center.y, dw, dh);
     r.texture_pro(
         texture,
         src,
         dest,
-        Turn::new(dest.center_origin(), rotate::normalize_deg(angle)),
+        Turn::new(dim::center_origin(dest), rotate::normalize_deg(angle)),
         Color::WHITE,
         filter,
     );
@@ -1175,7 +1175,7 @@ pub fn patch_dest(center: Vec2, dw: f32, dh: f32, tw: f32, th: f32, angle: f32) 
     } else {
         dh.round()
     };
-    Some(Rect::new(
+    Some(dim::rect(
         (center.x - dw / 2.0).round(),
         (center.y - dh / 2.0).round(),
         width,
@@ -1193,14 +1193,24 @@ pub fn patch_dest(center: Vec2, dw: f32, dh: f32, tw: f32, th: f32, angle: f32) 
 pub fn draw_patch(r: &mut Renderer, patch: &CropState, frame: &region::Frame, filter: Filter) {
     let rect = patch.patch.rect;
     let (scale, angle) = (frame.scale, frame.angle);
-    let middle = Vec2::new(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+    let middle = Vec2::new(
+        rect.min_x() + rect.width() / 2.0,
+        rect.min_y() + rect.height() / 2.0,
+    );
     let center = frame.to_screen(middle);
     let tw = patch.texture.width() as f32;
     let th = patch.texture.height() as f32;
-    match patch_dest(center, rect.w * scale, rect.h * scale, tw, th, angle) {
+    match patch_dest(
+        center,
+        rect.width() * scale,
+        rect.height() * scale,
+        tw,
+        th,
+        angle,
+    ) {
         Some(dest) => r.texture_pro(
             &patch.texture,
-            Rect::sized(tw, th),
+            dim::whole(tw, th),
             dest,
             Turn::NONE,
             Color::WHITE,
@@ -1210,8 +1220,8 @@ pub fn draw_patch(r: &mut Renderer, patch: &CropState, frame: &region::Frame, fi
             r,
             &patch.texture,
             Size {
-                w: rect.w,
-                h: rect.h,
+                w: rect.width(),
+                h: rect.height(),
             },
             scale,
             center,
@@ -1260,12 +1270,7 @@ pub fn selection_rect(
 /// The bands and the border map through [`region::Frame::to_screen`], so they
 /// follow the pan, the zoom and the turn of the draw.
 pub fn draw_selection(r: &mut Renderer, frame: region::Frame, selection: region::Crop) {
-    let outer = region::Crop {
-        x: 0.0,
-        y: 0.0,
-        w: frame.img.x,
-        h: frame.img.y,
-    };
+    let outer = region::crop(0.0, 0.0, frame.img.x, frame.img.y);
     for band in region_sel::around(outer, selection) {
         let p = band.map(|point| frame.to_screen(point));
         // The pipeline culls nothing, so a band draws in either winding.
@@ -1289,10 +1294,10 @@ pub fn draw_selection(r: &mut Renderer, frame: region::Frame, selection: region:
 /// those bounds never restarts the quiet timer.
 #[must_use]
 pub fn same_patch(a: &region::Patch, b: &region::Patch) -> bool {
-    (a.rect.x - b.rect.x).abs() <= 0.5
-        && (a.rect.y - b.rect.y).abs() <= 0.5
-        && (a.rect.w - b.rect.w).abs() <= 0.5
-        && (a.rect.h - b.rect.h).abs() <= 0.5
+    (a.rect.min_x() - b.rect.min_x()).abs() <= 0.5
+        && (a.rect.min_y() - b.rect.min_y()).abs() <= 0.5
+        && (a.rect.width() - b.rect.width()).abs() <= 0.5
+        && (a.rect.height() - b.rect.height()).abs() <= 0.5
         && (a.scale - b.scale).abs() <= b.scale * 0.002
 }
 
@@ -1511,15 +1516,15 @@ mod tests {
         // The corner snaps to the nearest whole pixel, and the patch keeps the
         // pixel size it was painted at.
         assert_eq!(
-            (dest.x, dest.y),
+            (dest.min_x(), dest.min_y()),
             ((cx - 766.0).round(), (cy - 590.0).round())
         );
-        assert_eq!((dest.width, dest.height), (1532.0, 1180.0));
+        assert_eq!((dest.width(), dest.height()), (1532.0, 1180.0));
         // Every edge sits on a whole window pixel, so the bilinear sample lands
         // on the texel centers of a 1:1 patch.
-        assert_eq!(dest.x.fract(), 0.0);
-        assert_eq!(dest.y.fract(), 0.0);
-        assert_eq!((dest.right().fract(), dest.bottom().fract()), (0.0, 0.0));
+        assert_eq!(dest.min_x().fract(), 0.0);
+        assert_eq!(dest.min_y().fract(), 0.0);
+        assert_eq!((dest.max_x().fract(), dest.max_y().fract()), (0.0, 0.0));
     }
 
     #[test]
@@ -1528,8 +1533,8 @@ mod tests {
         // the painted size instead of resampling the whole patch.
         let center = Vec2::new(400.0, 300.0);
         let dest = patch_dest(center, 800.6, 600.4, 801.0, 600.0, 0.0).unwrap();
-        assert_eq!((dest.width, dest.height), (801.0, 600.0));
-        assert_eq!((dest.x, dest.y), (0.0, 0.0));
+        assert_eq!((dest.width(), dest.height()), (801.0, 600.0));
+        assert_eq!((dest.min_x(), dest.min_y()), (0.0, 0.0));
     }
 
     #[test]
@@ -1540,7 +1545,7 @@ mod tests {
         let center = Vec2::new(400.4, 300.6);
         assert_eq!(
             patch_dest(center, 1200.0, 900.0, 800.0, 600.0, 0.0),
-            Some(Rect::new(-200.0, -149.0, 1200.0, 900.0))
+            Some(dim::rect(-200.0, -149.0, 1200.0, 900.0))
         );
         // A turned patch never lands on the pixel grid.
         assert_eq!(patch_dest(center, 800.0, 600.0, 800.0, 600.0, 3.0), None);
@@ -1609,12 +1614,7 @@ mod tests {
             scale: 1.0,
             angle: 0.0,
         };
-        let kept = region::Crop {
-            x: 10.0,
-            y: 10.0,
-            w: 100.0,
-            h: 100.0,
-        };
+        let kept = region::crop(10.0, 10.0, 100.0, 100.0);
         let drag = region_sel::Drag::new(Vec2::new(200.0, 100.0), Vec2::ZERO, false);
         let still = region_sel::Drag::new(Vec2::ZERO, Vec2::ZERO, false);
         // A press that has not left the tap slack spans no rect, so the old
@@ -1626,12 +1626,7 @@ mod tests {
         // Any travel replaces it with the fresh rect.
         assert_eq!(
             selection_rect(Some(frame), Some(kept), Some(drag), Vec2::new(500.0, 400.0)),
-            Some(region::Crop {
-                x: 200.0,
-                y: 100.0,
-                w: 300.0,
-                h: 300.0,
-            })
+            Some(region::crop(200.0, 100.0, 300.0, 300.0))
         );
         // A plane with no size and no drag marks nothing.
         assert_eq!(selection_rect(None, Some(kept), None, Vec2::ZERO), None);
@@ -1655,22 +1650,12 @@ mod tests {
         // A raw window reading would answer (500, 200, 100, 50) instead.
         assert_eq!(
             selection_rect(Some(frame), None, Some(drag), Vec2::new(600.0, 200.0)),
-            Some(region::Crop {
-                x: 500.0,
-                y: 50.0,
-                w: 200.0,
-                h: 200.0,
-            })
+            Some(region::crop(500.0, 50.0, 200.0, 200.0))
         );
         // A press that has not left the tap slack keeps the old region, so a
         // `v` click never flashes a sliver rect.
         let tap = region_sel::Drag::new(Vec2::new(500.0, 250.0), Vec2::new(600.0, 200.0), false);
-        let kept = region::Crop {
-            x: 10.0,
-            y: 10.0,
-            w: 100.0,
-            h: 100.0,
-        };
+        let kept = region::crop(10.0, 10.0, 100.0, 100.0);
         assert_eq!(
             selection_rect(Some(frame), Some(kept), Some(tap), Vec2::new(601.0, 200.0)),
             Some(kept)

@@ -8,9 +8,20 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# The layer carries no dependency of its own: it holds math, newtypes and
-# policy, so every crate above it reads one vocabulary and nothing here can
-# pull a decoder or a GPU handle into the graph.
+# The layer pulls no decoder and no GPU handle, so every crate above it reads
+# one vocabulary and nothing here can reach a picture or a device.
+[dependencies]
+# The point, the size and the float vector math of the whole tree (`draw::Vec2`
+# is a re-export).
+# Pure Rust with no dependency of its own, and the scalar and SIMD paths pick
+# one code path per build, so the geometry stays a plain value.
+glam = "0.34.3"
+# The rectangle of a window and of a plane (`dim::Rect` and `region::Crop`).
+# The space tag of each one refuses a mix at compile time, so a window rect
+# never lands where a rectangle of a surface belongs.
+# Pure Rust, and `num-traits` is its one dependency.
+euclid = "0.22.14"
+
 [dev-dependencies]
 # The proptests of `region`, `region_sel`, `rotate` and `tween`.
 proptest = "1.12.0"

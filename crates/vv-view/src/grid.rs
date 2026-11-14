@@ -69,7 +69,7 @@ use crate::{
     DIM_TINT, DecodedImage,
     blurbg::{self},
     cache::Cache,
-    dim::{ImgH, ImgW, LongSide, Rect, WinH, WinW},
+    dim::{self, ImgH, ImgW, LongSide, Rect, WinH, WinW},
     draw::{Color, Turn, Vec2},
     render::Renderer,
     surface::{Surface, SurfaceError, View, open_book_surface, open_surface},
@@ -1402,8 +1402,8 @@ impl Grid {
         let (mx, my) = (m.x - MARGIN, m.y + self.scroll - MARGIN);
         let col = (mx / (cw + GAP)).floor();
         let row = (my / (ch + GAP)).floor();
-        let cell = Rect::new(col * (cw + GAP), row * (ch + GAP), cw, ch);
-        if col >= 0.0 && row >= 0.0 && col < l.cols as f32 && cell.contains_point(mx, my) {
+        let cell = dim::rect(col * (cw + GAP), row * (ch + GAP), cw, ch);
+        if col >= 0.0 && row >= 0.0 && col < l.cols as f32 && dim::contains_point(&cell, mx, my) {
             let idx = row as usize * l.cols + col as usize;
             if idx < self.entries.len() {
                 return Some(idx);
@@ -1437,7 +1437,7 @@ impl Grid {
             if cy + ch < 0.0 || cy > win_h {
                 continue;
             }
-            let thumb = Rect::new(cx + (cw - side) / 2.0, cy + (ch - side) / 2.0, side, side);
+            let thumb = dim::rect(cx + (cw - side) / 2.0, cy + (ch - side) / 2.0, side, side);
             let in_selection =
                 i == self.selected || visual.is_some_and(|v| v.contains(i, self.selected, cols));
             let tint = if dim_others && !in_selection {
@@ -1449,7 +1449,7 @@ impl Grid {
                 // The thumb texture keeps the aspect ratio of the image.
                 // The square cell shows its center crop (draw-time crop, so a
                 // resize never needs a re-decode).
-                let src = Rect::sized(tex.width() as f32, tex.height() as f32).center_square();
+                let src = dim::center_square(dim::whole(tex.width() as f32, tex.height() as f32));
                 r.texture_pro(tex, src, thumb, Turn::NONE, tint, Filter::Linear);
             } else if e.cell.is_failed() {
                 // Decode failed: dim red placeholder with an error mark.
@@ -1460,7 +1460,7 @@ impl Grid {
                 // The few-byte ThumbHash placeholder, until the decoded thumb
                 // lands.
                 // It holds the whole image, so the draw crops it like a thumb.
-                let src = Rect::sized(tex.width() as f32, tex.height() as f32).center_square();
+                let src = dim::center_square(dim::whole(tex.width() as f32, tex.height() as f32));
                 r.texture_pro(tex, src, thumb, Turn::NONE, tint, Filter::Linear);
             } else {
                 // Still decoding: placeholder square.
@@ -1479,13 +1479,13 @@ impl Grid {
 /// The grid owns no font, so the cell shows a shape instead of a glyph.
 fn draw_failure_mark(r: &mut Renderer, thumb: Rect, tint: Color) {
     let color = Color::new(214, 92, 92, 255).tint(tint);
-    let stroke = (thumb.width * 0.08).max(2.0);
-    let bar = thumb.height * 0.40;
-    let gap = thumb.height * 0.12;
-    let left = thumb.x + (thumb.width - stroke) / 2.0;
-    let top = thumb.y + (thumb.height - (bar + gap + stroke)) / 2.0;
-    r.fill_rect(Rect::new(left, top, stroke, bar), color);
-    r.fill_rect(Rect::new(left, top + bar + gap, stroke, stroke), color);
+    let stroke = (thumb.width() * 0.08).max(2.0);
+    let bar = thumb.height() * 0.40;
+    let gap = thumb.height() * 0.12;
+    let left = thumb.min_x() + (thumb.width() - stroke) / 2.0;
+    let top = thumb.min_y() + (thumb.height() - (bar + gap + stroke)) / 2.0;
+    r.fill_rect(dim::rect(left, top, stroke, bar), color);
+    r.fill_rect(dim::rect(left, top + bar + gap, stroke, stroke), color);
 }
 
 /// Move the selection by one direction press, `step` times over.

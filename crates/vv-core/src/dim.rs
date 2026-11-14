@@ -5,10 +5,18 @@
 //! [`LongSide`] wraps a pixel limit.
 //! [`PreviewPx`] wraps a progressive-preview pixel limit.
 //! [`Rate`] wraps the key-repeat rate.
-//! [`Rect`] wraps an axis-aligned rectangle in window pixels.
 //! Each wrapper is a newtype over its primitive and costs nothing at runtime.
 //!
-//! [`Rect::center_origin`] keeps a turned draw in place.
+//! [`Rect`] is `euclid`'s rectangle tagged with [`WindowSpace`], and
+//! [`SurfaceSpace`] tags the rectangle of a plane, so the compiler refuses to
+//! pass one where the other belongs.
+//! [`rect`], [`whole`], [`center_square`], [`center_origin`] and
+//! [`contains_point`] are the five readings the draw and the view make of a
+//! `Rect`, and `euclid` answers the edges and the size.
+//!
+//! [`center_origin`] keeps a turned draw in place.
+
+use euclid::{point2, size2};
 
 use crate::draw::Vec2;
 
@@ -62,99 +70,91 @@ macro_rules! float_newtype {
     };
 }
 
+/// The unit tag of a length or a position in window pixels.
+///
+/// `euclid` refuses to mix two space tags in one expression, so a window
+/// rectangle never lands where a rectangle of a plane belongs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowSpace {}
+
+/// The unit tag of a length or a position in surface units.
+///
+/// A surface unit is the plane's own: base raster pixels for an image or a
+/// vector file, and PostScript points for a document page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceSpace {}
+
 /// An axis-aligned rectangle in window pixels.
 ///
-/// `x` and `y` give the top-left corner, and `y` grows down.
+/// The origin gives the top-left corner, and `y` grows down.
+/// `euclid` names the edges `min_x`/`max_x` and `min_y`/`max_y` and the extents
+/// `width`/`height`, so a rect carries no second set of names here.
 ///
 /// # Examples
 ///
 /// ```
-/// # use vv_core::draw::Vec2;
-/// # use vv_core::dim::Rect;
-/// let r = Rect::new(10.0, 20.0, 30.0, 40.0);
-/// assert_eq!((r.right(), r.bottom()), (40.0, 60.0));
+/// # use vv_core::dim::{self, Rect};
+/// let r = dim::rect(10.0, 20.0, 30.0, 40.0);
+/// assert_eq!((r.max_x(), r.max_y()), (40.0, 60.0));
 /// // The square sits centered inside the rectangle.
-/// assert_eq!(r.center_square(), Rect::new(10.0, 25.0, 30.0, 30.0));
-/// assert!(r.contains_point(25.0, 40.0));
-/// assert!(!r.contains_point(41.0, 40.0));
+/// assert_eq!(dim::center_square(r), dim::rect(10.0, 25.0, 30.0, 30.0));
+/// assert!(r.contains(euclid::point2(25.0, 40.0)));
+/// assert!(!r.contains(euclid::point2(41.0, 40.0)));
 /// // The origin that keeps a turned rect on its own dest position.
-/// assert_eq!(r.center_origin(), Vec2::new(15.0, 20.0));
+/// assert_eq!(dim::center_origin(r), vv_core::draw::Vec2::new(15.0, 20.0));
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct Rect {
-    /// The left edge.
-    pub x: f32,
-    /// The top edge.
-    pub y: f32,
-    /// The width, rightward from `x`.
-    pub width: f32,
-    /// The height, downward from `y`.
-    pub height: f32,
+pub type Rect = euclid::Rect<f32, WindowSpace>;
+
+/// A window rectangle from its top-left corner and its size.
+#[must_use]
+pub const fn rect(x: f32, y: f32, width: f32, height: f32) -> Rect {
+    Rect::new(point2(x, y), size2(width, height))
 }
 
-impl Rect {
-    /// A rectangle from its top-left corner and its size.
-    #[must_use]
-    pub const fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
-        Self {
-            x,
-            y,
-            width,
-            height,
-        }
-    }
+/// A window rectangle of `width` by `height` at the origin.
+/// This is the source rect of a whole texture.
+#[must_use]
+pub const fn whole(width: f32, height: f32) -> Rect {
+    rect(0.0, 0.0, width, height)
+}
 
-    /// A rectangle of `width` x `height` at the origin.
-    /// This is the source rect of a whole texture.
-    #[must_use]
-    pub const fn sized(width: f32, height: f32) -> Self {
-        Self::new(0.0, 0.0, width, height)
-    }
+/// The origin that keeps a turned rect on its own `dest` position.
+///
+/// The draw turns the quad around the rect position, and this origin pulls
+/// the rect back by half its size.
+/// A position at the image center therefore turns the image in place, and
+/// the same call draws the plain rect at zero degrees.
+#[must_use]
+pub fn center_origin(outer: Rect) -> Vec2 {
+    Vec2::new(outer.width() / 2.0, outer.height() / 2.0)
+}
 
-    /// The right edge, `x + width`.
-    #[must_use]
-    pub const fn right(self) -> f32 {
-        self.x + self.width
-    }
+/// Is the point inside `outer`, edges included?
+///
+/// `euclid`'s `contains` puts the far edge outside, while a press on the border
+/// of a grid cell or of a region must land in it, so the viewer reads its own
+/// test.
+/// The function takes either space tag, so a window rect and a crop share the
+/// one rule.
+#[must_use]
+pub fn contains_point<Unit>(outer: &euclid::Rect<f32, Unit>, x: f32, y: f32) -> bool {
+    x >= outer.min_x() && y >= outer.min_y() && x <= outer.max_x() && y <= outer.max_y()
+}
 
-    /// The bottom edge, `y + height`.
-    #[must_use]
-    pub const fn bottom(self) -> f32 {
-        self.y + self.height
-    }
-
-    /// Is the point inside the rectangle, edges included?
-    #[must_use]
-    pub const fn contains_point(self, px: f32, py: f32) -> bool {
-        px >= self.x && py >= self.y && px <= self.right() && py <= self.bottom()
-    }
-
-    /// The origin that keeps a turned rect on its own `dest` position.
-    ///
-    /// The draw turns the quad around the rect position, and this origin pulls
-    /// the rect back by half its size.
-    /// A position at the image center therefore turns the image in place, and
-    /// the same call draws the plain rect at zero degrees.
-    #[must_use]
-    pub fn center_origin(self) -> Vec2 {
-        Vec2::new(self.width / 2.0, self.height / 2.0)
-    }
-
-    /// The largest square centered inside the rectangle.
-    #[must_use]
-    pub const fn center_square(self) -> Self {
-        let side = if self.width < self.height {
-            self.width
-        } else {
-            self.height
-        };
-        Self::new(
-            self.x + (self.width - side) / 2.0,
-            self.y + (self.height - side) / 2.0,
-            side,
-            side,
-        )
-    }
+/// The largest square centered inside `outer`.
+#[must_use]
+pub fn center_square(outer: Rect) -> Rect {
+    let side = if outer.width() < outer.height() {
+        outer.width()
+    } else {
+        outer.height()
+    };
+    rect(
+        outer.min_x() + (outer.width() - side) / 2.0,
+        outer.min_y() + (outer.height() - side) / 2.0,
+        side,
+        side,
+    )
 }
 
 uint_newtype!(ImgW, "An image width, in pixels.");

@@ -149,11 +149,13 @@ impl Vector {
         // A window wider than the texture limit at a diagonal turn would ask
         // for more pixels than an upload takes, so the patch drops resolution
         // instead of clipping, and the draw stretches it back to the region.
-        let wanted = (region.w * scale).max(region.h * scale).max(1.0);
+        let wanted = (region.width() * scale)
+            .max(region.height() * scale)
+            .max(1.0);
         let limit = MAX_TEXTURE_SIDE as f32;
         let fit = if wanted > limit { limit / wanted } else { 1.0 };
-        let width = (region.w * scale * fit).round().max(1.0);
-        let height = (region.h * scale * fit).round().max(1.0);
+        let width = (region.width() * scale * fit).round().max(1.0);
+        let height = (region.height() * scale * fit).round().max(1.0);
         let (rw, rh) = (width as u32, height as u32);
         let mut pixmap = tiny_skia::Pixmap::new(rw, rh).ok_or(DecodeError::Raster)?;
         // The paper fills before the tree paints, so a transparent part of the
@@ -165,7 +167,7 @@ impl Vector {
         // declared units.
         let per_base = self.declared_per_base();
         let region_scale = scale * fit / per_base;
-        let (rx, ry) = (region.x * per_base, region.y * per_base);
+        let (rx, ry) = (region.min_x() * per_base, region.min_y() * per_base);
         // The region corner lands on pixel 0: scale around the origin, then
         // shift that corner to the top-left pixel.
         let transform = tiny_skia::Transform {
@@ -683,12 +685,7 @@ mod tests {
         assert_eq!(vector.base_size(), (ImgW::new(1024), ImgH::new(512)));
         // The region arrives in base raster pixels, so the right half starts
         // at x = 512 and covers 512 pixels of the 1024 px source.
-        let right = crate::region::Crop {
-            x: 512.0,
-            y: 0.0,
-            w: 512.0,
-            h: 512.0,
-        };
+        let right = crate::region::crop(512.0, 0.0, 512.0, 512.0);
         let patch = vector.render_region(right, 1.0, None).expect("paint");
         assert_eq!(
             (patch.width(), patch.height()),
@@ -700,12 +697,7 @@ mod tests {
             &[0, 0, 255, 255]
         );
         // The left half paints red, so the region origin lands on pixel 0.
-        let left = crate::region::Crop {
-            x: 0.0,
-            y: 0.0,
-            w: 100.0,
-            h: 50.0,
-        };
+        let left = crate::region::crop(0.0, 0.0, 100.0, 50.0);
         let patch = vector.render_region(left, 2.0, None).expect("paint");
         assert_eq!(
             (patch.width(), patch.height()),
@@ -730,12 +722,7 @@ mod tests {
         .expect("write");
         let vector = parse(&path).expect("parse");
         assert_eq!(vector.base_size(), (ImgW::new(1024), ImgH::new(341)));
-        let right = crate::region::Crop {
-            x: 512.0,
-            y: 0.0,
-            w: 512.0,
-            h: 341.0,
-        };
+        let right = crate::region::crop(512.0, 0.0, 512.0, 341.0);
         let patch = vector.render_region(right, 2.0, None).expect("paint");
         // The patch measures base pixels times the view scale.
         assert_eq!(
