@@ -284,8 +284,11 @@ The binary name is `vv`.
 - `MAX_TEXTURE_SIDE` (8192) stays the decode policy, and `Uploader` clamps every upload to `Gpu::max_texture_side()`, so a smaller adapter takes a smaller texture and the decoded size never depends on the host.
 - `Renderer::render_into` paints the batch into any texture view, and `Renderer::flush` passes the swapchain image of the window.
   A host with no window passes a texture of its own, which is how `tests/gpu_offscreen.rs` reads the pixels back with no display.
-  Those paints are `#[ignore]`d, because the gate has no display and no adapter: a host with Vulkan runs them by hand (`MESA` store path, `VK_DRIVER_FILES`, `cargo test --test gpu_offscreen -- --ignored`), and they cover the clear, a fill, a source rect, straight alpha, a turn, the texel grid of a 1:1 patch, and the SVG, PDF, Typst, Mermaid and book planes end to end.
-  The gate still compiles them, so the seam never rots.
+  Those paints are `#[ignore]`d, because a plain `cargo test` has no adapter: `checks.gpu` runs them on Mesa's lavapipe, and a host with Vulkan runs them by hand (`MESA` store path, `VK_DRIVER_FILES`, `cargo test --test gpu_offscreen -- --ignored`).
+  lavapipe renders on the CPU with no GPU, no device node and no display, so the check runs in the build sandbox.
+  The check sets `VK_DRIVER_FILES` to the lavapipe ICD, `LD_LIBRARY_PATH` to the system libraries (wgpu opens `libvulkan.so.1` with `dlopen`), one font set for the label metrics, and `VV_GPU_REQUIRED`, which turns a missing adapter into a failure instead of a skip.
+  They cover the clear, a fill, a source rect, straight alpha, a turn, the texel grid of a 1:1 patch, and the SVG, PDF, Typst, Mermaid and book planes end to end.
+  The default gate still compiles them, so the seam never rots.
 - A captured drag grabs the pointer (`CursorGrabMode::Locked`, falling back to `Confined`, which is all X11 allows) and reads the raw device deltas of `DeviceEvent::MouseMotion`.
   `Input::capture` owns the swap: while a drag holds the pointer, the raw travel moves the logical pointer and `WindowEvent::CursorMoved` is ignored, because the grab keeps the real pointer in place.
   A free pointer is the opposite: the platform position is the truth and the raw travel only accumulates for a drag that starts inside the same frame.
@@ -314,7 +317,7 @@ The binary name is `vv`.
 ## Build
 
 - `nix build .#versatile-viewer-doc` makes the rustdoc HTML.
-- `nix flake check` gates clippy (`--all-targets -- --deny warnings`), tests, treefmt, the package build, and `checks.minimal` (`cargo test --no-default-features`, which compiles the `_off` stubs of the thumbnail cache, the SVG backend and the Mermaid backend).
+- `nix flake check` gates clippy (`--all-targets -- --deny warnings`), tests, treefmt, the package build, `checks.gpu` (the ignored headless paints on lavapipe) and `checks.minimal` (`cargo test --no-default-features`, which compiles the `_off` stubs of the thumbnail cache, the SVG backend and the Mermaid backend).
   One test gate only: `cargo test` in `checks.default` runs the unit tests, the integration tests and the doctests, so no separate `--doc` check exists.
   `checks.package` builds the package with `doCheck = false`, because the fixup owns the rpath gate and a second `cargo test` would only repeat the suite.
   `checks.minimal` carries its own `minimalArtifacts` dep set, because `--no-default-features` resolves 58 crates with a different feature set and cargo would recompile them in release on every run.

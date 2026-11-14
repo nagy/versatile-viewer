@@ -157,6 +157,36 @@
             meta.description = "Versatile-viewer tests without the default features";
           };
 
+          # The headless GPU paints, on Mesa's lavapipe.
+          #
+          # lavapipe is a software Vulkan driver: it needs no GPU, no device
+          # node and no display, so a build sandbox runs it.
+          # The loader reads the ICD manifest that VK_DRIVER_FILES names, and
+          # the manifest points at `libvulkan_lvp.so` beside it.
+          # VV_GPU_REQUIRED makes a missing adapter fail the run, so the gate
+          # proves that lavapipe answered instead of skipping every test.
+          gpu = craneLib.cargoTest {
+            inherit
+              src
+              cargoArtifacts
+              nativeBuildInputs
+              ;
+            buildInputs = libInputs;
+            # wgpu opens `libvulkan.so.1` with `dlopen`, so the test binary
+            # needs the loader on its search path: the rpath of the devshell
+            # does not reach a check.
+            LD_LIBRARY_PATH = lib.makeLibraryPath libInputs;
+            VK_DRIVER_FILES = "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.x86_64.json";
+            VV_GPU_REQUIRED = "1";
+            # A host reads its own font set, and a diagram measures its labels
+            # with one, so the gate pins one face instead of none.
+            FONTCONFIG_FILE = pkgs.makeFontsConf {
+              fontDirectories = [ pkgs.dejavu_fonts ];
+            };
+            cargoTestExtraArgs = "--test gpu_offscreen -- --ignored";
+            meta.description = "Versatile-viewer headless GPU paints on lavapipe";
+          };
+
           # Lint gate: warnings are errors and every target is included.
           # This uses the same clippy and cargo from nixpkgs as the devshell.
           # `nix flake check` and a plain `cargo clippy` then agree.
@@ -198,6 +228,11 @@
           checks.default = tests;
 
           checks.clippy = clippy;
+
+          # The headless GPU paints, which no other gate runs: the driver is a
+          # software Vulkan of its own, so the draw seam is proven and not only
+          # compiled.
+          checks.gpu = gpu;
 
           # The build with no default feature, so the `_off` stubs stay
           # compiled and tested.

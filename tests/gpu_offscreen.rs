@@ -1,12 +1,10 @@
 //! Headless paints: the renderer draws into a texture and the test reads the
 //! pixels back.
 //!
-//! The gate has no display, and a `Surface` needs a window, so every test here
-//! is `#[ignore]`: a host with a Vulkan device runs them by hand, and the gate
-//! only compiles them.
-//! That compiles the whole draw seam of [`versatile_viewer::render`] and keeps
-//! it from rotting, and one command proves the pipeline draws what the view
-//! asks for:
+//! The default gate has no adapter, so every test here is `#[ignore]`, and the
+//! `checks.gpu` gate runs them on Mesa's lavapipe, a software Vulkan driver
+//! that needs no GPU and no display.
+//! A host runs the same tests by hand:
 //!
 //! ```sh
 //! export VK_DRIVER_FILES=$(nix build --no-link --print-out-paths nixpkgs#mesa)/share/vulkan/icd.d/lvp_icd.x86_64.json
@@ -14,7 +12,8 @@
 //! ```
 //!
 //! A test that finds no adapter prints one line and passes, so the same command
-//! is safe on a host without Vulkan.
+//! is safe on a host without Vulkan, and `VV_GPU_REQUIRED` turns that skip into
+//! a failure for a gate that provides a driver of its own.
 //!
 //! # What the tests pin
 //!
@@ -232,13 +231,26 @@ impl Pixels {
     }
 }
 
+/// Report a host that answers no Vulkan device.
+///
+/// A plain run skips the test, so the same command is safe on a machine with
+/// no driver. A run that sets `VV_GPU_REQUIRED` fails instead, so a gate that
+/// provides a driver of its own proves that driver answered.
+fn skip_without_adapter() {
+    assert!(
+        std::env::var_os("VV_GPU_REQUIRED").is_none(),
+        "no Vulkan adapter, and VV_GPU_REQUIRED asks for one"
+    );
+    eprintln!("no Vulkan adapter: skipped");
+}
+
 /// Skip a test when the host answers no Vulkan device.
 macro_rules! canvas {
     ($width:expr, $height:expr) => {
         match Canvas::new($width, $height) {
             Some(canvas) => canvas,
             None => {
-                eprintln!("no Vulkan adapter: skipped");
+                skip_without_adapter();
                 return;
             }
         }
@@ -481,10 +493,16 @@ fn a_mermaid_diagram_paints_on_white_paper() {
     // boxes and labels leave dark ink on it.
     let (x0, y0) = (dest.x as usize, dest.y as usize);
     let (x1, y1) = (dest.right() as usize, dest.bottom() as usize);
-    assert_eq!(
-        pixels.at(x0 + 1, y0 + 1),
-        [255, 255, 255, 255],
-        "white paper"
+    // One pixel of a fitted diagram can hold a box corner on any font set, so
+    // the paper check counts the pixels instead of naming one.
+    let area = (x1 - x0) * (y1 - y0);
+    let paper = (y0..y1)
+        .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+        .filter(|&(x, y)| pixels.at(x, y) == [255, 255, 255, 255])
+        .count();
+    assert!(
+        paper * 2 > area,
+        "the paper covers most of the diagram: {paper} of {area}"
     );
     let inked = (y0..y1).any(|y| (x0..x1).any(|x| pixels.at(x, y)[0] < 200));
     assert!(inked, "the boxes and labels leave ink on the paper");
@@ -802,7 +820,7 @@ fn a_viewer_paints_into_a_host_texture() {
     }
 
     let Some(canvas) = Canvas::new(32, 32) else {
-        eprintln!("no Vulkan adapter, skipping");
+        skip_without_adapter();
         return;
     };
     let dir = tempfile::tempdir().expect("a temp dir");
