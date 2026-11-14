@@ -88,8 +88,6 @@ pub struct GpuSettings {
     pub present: Present,
     /// The swapchain image count minus one.
     pub latency: u32,
-    /// Print the adapter and the swapchain to stderr once.
-    pub trace: bool,
 }
 
 /// Why the GPU stack did not come up.
@@ -212,9 +210,9 @@ impl Gpu {
         config.present_mode = if caps.present_modes.contains(&wanted) {
             wanted
         } else {
-            if settings.trace {
-                eprintln!("vv: present {wanted:?} unsupported, using Fifo");
-            }
+            // A mode the surface cannot configure is a request this stack does
+            // not serve, so the fallback is a warning and not a trace.
+            tracing::warn!(wanted = ?wanted, "present mode unsupported, using Fifo");
             wgpu::PresentMode::Fifo
         };
         config.desired_maximum_frame_latency = settings.latency.max(1);
@@ -226,20 +224,21 @@ impl Gpu {
         surface.configure(&device, &config);
         let present = config.present_mode;
 
-        if settings.trace {
-            eprintln!(
-                "vv: gpu backend={:?} adapter=\"{}\" type={:?} driver=\"{}\" {} format={format:?} \
-                 srgb={} present={:?} latency={} max_texture={max_texture_side}",
-                info.backend,
-                info.name,
-                info.device_type,
-                info.driver_info,
-                info.driver,
-                format.is_srgb(),
-                config.present_mode,
-                config.desired_maximum_frame_latency,
-            );
-        }
+        // One event with one field per fact: a filter reads `vv_gpu::gpu` for
+        // the stack, and a report carries the numbers without a parse.
+        tracing::info!(
+            backend = ?info.backend,
+            adapter = %info.name,
+            device_type = ?info.device_type,
+            driver = %info.driver,
+            driver_info = %info.driver_info,
+            format = ?format,
+            srgb = format.is_srgb(),
+            present = ?config.present_mode,
+            latency = config.desired_maximum_frame_latency,
+            max_texture = max_texture_side,
+            "gpu stack"
+        );
 
         Ok(Self {
             surface,

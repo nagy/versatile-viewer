@@ -342,8 +342,9 @@ a stuck program never holds a decode worker.
 
 |variable          |effect                                                                 |
 |------------------|-----------------------------------------------------------------------|
-|`VV_DEBUG=1`      |trace grid open/return events, key events and the drag travel to stderr|
-|`VV_TIMING=1`     |print the GPU stack at startup and every slow frame to stderr          |
+|`RUST_LOG=`       |diagnostics filter, `error`..`trace`, per target (for example `vv=debug`)|
+|`VV_DEBUG=1`      |alias of `RUST_LOG=vv=trace`: key presses, input events and drag travel|
+|`VV_TIMING=1`     |alias of `RUST_LOG=vv=debug`: the GPU stack and every slow frame       |
 |`VV_SLOW_STREAM=1`|dribble 4 KB chunks with 1 s pauses until the first preview renders    |
 |`VV_BLUR_BG=1`    |image-view background is a tiny blurred copy of the viewed image       |
 |`VV_BG_DIM=0..1`  |brightness of the blurred background (default 0.6)                     |

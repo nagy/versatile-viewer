@@ -218,7 +218,6 @@ impl ApplicationHandler for HostApp {
             GpuSettings {
                 present: Present::from_env(),
                 latency: vv_gpu::gpu::DEFAULT_LATENCY,
-                trace: false,
             },
         ) {
             Ok(gpu) => gpu,

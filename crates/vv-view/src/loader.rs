@@ -484,7 +484,7 @@ fn ready(image: DecodedImage, uploader: Option<&Uploader>) -> Ready {
                 // A buffer that does not match its size cannot be uploaded,
                 // and the pixels are still the picture: keep them rather than
                 // dropping the frame.
-                eprintln!("vv: upload: {err}");
+                tracing::error!(err = %err, "upload");
                 Ready::Pixels(image)
             }
         },

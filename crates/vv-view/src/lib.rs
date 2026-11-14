@@ -44,7 +44,7 @@ pub mod zoomkeys;
 pub use vv_cache as cache;
 pub use vv_core::{
     DIM_LEVEL, DIM_TINT, DIM_VEIL, SHIFT_SPEED_MULTIPLIER, TAP_SLACK, dim, draw, keyrepeat, region,
-    region_sel, rotate, timing_enabled, tween,
+    region_sel, rotate, tween,
 };
 pub use vv_gpu::{render, texture};
 pub use vv_pixels::{

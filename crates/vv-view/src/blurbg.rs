@@ -196,7 +196,7 @@ impl BlurBg {
             // upscale of this tiny texture is the blur.
             Ok(texture) => self.tex = Some(texture),
             Err(err) => {
-                eprintln!("vv: blur background: {err}");
+                tracing::warn!(err = %err, "blur background upload");
                 self.tex = None;
             }
         }
@@ -243,7 +243,7 @@ impl BlurBg {
                 self.tex = Some(t);
                 self.current = Some(tag);
             }
-            Err(err) => eprintln!("vv: blur background: {err}"),
+            Err(err) => tracing::warn!(err = %err, "blur background upload"),
         }
     }
 

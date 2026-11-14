@@ -689,7 +689,7 @@ fn ready(image: DecodedImage, uploader: Option<&Uploader>) -> Ready {
         Some(uploader) => match uploader.image(&image) {
             Ok(texture) => Ready::Texture(texture),
             Err(err) => {
-                eprintln!("vv: upload: {err}");
+                tracing::error!(err = %err, "upload");
                 Ready::Pixels(image)
             }
         },
@@ -963,9 +963,10 @@ impl Grid {
                     e.no_full |= no_full;
                 }
                 Err(err) => {
-                    eprintln!(
-                        "vv: {}: decode failed: {err}",
-                        self.entries[i].source.log_label()
+                    tracing::warn!(
+                        source = self.entries[i].source.log_label(),
+                        err = %err,
+                        "decode failed"
                     );
                     let e = &mut self.entries[i];
                     e.queued = false;

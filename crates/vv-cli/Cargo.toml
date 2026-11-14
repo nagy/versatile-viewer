@@ -15,6 +15,12 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.104"
+# The diagnostics facade, which every layer below emits events through.
+tracing = "0.1"
+# The subscriber the application owns: the format, the level and the
+# destination. `env-filter` reads `RUST_LOG`, so one variable filters the whole
+# tree and `VV_DEBUG`/`VV_TIMING` stay as aliases of one level each.
+tracing-subscriber = { version = "0.3.23", features = ["fmt", "env-filter"] }
 # The command line.
 # One derive struct owns the flags, the value parsers, `--help` and
 # `--version`, so no argv loop and no usage string to keep in step.

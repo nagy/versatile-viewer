@@ -402,10 +402,6 @@ pub struct Viewer {
     title_open_id: Option<u64>,
     /// Set when the viewer exits entirely.
     quit: bool,
-    /// `VV_DEBUG=1`: trace the input and the drag geometry to stderr.
-    debug: bool,
-    /// `VV_TIMING=1`: trace a slow frame to stderr.
-    timing: bool,
     /// One spread step per press: a step disarms the next one, and the release
     /// of `j`/`k` arms it again.
     spread_armed: bool,
@@ -522,8 +518,6 @@ impl Viewer {
             input: Input::default(),
             title_open_id: None,
             quit: false,
-            debug: std::env::var_os("VV_DEBUG").is_some(),
-            timing: crate::timing_enabled(),
             spread_armed: true,
             last_win: None,
             pointer_captured: false,
@@ -570,7 +564,7 @@ impl Viewer {
         if let Some(image) = decoded.take() {
             match self.renderer.upload(&image) {
                 Ok(texture) => self.st.view_tex = Some(texture),
-                Err(err) => eprintln!("vv: upload: {err}"),
+                Err(err) => tracing::error!(err = %err, "upload"),
             }
             self.st.adopt_source(source);
             self.st.img = Size {
@@ -751,21 +745,22 @@ impl Viewer {
     fn frame(&mut self, host: &mut dyn Host, size: (u32, u32), dt: f32) -> Result<()> {
         let r = &mut self.renderer;
 
-        // VV_TIMING: the frame started now.
-        // The code reports it at the end of the frame when it ran long.
-        let frame_started = self.timing.then(std::time::Instant::now);
-        // VV_DEBUG: trace every key press this frame.
-        if self.debug {
-            for k in self.input.pressed_keys() {
-                eprintln!("vv: PRESSED key {k:?}");
-            }
-            // A frame longer than a key tap can hide the whole press. The input
-            // layer records every event, so the trace above still shows it, and
-            // this line names the frame that swallowed it.
-            let ft = dt;
-            if ft > 0.1 {
-                eprintln!("vv: slow frame {ft:.0} ms");
-            }
+        // The debug level, read once per frame: the drawing below arms its
+        // crosshair on it, and the events carry their own level for the
+        // filter.
+        let debug = tracing::enabled!(tracing::Level::DEBUG);
+        // A long frame is reported at the end of the frame, so the start clock
+        // is armed only when a filter asks for it.
+        let frame_started = debug.then(std::time::Instant::now);
+        // A key press is the finest event of this layer, so it rides TRACE.
+        for k in self.input.pressed_keys() {
+            tracing::trace!(key = ?k, "pressed");
+        }
+        // A frame longer than a key tap can hide the whole press. The input
+        // layer records every event, so the trace above still shows it, and
+        // this event names the frame that swallowed it.
+        if dt > 0.1 {
+            tracing::debug!(dt_ms = dt * 1000.0, "slow frame start");
         }
         let win_w = size.0 as f32;
         let win_h = size.1 as f32;
@@ -776,10 +771,14 @@ impl Viewer {
         if let Some(target) = self.pending_restore {
             let cur = self.input.cursor_position();
             let settled = (cur.x - target.x).abs() < 1.0 && (cur.y - target.y).abs() < 1.0;
-            if self.debug && !settled {
-                eprintln!(
-                    "vv: restore try {}: cur ({:.0},{:.0}) -> ({:.0},{:.0})",
-                    self.restore_tries, cur.x, cur.y, target.x, target.y
+            if debug && !settled {
+                tracing::debug!(
+                    tries = self.restore_tries,
+                    cur_x = cur.x,
+                    cur_y = cur.y,
+                    target_x = target.x,
+                    target_y = target.y,
+                    "pointer restore pending"
                 );
             }
             if settled || self.restore_tries >= 3 {
@@ -986,7 +985,7 @@ impl Viewer {
                         self.st.view_loading = false;
                     }
                     Err(err) => {
-                        eprintln!("vv: {err}");
+                        tracing::warn!(err = %err, "open failed");
                         open_failed = Some(err.to_string());
                     }
                 }
@@ -1042,9 +1041,7 @@ impl Viewer {
                 shift_mult,
             ) {
                 Some(GridAction::Open(i)) => {
-                    if self.debug {
-                        eprintln!("vv: enter pressed -> open idx {i}");
-                    }
+                    tracing::debug!(entry = i, "enter pressed");
                     show_entry(
                         &mut self.st,
                         self.grid.as_mut().unwrap(),
@@ -1183,22 +1180,23 @@ impl Viewer {
                     // spot while the pointer stays captured.
                     self.r_capture = true;
                     self.st.pivot = r_pivot_edge.then_some(self.grab_pos);
-                    if self.debug {
-                        eprintln!(
-                            "vv: r hold grab at ({:.0},{:.0}), angle {}, pivot {:?}",
-                            self.grab_pos.x, self.grab_pos.y, self.st.angle, self.st.pivot
-                        );
-                    }
+                    tracing::debug!(
+                        grab_x = self.grab_pos.x,
+                        grab_y = self.grab_pos.y,
+                        angle = self.st.angle,
+                        pivot = ?self.st.pivot,
+                        "r hold grab"
+                    );
                 } else {
                     self.f_capture = true;
                     self.f_zoom_capture = shift;
                     self.f_zoom_anchor = self.f_zoom_capture.then_some(self.grab_pos);
-                    if self.debug {
-                        eprintln!(
-                            "vv: f hold grab at ({:.0},{:.0}), zoom {}",
-                            self.grab_pos.x, self.grab_pos.y, self.f_zoom_capture
-                        );
-                    }
+                    tracing::debug!(
+                        grab_x = self.grab_pos.x,
+                        grab_y = self.grab_pos.y,
+                        zoom = self.f_zoom_capture,
+                        "f hold grab"
+                    );
                 }
             }
             // A Shift change mid-hold switches the pan and the zoom.
@@ -1221,9 +1219,7 @@ impl Viewer {
                 });
                 // A zoom hold never counts as a tap.
                 self.f_zoom_tapped = true;
-                if self.debug {
-                    eprintln!("vv: f hold switch, zoom {}", self.f_zoom_capture);
-                }
+                tracing::debug!(zoom = self.f_zoom_capture, "f hold switch");
             }
             // `!key_down` also covers a press+release landing inside one
             // frame (the pressed queue records the press, but there is no
@@ -1267,22 +1263,22 @@ impl Viewer {
                     keep_pivot(&mut self.st, before, win_w, win_h);
                     self.r_capture = false;
                 }
-                if self.debug {
+                {
                     // The accumulated travel is the number a feel report needs:
                     // a 100 px drag that reads 200 says the input source counts
                     // twice, whatever the factor is.
                     let travel = self.drag_virtual - self.grab_pos;
-                    eprintln!(
-                        "vv: hold release: grab ({:.0},{:.0}), virtual ({:.0},{:.0}), speed {}, \
-                         dragged {f_dragged}, angle {}, travel ({:.0},{:.0})",
-                        self.grab_pos.x,
-                        self.grab_pos.y,
-                        self.drag_virtual.x,
-                        self.drag_virtual.y,
-                        self.pan_drag_speed,
-                        self.st.angle,
-                        travel.x,
-                        travel.y
+                    tracing::debug!(
+                        grab_x = self.grab_pos.x,
+                        grab_y = self.grab_pos.y,
+                        virtual_x = self.drag_virtual.x,
+                        virtual_y = self.drag_virtual.y,
+                        speed = self.pan_drag_speed,
+                        dragged = f_dragged,
+                        angle = self.st.angle,
+                        travel_x = travel.x,
+                        travel_y = travel.y,
+                        "hold release"
                     );
                 }
             }
@@ -1357,11 +1353,11 @@ impl Viewer {
                 let dragging = self.region_drag.take();
                 if kept.is_none() && dragging.is_none() {
                     enter = true;
-                } else if self.debug {
-                    eprintln!(
-                        "vv: esc dropped region {:?}, drag {}",
-                        kept.map(|r| (r.min_x(), r.min_y(), r.width(), r.height())),
-                        dragging.is_some()
+                } else {
+                    tracing::debug!(
+                        region = ?kept.map(|r| (r.min_x(), r.min_y(), r.width(), r.height())),
+                        drag = dragging.is_some(),
+                        "esc dropped region"
                     );
                 }
             }
@@ -1771,31 +1767,29 @@ impl Viewer {
                     self.drag_virtual = self.grab_pos;
                     grab_pointer(&mut self.input, host);
                     self.pointer_captured = true;
-                    if self.debug {
-                        eprintln!(
-                            "vv: drag grab at ({:.0},{:.0})",
-                            self.grab_pos.x, self.grab_pos.y
-                        );
-                    }
+                    tracing::debug!(
+                        grab_x = self.grab_pos.x,
+                        grab_y = self.grab_pos.y,
+                        "drag grab"
+                    );
                 } else if drag_released
                     && self.pointer_captured
                     && !self.f_capture
                     && !self.r_capture
                 {
-                    if self.debug {
+                    if debug {
                         let travel = self.drag_virtual - self.grab_pos;
-                        eprintln!(
-                            "vv: drag release: grab ({:.0},{:.0}), virtual ({:.0},{:.0}), speed \
-                             {}, pointer ({:.0},{:.0}), travel ({:.0},{:.0})",
-                            self.grab_pos.x,
-                            self.grab_pos.y,
-                            self.drag_virtual.x,
-                            self.drag_virtual.y,
-                            self.pan_drag_speed,
-                            self.input.cursor_position().x,
-                            self.input.cursor_position().y,
-                            travel.x,
-                            travel.y
+                        tracing::debug!(
+                            grab_x = self.grab_pos.x,
+                            grab_y = self.grab_pos.y,
+                            virtual_x = self.drag_virtual.x,
+                            virtual_y = self.drag_virtual.y,
+                            speed = self.pan_drag_speed,
+                            pointer_x = self.input.cursor_position().x,
+                            pointer_y = self.input.cursor_position().y,
+                            travel_x = travel.x,
+                            travel_y = travel.y,
+                            "drag release"
                         );
                     }
                     release_pointer(&mut self.input, host);
@@ -1813,7 +1807,7 @@ impl Viewer {
                 let dragging = self.pointer_captured;
                 if dragging {
                     let delta = self.input.pointer_travel();
-                    // The virtual cursor follows physical travel 1:1 (self.debug
+                    // The virtual cursor follows physical travel 1:1 (debug
                     // crosshair).
                     self.drag_virtual.x += delta.x;
                     self.drag_virtual.y += delta.y;
@@ -1900,9 +1894,7 @@ impl Viewer {
                     // A continuous zoom keeps the pointer captured instead,
                     // so this never runs for it.
                     if d != Vec2::ZERO && !keyboard_zoom && !self.pointer_captured {
-                        if self.debug {
-                            eprintln!("vv: zoom drift anchor to ({ax:.0},{ay:.0})");
-                        }
+                        tracing::debug!(anchor_x = ax, anchor_y = ay, "zoom drift anchor");
                         place_pointer(&mut self.input, host, self.st.zoom_anchor.unwrap());
                     }
                 }
@@ -1997,12 +1989,14 @@ impl Viewer {
                         v_square_edge,
                     );
                     self.region_drag = Some(drag);
-                    if self.debug {
-                        eprintln!(
-                            "vv: region grab at ({:.0},{:.0}) -> image ({:.0},{:.0}), {:?}",
-                            mouse.x, mouse.y, drag.anchor.x, drag.anchor.y, drag.press
-                        );
-                    }
+                    tracing::debug!(
+                        mouse_x = mouse.x,
+                        mouse_y = mouse.y,
+                        anchor_x = drag.anchor.x,
+                        anchor_y = drag.anchor.y,
+                        press = ?drag.press,
+                        "region grab"
+                    );
                 }
                 // `!key_down` also covers a press and release that land
                 // inside one frame, like the `f` and `r` halves.
@@ -2019,17 +2013,15 @@ impl Viewer {
                         dim::window_point(self.input.cursor_position()),
                     );
                     self.region_drag = None;
-                    if self.debug {
-                        eprintln!(
-                            "vv: region release {:?}",
-                            self.st.selection.map(|r| (
-                                r.min_x(),
-                                r.min_y(),
-                                r.width(),
-                                r.height()
-                            ))
-                        );
-                    }
+                    tracing::debug!(
+                        region = ?self.st.selection.map(|r| (
+                            r.min_x(),
+                            r.min_y(),
+                            r.width(),
+                            r.height()
+                        )),
+                        "region release"
+                    );
                 }
             } // self.st.img.w > 0.0: fit/pan math needs known dimensions
         }
@@ -2170,13 +2162,13 @@ impl Viewer {
             {
                 draw_selection(r, frame, selection);
             }
-            // VV_DEBUG: while the pointer is captured, draw a crosshair at
-            // the virtual cursor position (clamped to the window).
+            // The debug level: while the pointer is captured, draw a crosshair
+            // at the virtual cursor position (clamped to the window).
             // The real cursor is hidden, and this shows where vv thinks it
             // is.
             // The code also draws a ring at the grab point, so a wrong
             // restore is visible.
-            if self.debug && self.pointer_captured {
+            if debug && self.pointer_captured {
                 let vx = self.drag_virtual.x.clamp(0.0, win_w);
                 let vy = self.drag_virtual.y.clamp(0.0, win_h);
                 r.circle(
@@ -2199,7 +2191,7 @@ impl Viewer {
         if let Some(started) = frame_started {
             let ms = started.elapsed().as_secs_f64() * 1000.0;
             if ms > 50.0 {
-                eprintln!("vv: slow frame {ms:.1} ms");
+                tracing::debug!(ms = ms, "slow frame");
             }
         }
         Ok(())

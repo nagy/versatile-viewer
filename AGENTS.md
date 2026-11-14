@@ -185,7 +185,7 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   All pixel resize goes through `resample_rgba` (`crates/vv-pixels/src/lib.rs`), the `fast_image_resize` SIMD path with Lanczos3.
   Do not call `image::imageops::resize` for a downscale: it is several times slower.
   Keep the `rayon` feature of `fast_image_resize` off, so a resize never spawns nested workers inside a decode job.
-  `VV_TIMING=1` prints the adapter and the swapchain of the start, the upload cost and the slow frames.
+  Diagnostics emit through `tracing` (see "Diagnostics"): the upload failure is an `error!` event, and no layer prints to stderr of its own.
 - The streaming JXL loader reads fixed-size chunks from the surface's `ChunkSource` (`crates/vv-source/src/surface.rs`) and feeds them to jxl-oxide.
   The file-backed stream memory-maps the file (`memmap2`), so a chunk copy costs no read syscall.
   A file rewritten under the map faults with SIGBUS instead of reading short data.
@@ -348,7 +348,7 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   The pan multiplies the travel by `PAN_DRAG_SPEED` (`main.rs`, 1.0), and `VV_PAN_DRAG_SPEED` overrides it for one run.
   The factor is a feel constant and not a geometry one: raw counts are units of the mouse, so their ratio to window pixels depends on the hardware DPI and on the desktop's pointer speed.
   1.0 moves the picture one window pixel per count, which is the feel the spike at `~/agent/versatile-viewer-wgpu-spike` picked; the raylib path multiplied the same raw travel by 2.0 (see `git bug show 94691ce`), and issue 94691ce carries the history of that number.
-  `VV_DEBUG` prints the window scale factor at startup and, at every drag release, the `speed` in use and the `travel` the drag accumulated, so a feel report carries numbers and the input source can be checked without a rebuild.
+  `RUST_LOG=vv=debug` prints the window scale factor at startup and, at every drag release, the `speed` in use and the `travel` the drag accumulated, so a feel report carries numbers and the input source can be checked without a rebuild.
   The release warps the pointer back to the grab point, and the warp sets the logical pointer too, so the next frame reads the spot it sent the pointer to.
 - winit 0.30.13 emits one `DeviceEvent::MouseMotion` per XI2 raw motion event, with the device's raw axis values as the delta (see `xinput2_raw_mouse_motion` in its X11 backend), so no per-event guard belongs here.
   A virtual X server (XTEST) reports the absolute pointer position as those raw values instead, sometimes twice, which looks like a double-speed drag; that is an injection artifact of the test harness and not a real event pair, so do not add a delta sanity clamp for it.
@@ -365,6 +365,33 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   A frame whose acquire answers no image (the window is hidden or occluded) is the one frame the loop cannot pace itself with, because Fifo has nothing to present, so `main.rs` sleeps `OCCLUDED_PAUSE` (50 ms) before it asks for the next one: twenty wakeups a second, and no core burned on a picture nobody sees.
 - The viewer carries no text layer.
   The grid draws nothing for an empty directory, because the title carries the count, and a failed cell shows an exclamation of two rectangles.
+
+## Diagnostics
+
+- Every layer emits events through `tracing`, and the binary owns the subscriber.
+  `vv-source`, `vv-view` and `vv-gpu` name the facade only (`tracing = "0.1"`), so no library decides a level, a format or a destination.
+  `vv-cli` names `tracing-subscriber` with `fmt` and `env-filter`, and `init_logging` (`main.rs`) builds the one subscriber: `RUST_LOG`, the stderr writer, and the target column.
+  The subscriber starts before `Launch::open`, because a decode and a converter run before the window exists.
+  The writer stays on stderr, because an MCP transport owns stdout.
+- `RUST_LOG` is the whole filter, so one variable serves the tree: `RUST_LOG=vv=debug`, `RUST_LOG=vv_source=debug`, `RUST_LOG=vv=warn`.
+  `EnvFilter::try_from_default_env` keeps the default, so an unparsable `RUST_LOG` falls through to `default_filter`.
+  `VV_DEBUG=1` answers `vv=trace` and `VV_TIMING=1` answers `vv=debug`, and a set `RUST_LOG` wins over both.
+  `vv_core::timing_enabled` is gone: its `OnceLock` bool became a `tracing::enabled!` call, so the filter is the one switch.
+- The level says who reads the event:
+  `error!` a failure the viewer absorbed (an upload, the converter table),
+  `warn!` a failure the user sees (a decode, an open, a present-mode fallback, the pane geometry),
+  `info!` the one startup fact worth a support report (the GPU stack),
+  `debug!` the input and drag geometry and the slow frames,
+  `trace!` the per-frame key press, which is the finest event of the loop.
+- A hot path reads `tracing::enabled!` once when the work beside the event costs real time.
+  `Viewer::frame` reads `Level::DEBUG` into one local `debug`, which arms the frame clock and the debug crosshair, and the events themselves stay macro calls.
+  Do not hold a level in a struct field, and do not re-read the environment once the subscriber exists.
+- Values ride the fields and never the message, so a filter and a report read them: `err = %err`, `path = source.log_label()`, `ms = ms`, `dt_ms = dt * 1000.0`.
+  The message stays a short constant name of the event (`"upload"`, `"decode failed"`, `"gpu stack"`), so one event reads the same in every filter.
+- A span wraps the work that a slow report names: `convert::run` carries `#[instrument(skip_all, fields(program, extensions, source_bytes))]`, so its `debug!` answer event inherits the conversion it belongs to.
+  A synchronous worker enters a span with a guard in a named binding (`let _e = span.enter()`), because `.instrument()` serves an async future and releases nothing on a plain call.
+- A test and an example init nothing: no test reads a subscriber, and an example owns its own output.
+  `tracing-subscriber` never enters a library, so a dev dependency needs no seam.
 
 ## Build
 
@@ -438,7 +465,8 @@ A source that paints no paper carries it in its pixels, so no clear color ever h
   A Shift+R hold therefore also doubles the pan and zoom speed, like every other Shift chord.
 - Mouse side buttons step next / previous in image view, like `n` / `p` (`read_nav_mouse` in `main.rs`).
   A book holds every spread in one plane, so a step always moves to another file.
-- Env vars `VV_DEBUG`, `VV_TIMING`, `VV_SLOW_STREAM`, `VV_BLUR_BG`, `VV_BG_DIM`, `VV_BLUR_PX`, `VV_CACHE`, `VV_PRESENT`: see the README table.
+- Env vars `RUST_LOG`, `VV_DEBUG`, `VV_TIMING`, `VV_SLOW_STREAM`, `VV_BLUR_BG`, `VV_BG_DIM`, `VV_BLUR_PX`, `VV_CACHE`, `VV_PRESENT`: see the README table.
+  `VV_DEBUG` and `VV_TIMING` only pick the filter `RUST_LOG` would set, so the two never compete.
 - Window title uses en-dash separators: `<file> – <dir> – versatile-viewer`.
   The grid title is `(<n> image(s)) – <dir> – versatile-viewer`.
   Canonicalize the paths.
@@ -515,6 +543,7 @@ A source that paints no paper carries it in its pixels, so no clear color ever h
 - stdout carries protocol frames only.
   Every diagnostic goes to stderr, and no library writes to stdout beside the transport.
   The module never writes to stdout outside the transport.
+  The subscriber of the binary writes to stderr for the same reason, so the two `--mcp` and `RUST_LOG` compose.
 - The server runs a tokio current-thread runtime on a background thread.
   A start or run failure prints to stderr and never stops the viewer.
 - Client config: `{ "command": "vv", "args": ["--mcp", "/path/to/images"] }`.

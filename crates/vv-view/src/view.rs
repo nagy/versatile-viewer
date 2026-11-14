@@ -81,7 +81,8 @@ pub const RAMP_TIME: Duration = Duration::from_millis(360);
 /// The raylib path multiplied the same raw travel by 2.0, and `git bug show
 /// 94691ce` records that history.
 /// `VV_PAN_DRAG_SPEED` overrides it, so a feel comparison needs no rebuild, and
-/// `VV_DEBUG` prints the travel a drag accumulated (see the release line).
+/// `RUST_LOG=vv=debug` prints the travel a drag accumulated (see the release
+/// event).
 pub const PAN_DRAG_SPEED: f32 = 1.0;
 
 /// The accepted `VV_PAN_DRAG_SPEED` range.
@@ -663,7 +664,7 @@ impl ViewState {
                 Err(err) => {
                     // A step that cannot paint early keeps the ordinary path:
                     // the quiet window paints after the glide.
-                    eprintln!("vv: {err}");
+                    tracing::warn!(err = %err, "spread prefetch");
                     let _ = tx.send(CropMsg::PrefetchFailed { generation, id });
                 }
             }
@@ -834,7 +835,7 @@ impl ViewState {
                     });
                 }
                 Err(err) => {
-                    eprintln!("vv: {err}");
+                    tracing::warn!(err = %err, "region paint");
                     let _ = tx.send(CropMsg::Failed { generation });
                 }
             },
@@ -1507,7 +1508,7 @@ pub fn show_entry(
                     ))
                 }
                 Err(err) => {
-                    eprintln!("vv: {}: {err}", source.log_label());
+                    tracing::warn!(source = source.log_label(), err = %err, "open failed");
                     grid.mark_failed(id, DecodeFailure::Decode);
                     None
                 }

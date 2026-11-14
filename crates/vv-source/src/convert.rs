@@ -91,6 +91,7 @@ use std::{
 
 use derive_more::{Display, Error, From};
 use serde::Deserialize;
+use tracing::instrument;
 
 use crate::{
     draw::Color,
@@ -408,11 +409,22 @@ impl Converters {
     /// The call holds one slot, feeds the source, bounds the output, bounds the
     /// wall clock, and reaps the child.
     ///
+    /// The span carries the program, the extension and the source size, so a
+    /// slow conversion names itself, and every event inside rides the span.
+    ///
     /// # Errors
     ///
     /// The function errors when the program cannot start, fails, writes more
     /// than its cap, runs past its wall clock, or keeps its output open past
     /// the grace period without writing a byte.
+    #[instrument(
+        skip_all,
+        fields(
+            program = rule.program_name(),
+            extensions = %rule.extensions.join(","),
+            source_bytes = source.len()
+        )
+    )]
     fn run(&self, rule: &Rule, source: &[u8], dir: Option<&Path>) -> Result<Vec<u8>, SurfaceError> {
         let _slot = self.slots.acquire();
         let mut child = spawn(rule, dir)?;
@@ -461,6 +473,7 @@ impl Converters {
                 stderr_text.trim()
             )));
         }
+        tracing::debug!(answer_bytes = answer.bytes.len(), "converted");
         // A pipe that stays open past the grace period still carries the bytes
         // that arrived, because a converter often leaves a helper behind. An
         // answer cut short then fails the SVG parse, which names the cause.
@@ -942,12 +955,12 @@ fn color(text: &str) -> Result<Color, ConvertError> {
 
 /// The converter table of this process.
 ///
-/// A broken config prints one line and leaves an empty table, so a typo runs no
-/// program and every other file keeps its own decoder.
+/// A broken config reports one error and leaves an empty table, so a typo runs
+/// no program and every other file keeps its own decoder.
 static CONVERTERS: LazyLock<Converters> = LazyLock::new(|| match Converters::load() {
     Ok(table) => table,
     Err(err) => {
-        eprintln!("vv: {err}");
+        tracing::error!(err = %err, "converter table");
         Converters::empty()
     }
 });

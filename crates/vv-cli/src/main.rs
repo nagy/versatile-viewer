@@ -24,9 +24,11 @@
 //! `clap` prints `--help` and `--version` before the viewer starts, and the
 //! `Cli` struct below is the one place the flags are declared.
 //!
-//! `VV_DEBUG`=1 traces input events.
+//! `RUST_LOG` sets the diagnostics: `RUST_LOG=vv=debug` traces the frame and
+//! the input, `RUST_LOG=vv=trace` adds every key press, and any target reads
+//! alone (`RUST_LOG=vv_source=debug`).
+//! `VV_DEBUG=1` and `VV_TIMING=1` stay as aliases of those two levels.
 //! `VV_PRESENT` picks the swapchain present mode.
-//! `VV_TIMING`=1 prints the GPU stack and every slow frame.
 //! `VV_SLOW_STREAM`=1 slows the JXL stream.
 //! `VV_BLUR_BG`=1 draws a blurred copy of the viewed image as the image-view
 //! background, scaled to cover the window and upscaled by the GPU.
@@ -183,10 +185,6 @@ struct App {
     /// The swapchain answered no image on the last frame, so the window is
     /// hidden or occluded and the loop paces itself.
     occluded: bool,
-    /// `VV_DEBUG=1`: print the window scale factor at the start.
-    debug: bool,
-    /// `VV_TIMING=1`: trace the GPU stack at startup.
-    timing: bool,
 }
 
 impl App {
@@ -206,8 +204,6 @@ impl App {
             last_frame: Instant::now(),
             fatal: None,
             occluded: false,
-            debug: std::env::var_os("VV_DEBUG").is_some(),
-            timing: vv_core::timing_enabled(),
         }
     }
 
@@ -271,7 +267,7 @@ impl App {
                     // hidden: the loop paces itself instead of spinning.
                     self.occluded = true;
                 } else {
-                    eprintln!("vv: frame: {err}");
+                    tracing::warn!(err = %err, "frame");
                 }
                 Ok(())
             }
@@ -297,9 +293,9 @@ fn follow_pane(slot: &mut Option<PaneGeometry>, window: &Window) {
         }
         Ok(None) => {}
         Err(err) => {
-            // A host window that went away ends the poll instead of printing on
-            // every frame, and the pane keeps its size.
-            eprintln!("vv: {err}");
+            // A host window that went away ends the poll instead of reporting
+            // on every frame, and the pane keeps its size.
+            tracing::warn!(err = %err, "pane geometry");
             *slot = None;
         }
     }
@@ -351,12 +347,11 @@ impl ApplicationHandler for App {
         let settings = GpuSettings {
             present: Present::from_env(),
             latency: vv_gpu::gpu::DEFAULT_LATENCY,
-            trace: self.debug || self.timing,
         };
         let gpu = match Gpu::new(&window, settings) {
             Ok(gpu) => gpu,
             Err(err) => {
-                eprintln!("vv: {err}");
+                tracing::error!(err = %err, "gpu");
                 self.fatal = Some(anyhow::anyhow!("{err}"));
                 event_loop.exit();
                 return;
@@ -383,16 +378,14 @@ impl ApplicationHandler for App {
             Pane::Embedded(wid) => match PaneGeometry::new(wid) {
                 Ok(geometry) => Some(geometry),
                 Err(err) => {
-                    eprintln!("vv: {err}");
+                    tracing::warn!(err = %err, "pane geometry");
                     None
                 }
             },
         };
-        if self.debug {
-            // The content scale is the one display fact a drag can read, and a
-            // feel report needs it next to the travel the release prints.
-            eprintln!("vv: window scale factor {}", window.scale_factor());
-        }
+        // The content scale is the one display fact a drag can read, and a
+        // feel report needs it next to the travel the release reports.
+        tracing::debug!(scale_factor = window.scale_factor(), "window");
         self.started = true;
         self.last_frame = Instant::now();
         window.request_redraw();
@@ -509,7 +502,46 @@ fn parse_wid(value: &str) -> Result<Wid, String> {
     Wid::parse(value).ok_or_else(|| format!("--wid needs a window id, not {value:?}"))
 }
 
+/// Start the diagnostics of this process.
+///
+/// The application owns the subscriber: the format, the level and the
+/// destination.
+/// Every layer below only emits events through `tracing`, so this call is the
+/// one place a diagnostic reaches a terminal.
+///
+/// The writer stays on stderr, because the MCP server owns stdout and a
+/// protocol frame must never carry a log line.
+/// The environment is read once, here, and `RUST_LOG` wins over the two
+/// aliases the README documents.
+fn init_logging() {
+    use tracing_subscriber::EnvFilter;
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter()));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_target(true)
+        .init();
+}
+
+/// The filter `VV_DEBUG` or `VV_TIMING` asks for, in that order.
+///
+/// `VV_DEBUG` traced the input and the drag geometry, which event `trace`
+/// holds, and `VV_TIMING` traced the GPU stack and the slow frames, which the
+/// `debug` level holds.
+/// With neither variable the process reports warnings and errors alone.
+fn default_filter() -> &'static str {
+    if std::env::var_os("VV_DEBUG").is_some() {
+        "vv=trace"
+    } else if std::env::var_os("VV_TIMING").is_some() {
+        "vv=debug"
+    } else {
+        "vv=warn"
+    }
+}
+
 fn main() -> Result<()> {
+    init_logging();
     let cli = Cli::parse();
     if cli.mcp {
         start_mcp()?;

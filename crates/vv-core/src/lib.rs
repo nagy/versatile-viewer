@@ -72,16 +72,3 @@ pub const DIM_TINT: Color = Color::new(DIM_LEVEL, DIM_LEVEL, DIM_LEVEL, 255);
 /// Alpha `255 - DIM_LEVEL` leaves the share of brightness that [`DIM_TINT`]
 /// keeps, so a veiled pixel darkens exactly like a tinted one.
 pub const DIM_VEIL: Color = Color::new(0, 0, 0, 255 - DIM_LEVEL);
-
-/// True when `VV_TIMING` is set.
-///
-/// The code then prints the GPU stack at startup (adapter, format, present
-/// mode, texture limit) and every slow frame to stderr.
-/// An upload runs on a decode worker, so this flag stays off that path.
-/// Input tracing stays under `VV_DEBUG`.
-#[must_use]
-pub fn timing_enabled() -> bool {
-    use std::sync::OnceLock;
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VV_TIMING").is_some())
-}
