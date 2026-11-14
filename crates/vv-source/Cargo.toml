@@ -1,0 +1,108 @@
+[package]
+name = "vv-source"
+description = "The showable sources of versatile-viewer: raster, SVG, PDF, book and converted files."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# JPEG XL decode, pure Rust (no libjxl C dependency).
+jxl-oxide = "0.12.6"
+# Common-format decode. Keep in sync with grid.rs is_image_path(): every
+# extension it accepts must have a feature here, except "pdf", which the hayro
+# backend in pdf.rs routes on its magic.
+# webp = image-webp, pure Rust (lossy VP8 + lossless VP8L decode).
+image = { version = "0.25.10", default-features = false, features = [
+  "bmp",
+  "gif",
+  "jpeg",
+  "png",
+  "tga",
+  "tiff",
+  "webp",
+] }
+# PDF rasterization, pure Rust (no C dependency; vello_cpu rendering).
+# Confined to pdf.rs: the rest of the crate only sees the Surface trait
+# (surface.rs), so a pdfium fallback swap touches one file. The default
+# features embed the standard-14 fonts and the cmaps.
+# 0.8 or newer is required: render_into() takes an arbitrary kurbo::Affine,
+# which is what makes a region render (visible crop) possible.
+hayro = "0.9.0"
+# Memory-mapped file reads for the streaming JXL loader.
+memmap2 = "0.9.12"
+# The work pool of the book and PDF planes, and of the streaming JXL decode.
+rayon = "1.12.0"
+# SVG rasterization, pure Rust (Apache-2.0 OR MIT), so no cairo and no C
+# toolchain beside it.
+# `text` + `system-fonts` render <text> with the host fonts, which a logo or
+# a diagram needs.
+# `svgz` accepts a gzip codestream.
+# The static subset only: no script, no animation, no `a` element.
+# `raster-images` stays off, so an embedded JPEG/WebP/GIF in an <image>
+# element does not render; an embedded PNG does, because the `png` crate is a
+# core dependency of usvg.
+resvg = { version = "0.50.0", default-features = false, features = [
+  "system-fonts",
+  "svgz",
+  "text",
+] }
+# The rasterizer under resvg: the code paints a usvg tree into a Pixmap.
+tiny-skia = { version = "0.12.0", default-features = false, features = ["std"] }
+# Gzip for a `.svgz` head. The code decompresses itself, so a gzip bomb hits
+# a size cap instead of the allocator.
+flate2 = { version = "1.1.11", default-features = false, features = [
+  "rust_backend",
+] }
+# The host font database behind `system-fonts`. The code loads it once per
+# process and hands the same Arc to every SVG parse.
+fontdb = { version = "0.24.0", default-features = false, features = [
+  "fs",
+  "memmap",
+] }
+# The parser under resvg: XML, CSS and the tree the painter consumes.
+# The same feature flags as resvg, so one version serves both.
+usvg = { version = "0.50.0", default-features = false, features = [
+  "system-fonts",
+  "svgz",
+  "text",
+] }
+# The rule table of the converters (`src/convert.rs`): TOML, pure Rust
+# (MIT OR Apache-2.0).
+# `parse` alone, so the writer half of the crate stays out and the code walks
+# the values by hand (no serde derive in this tree).
+toml = { version = "0.8.23", default-features = false, features = ["parse"] }
+# The kill of a timed-out converter, which names its whole process group by the
+# negative pid. Only the one syscall wrapper.
+libc = "0.2.191"
+# The thumbnail cache directory.
+# `get_cache_home` resolves $XDG_CACHE_HOME, and falls back to `~/.cache`.
+xdg = "3.0.0"
+# The thumbnail cache file name: SHA-256 of the canonical image path.
+sha2 = "0.11.1"
+# Lossy JPEG XL encode for a cache entry. Pure Rust, BSD-3-Clause OR
+# Apache-2.0, so it carries no license drag.
+# It is a second JXL codebase beside jxl-oxide, which only decodes.
+# `extraslow` stays off: it pulls the perceptual metric crates, and a 512 px
+# thumbnail never needs them. The SIMD backends stay on.
+jixel = { version = "0.5.7", default-features = false, features = [
+  "avx",
+  "sse",
+] }
+derive_more = { version = "2.1.1", default-features = false, features = [
+  "display",
+  "error",
+  "from",
+] }
+# The layers below: the crop and the newtypes, and the pixel buffer every
+# backend answers with.
+vv-core = { path = "../vv-core" }
+vv-pixels = { path = "../vv-pixels" }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[lints]
+workspace = true

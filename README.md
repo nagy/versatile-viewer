@@ -72,29 +72,29 @@ launch decodes every file.
 
 ## Architecture
 
-Every showable source is a `Surface` (`src/surface.rs`). An image file is a
+Every showable source is a `Surface` (`crates/vv-source/src/surface.rs`). An image file is a
 one-plane surface, and a raster file and a vector file differ only in the
 backend behind the trait. A surface renders a `View` (a plane index, an
 optional region and a scale) into an RGBA buffer, and it reports the natural
 size of each plane.
 
 A grid cell holds an `EntrySource`, which is a file to open lazily. A
-multi-page source wraps in `src/book.rs`, which stacks every spread in one
+multi-page source wraps in `crates/vv-source/src/book.rs`, which stacks every spread in one
 plane. The image view then shows a whole document with no change to the loader
 or the grid. The grid, the streaming loader and the image view speak surfaces,
 plane indices and regions, and never a file format.
 
-`src/sign.rs` decides the decoder from the file content, and not from the file
-name. A PDF routes on its `%PDF-` magic to the hayro backend in `src/pdf.rs`.
+`crates/vv-source/src/sign.rs` decides the decoder from the file content, and not from the file
+name. A PDF routes on its `%PDF-` magic to the hayro backend in `crates/vv-source/src/pdf.rs`.
 
-A path that a converter rule claims routes to `src/convert.rs`, which runs the
+A path that a converter rule claims routes to `crates/vv-source/src/convert.rs`, which runs the
 program of the rule and opens its answer. The content decides first, so a
 converter rule never takes a file this viewer can read. A format that carries
 no magic it knows falls to its rule, and a `.typ` source is plain text with no
 magic, so it needs a rule of its own. A converter reads the source on stdin and
 answers an SVG document or a PDF on stdout. The `%PDF-` head becomes the PDF
 backend, so a document keeps its pages and its book. Any other answer parses
-into the vector backend in `src/surface.rs`. The program runs in the directory
+into the vector backend in `crates/vv-source/src/surface.rs`. The program runs in the directory
 of the source, so a relative path resolves beside the file. The answer caches
 under `$XDG_CACHE_HOME/vv/converted/`, keyed by the source bytes and the argv,
 so a grid decode and an image view open of one file cost one conversion.
@@ -106,7 +106,7 @@ spread. The fit frames that spread, so the cover page shows whole, and the
 view scrolls to the top of the document.
 
 A converted document opens as the same book. See `docs/adr/0001-*.md` and
-`src/book.rs`.
+`crates/vv-source/src/book.rs`.
 
 [jxl-oxide]: https://crates.io/crates/jxl-oxide
 [image]: https://crates.io/crates/image

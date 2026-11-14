@@ -1,180 +1,34 @@
-[package]
-name = "versatile-viewer"
+# The workspace of versatile-viewer.
+#
+# The root carries no package: the binary lives in `crates/vv-cli`, and every
+# library layer below it is a member of its own, so an edit in one layer never
+# recompiles the layers above it.
+# `resolver = "3"` is mandatory here, because a virtual root has no package
+# edition to infer the resolver from.
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+# The metadata every member inherits.
+# A member states `version.workspace = true` and friends, so one bump moves the
+# whole tree.
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+# The floor the tree builds on: edition 2024 asks for 1.85, and the first
+# slice API (`as_chunks_mut` in `decode.rs` and `svg.rs`) landed in 1.88.
+# A member declares no edition or version of its own.
+rust-version = "1.88"
 license = "AGPL-3.0-or-later"
-description = "A fast image (and later, video) viewer: nsxiv meets mpv. JPEG XL first-class."
+repository = "https://github.com/nagy/versatile-viewer"
+# Nothing in this tree publishes: the workspace is one application, so every
+# member inherits the refusal instead of repeating it.
+publish = false
 
-[dependencies]
-anyhow = "1.0.104"
-# The command line.
-# One derive struct owns the flags, the value parsers, `--help` and
-# `--version`, so no argv loop and no usage string to keep in step.
-clap = { version = "4.6.7", features = ["derive"] }
-# JPEG XL decode, pure Rust (no libjxl C dependency).
-jxl-oxide = "0.12.6"
-# Common-format decode. Keep in sync with grid.rs is_image_path(): every
-# extension it accepts must have a feature here, except "pdf", which the hayro
-# backend in pdf.rs routes on its magic.
-# webp = image-webp, pure Rust (lossy VP8 + lossless VP8L decode).
-image = { version = "0.25.10", default-features = false, features = [
-  "bmp",
-  "gif",
-  "jpeg",
-  "png",
-  "tga",
-  "tiff",
-  "webp",
-] }
-# The renderer: device, swapchain and one instanced-quad pipeline.
-# Pure Rust (wgpu-core, wgpu-hal, naga), so no C toolchain comes back.
-# `default-features = false` with only `vulkan` + `wgsl`: no DX12, Metal or GL
-# instance exists, so no library is opened for one. Issue 94691ce measured the
-# Vulkan loader alone at 28.9 ms of a 59.1 ms first frame.
-wgpu = { version = "30.0.2", default-features = false, features = [
-  "vulkan",
-  "wgsl",
-] }
-# The window, the event loop, the keyboard and the pointer.
-# X11 only in this build: one display path, tested on the development host.
-winit = { version = "0.30.13", default-features = false, features = [
-  "x11",
-  "rwh_06",
-] }
-# The X protocol, pure Rust (MIT OR Apache-2.0, no C and no bindgen).
-# An embedded pane reads the size of the host window it fills: a host resizes
-# the container it created, never the child, so the child hears nothing.
-# `mpv --wid` reads the same geometry, and `winio` above opens no seam for it.
-# The default feature set is empty, so no `libxcb` and no `libc` shim arrives.
-x11rb = "0.14.0"
-# Block on the two async wgpu calls of startup (adapter, device).
-pollster = "1.0.1"
-# Work pool for parallel background decodes (grid prefetch); jxl-oxide also
-# uses rayon internally for single-image decode (its default feature).
-rayon = "1.12.0"
-# PDF rasterization, pure Rust (no C dependency; vello_cpu rendering).
-# Confined to pdf.rs: the rest of the viewer only sees the Surface trait
-# (surface.rs), so a pdfium fallback swap touches one file. The default
-# features embed the standard-14 fonts and the cmaps.
-# 0.8 or newer is required: render_into() takes an arbitrary kurbo::Affine,
-# which is what makes a region render (visible crop) possible.
-hayro = "0.9.0"
-# SIMD image resize (the grid thumb, the texture cap, the preview and the
-# blur background).
-# Picks the best CPU extension at runtime.
-# The `rayon` feature stays off: the project runs one resize per decode
-# worker, and a nested parallel resize fights that pool for cores.
-fast_image_resize = { version = "6.1.0", default-features = false, features = [
-  "std",
-  "bytemuck",
-] }
-# Casts between `u8` and the typed RGBA pixel of `fast_image_resize`.
-bytemuck = "1.25.2"
-# Natural-order file name sort (img2 before img10).
-natord = "1.0.9"
-# The few-byte placeholder of a grid thumbnail (ThumbHash, MIT, no
-# dependencies). The cache header carries one payload per entry, so a warm
-# launch paints the grid from headers before any JPEG XL decode.
-thumbhash = "0.1.0"
-# Memory-mapped file reads for the streaming JXL loader.
-memmap2 = "0.9.12"
-derive_more = { version = "2.1.1", default-features = false, features = [
-  "display",
-  "error",
-  "from",
-] }
-# MCP (Model Context Protocol) server, spec revision 2026-07-28.
-# The server runs on a background thread and owns stdin and stdout.
-rmcp = { version = "3.10.0", default-features = false, features = [
-  "server",
-  "transport-io",
-] }
-# Async runtime for the rmcp server thread only.
-# `rt` gives the current-thread runtime builder.
-tokio = { version = "1.54.1", default-features = false, features = [
-  "rt",
-  "io-util",
-] }
-# The MCP tool schemas and the tool results.
-serde_json = "1.0.154"
-# The thumbnail cache directory.
-# `get_cache_home` resolves $XDG_CACHE_HOME, and falls back to `~/.cache`.
-xdg = "3.0.0"
-# The thumbnail cache file name: SHA-256 of the canonical image path.
-sha2 = "0.11.1"
-# Lossy JPEG XL encode for a cache entry. Pure Rust, BSD-3-Clause OR
-# Apache-2.0, so it carries no license drag.
-# It is a second JXL codebase beside jxl-oxide, which only decodes.
-# `extraslow` stays off: it pulls the perceptual metric crates, and a 512 px
-# thumbnail never needs them. The SIMD backends stay on.
-jixel = { version = "0.5.7", default-features = false, features = [
-  "avx",
-  "sse",
-] }
-# SVG rasterization, pure Rust (Apache-2.0 OR MIT), so no cairo and no C
-# toolchain beside raylib's.
-# `text` + `system-fonts` render <text> with the host fonts, which a logo or
-# a diagram needs.
-# `svgz` accepts a gzip codestream.
-# The static subset only: no script, no animation, no `a` element.
-# `raster-images` stays off, so an embedded JPEG/WebP/GIF in an <image>
-# element does not render; an embedded PNG does, because the `png` crate is a
-# core dependency of usvg.
-resvg = { version = "0.50.0", default-features = false, features = [
-  "system-fonts",
-  "svgz",
-  "text",
-] }
-# The rasterizer under resvg: the code paints a usvg tree into a Pixmap.
-tiny-skia = { version = "0.12.0", default-features = false, features = ["std"] }
-# Gzip for a `.svgz` head. The code decompresses itself, so a gzip bomb hits
-# a size cap instead of the allocator.
-flate2 = { version = "1.1.11", default-features = false, features = [
-  "rust_backend",
-] }
-# The host font database behind `system-fonts`. The code loads it once per
-# process and hands the same Arc to every SVG parse.
-fontdb = { version = "0.24.0", default-features = false, features = [
-  "fs",
-  "memmap",
-] }
-# The parser under resvg: XML, CSS and the tree the painter consumes.
-# The same feature flags as resvg, so one version serves both.
-usvg = { version = "0.50.0", default-features = false, features = [
-  "system-fonts",
-  "svgz",
-  "text",
-] }
-
-# The rule table of the converters (`src/convert.rs`): TOML, pure Rust
-# (MIT OR Apache-2.0).
-# `parse` alone, so the writer half of the crate stays out and the code walks
-# the values by hand (no serde derive in this tree).
-# Version 0.8 brings `toml_edit` and `winnow` with it, far less than the
-# document engine the Typst path used to link.
-toml = { version = "0.8.23", default-features = false, features = ["parse"] }
-# The kill of a timed-out converter, which names its whole process group by the
-# negative pid. Only the one syscall wrapper, and `libc` already resolves
-# through winit and x11rb.
-libc = "0.2.191"
-
-[[bin]]
-name = "vv"
-path = "src/main.rs"
-
-[dev-dependencies]
-tempfile = "3.27.0"
-proptest = "1.12.0"
-# The headless paint tests (`tests/gpu_offscreen.rs`) build a device with no
-# window and read the pixels back, so they name wgpu and pollster themselves.
-wgpu = { version = "30.0.2", default-features = false, features = [
-  "vulkan",
-  "wgsl",
-] }
-pollster = "1.0.1"
-
-[lints.clippy]
-# Warning count stays at zero; pedantic is warn and burned down
-# incrementally (plain cargo clippy shows the remaining findings).
+# The lint policy of the whole tree.
+# A member opts in with `[lints] workspace = true`, so `cargo clippy` and the
+# flake gate read one table.
+# `all = "deny"` only applies under clippy.
+[workspace.lints.clippy]
 all = "deny"
 pedantic = "warn"

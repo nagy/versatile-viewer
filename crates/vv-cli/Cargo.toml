@@ -1,0 +1,57 @@
+[package]
+name = "vv-cli"
+description = "The vv binary: window, event loop and command line of versatile-viewer."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The binary name stays `vv`, so the package name never shows in `ps`.
+[[bin]]
+name = "vv"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+# The command line.
+# One derive struct owns the flags, the value parsers, `--help` and
+# `--version`, so no argv loop and no usage string to keep in step.
+clap = { version = "4.6.7", features = ["derive"] }
+# The window, the event loop and the surface handle the binary owns, so the
+# viewer library never reads a raw winit event.
+winit = { version = "0.30.13", default-features = false, features = [
+  "x11",
+  "rwh_06",
+] }
+# The layers of the viewer: the geometry the event mapping names, the GPU stack
+# it creates, the two views, and the MCP server it starts beside them.
+vv-core = { path = "../vv-core" }
+vv-gpu = { path = "../vv-gpu" }
+vv-mcp = { path = "../vv-mcp" }
+vv-view = { path = "../vv-view" }
+
+# The swapchain image view the frame hands to `Viewer::render`.
+wgpu = { version = "30.0.2", default-features = false, features = [
+  "vulkan",
+  "wgsl",
+] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+# The MCP stdio test reads the frames of a real child process, so it parses
+# and builds JSON of its own.
+serde_json = "1.0.154"
+# The embed example opens a frame window and a container child, so it speaks
+# the X protocol directly.
+x11rb = { version = "0.14.0", default-features = false }
+# The headless paint tests (`tests/gpu_offscreen.rs`) build a device with no
+# window and read the pixels back, so they name pollster themselves.
+pollster = "1.0.1"
+# Those paints cover the SVG, PDF, converted and book planes, so the test names
+# the surface layer of its own.
+vv-source = { path = "../vv-source" }
+
+[lints]
+workspace = true

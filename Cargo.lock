@@ -3295,14 +3295,78 @@ dependencies = [
 ]
 
 [[package]]
-name = "versatile-viewer"
+name = "version_check"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vv-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bytemuck",
  "clap",
+ "pollster",
+ "serde_json",
+ "tempfile",
+ "vv-core",
+ "vv-gpu",
+ "vv-mcp",
+ "vv-source",
+ "vv-view",
+ "wgpu",
+ "winit",
+ "x11rb 0.14.0",
+]
+
+[[package]]
+name = "vv-core"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
+name = "vv-gpu"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "derive_more",
+ "pollster",
+ "vv-core",
+ "vv-pixels",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
+name = "vv-mcp"
+version = "0.1.0"
+dependencies = [
+ "derive_more",
+ "rmcp",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "vv-pixels"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
  "derive_more",
  "fast_image_resize",
+ "image",
+ "proptest",
+ "thumbhash",
+ "vv-core",
+]
+
+[[package]]
+name = "vv-source"
+version = "0.1.0"
+dependencies = [
+ "derive_more",
  "flate2",
  "fontdb",
  "hayro",
@@ -3311,31 +3375,38 @@ dependencies = [
  "jxl-oxide",
  "libc",
  "memmap2",
- "natord",
- "pollster",
- "proptest",
  "rayon",
  "resvg",
- "rmcp",
- "serde_json",
  "sha2",
  "tempfile",
- "thumbhash",
  "tiny-skia",
- "tokio",
  "toml",
  "usvg",
- "wgpu",
- "winit",
- "x11rb 0.14.0",
+ "vv-core",
+ "vv-pixels",
  "xdg",
 ]
 
 [[package]]
-name = "version_check"
-version = "0.9.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+name = "vv-view"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "derive_more",
+ "image",
+ "jxl-oxide",
+ "natord",
+ "proptest",
+ "rayon",
+ "tempfile",
+ "vv-core",
+ "vv-gpu",
+ "vv-pixels",
+ "vv-source",
+ "wgpu",
+ "winit",
+ "x11rb 0.14.0",
+]
 
 [[package]]
 name = "wait-timeout"

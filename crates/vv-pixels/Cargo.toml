@@ -1,0 +1,44 @@
+[package]
+name = "vv-pixels"
+description = "The decoded pixel buffers, the resize path and the placeholder of versatile-viewer."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# SIMD image resize (the grid thumb, the texture cap, the preview and the blur
+# background).
+# Picks the best CPU extension at runtime.
+# The `rayon` feature stays off: the project runs one resize per decode
+# worker, and a nested parallel resize fights that pool for cores.
+fast_image_resize = { version = "6.1.0", default-features = false, features = [
+  "std",
+  "bytemuck",
+] }
+# The error type of a failed decode, which `DecodeError` carries.
+# No codec feature comes with it: `vv-source` owns the decoders, and this
+# layer only names the error.
+image = { version = "0.25.10", default-features = false }
+# Casts between `u8` and the typed RGBA pixel of `fast_image_resize`.
+bytemuck = "1.25.2"
+# The few-byte placeholder of a grid thumbnail (ThumbHash, MIT, no
+# dependencies). The cache header carries one payload per entry, so a warm
+# launch paints the grid from headers before any JPEG XL decode.
+thumbhash = "0.1.0"
+derive_more = { version = "2.1.1", default-features = false, features = [
+  "display",
+  "error",
+  "from",
+] }
+# The dimension newtypes, so a resize measures its buffer in `ImgW`/`ImgH` and
+# never in a bare count.
+vv-core = { path = "../vv-core" }
+
+[dev-dependencies]
+proptest = "1.12.0"
+
+[lints]
+workspace = true

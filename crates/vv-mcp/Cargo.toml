@@ -1,0 +1,33 @@
+[package]
+name = "vv-mcp"
+description = "The Model Context Protocol server of versatile-viewer, on stdio."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# MCP (Model Context Protocol) server, spec revision 2026-07-28.
+# The server runs on a background thread and owns stdin and stdout.
+rmcp = { version = "3.10.0", default-features = false, features = [
+  "server",
+  "transport-io",
+] }
+# Async runtime for the rmcp server thread only.
+# `rt` gives the current-thread runtime builder.
+tokio = { version = "1.54.1", default-features = false, features = [
+  "rt",
+  "io-util",
+] }
+# The MCP tool schemas and the tool results.
+serde_json = "1.0.154"
+derive_more = { version = "2.1.1", default-features = false, features = [
+  "display",
+  "error",
+  "from",
+] }
+
+[lints]
+workspace = true

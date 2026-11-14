@@ -66,6 +66,16 @@
             map (p: "-C link-arg=-Wl,-rpath,${p}") (lib.splitString ":" (lib.makeLibraryPath libInputs))
           );
 
+          # The root manifest holds no package, so crane cannot infer a name and
+          # a version from it: `buildPackage`, the checks and the docs all take
+          # these two.
+          # The version is read from `[workspace.package]`, so a bump moves one
+          # file and no Nix line.
+          # The project name, so a store path matches the flake attribute that
+          # carries it (`packages.versatile-viewer`).
+          pname = "versatile-viewer";
+          version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
+
           # The source as cargo sees it.
           # This is everything tracked by git.
           src = craneLib.cleanCargoSource ./.;
@@ -73,10 +83,19 @@
           # Cargo.lock has no network access during the build.
           # Fetch the dependencies first.
           # Then feed them to cargo through the registry cache.
+          # `--workspace` is the selection every consumer below passes as well:
+          # cargo fingerprints the dependencies per invocation, so a drifted
+          # selection would recompile the whole graph inside the package drv.
           cargoArtifacts = craneLib.buildDepsOnly {
-            inherit src nativeBuildInputs;
+            inherit
+              src
+              nativeBuildInputs
+              pname
+              version
+              ;
             buildInputs = libInputs;
             inherit env;
+            cargoExtraArgs = "--workspace --locked";
           };
 
           versatileViewer = craneLib.buildPackage {
@@ -84,7 +103,12 @@
               src
               cargoArtifacts
               env
+              pname
+              version
               ;
+            # The workspace builds every member, and `vv` is the one binary it
+            # installs.
+            cargoExtraArgs = "--workspace --locked";
             # `libgcc_s` is a real DT_NEEDED dependency of the binary (unwinding),
             # so the patchelf step needs it at build time.
             buildInputs = libInputs ++ [ pkgs.stdenv.cc.cc.lib ];
@@ -121,8 +145,13 @@
               cargoArtifacts
               nativeBuildInputs
               env
+              pname
+              version
               ;
             buildInputs = libInputs;
+            # One HTML tree per member, so the whole workspace lands in the
+            # store.
+            cargoExtraArgs = "--workspace --locked";
             meta.description = "Versatile-viewer API documentation";
           };
 
@@ -139,6 +168,8 @@
               src
               cargoArtifacts
               nativeBuildInputs
+              pname
+              version
               ;
             buildInputs = libInputs;
             # wgpu opens `libvulkan.so.1` with `dlopen`, so the test binary
@@ -152,6 +183,10 @@
             FONTCONFIG_FILE = pkgs.makeFontsConf {
               fontDirectories = [ pkgs.dejavu_fonts ];
             };
+            # The paints live in the binary crate, so the member is named: the
+            # test gate reads that crate alone, and the deps drv above already
+            # holds every artifact it needs.
+            cargoExtraArgs = "-p vv-cli --locked";
             cargoTestExtraArgs = "--test gpu_offscreen -- --ignored";
             meta.description = "Versatile-viewer headless GPU paints on lavapipe";
           };
@@ -169,23 +204,31 @@
               cargoArtifacts
               nativeBuildInputs
               env
+              pname
+              version
               ;
             buildInputs = libInputs;
+            # Every member is linted, not only the binary crate.
+            cargoExtraArgs = "--workspace --locked";
             cargoClippyExtraArgs = "--all-targets -- --deny warnings";
             meta.description = "Versatile-viewer clippy lint gate";
           };
 
           # `cargo test` runs the unit tests, the integration tests and the
           # doctests, so it is the one test gate: a separate `--doc` run would
-          # compile and link the crate a second time for the same coverage.
+          # compile and link the crates a second time for the same coverage.
           tests = craneLib.cargoTest {
             inherit
               src
               cargoArtifacts
               nativeBuildInputs
               env
+              pname
+              version
               ;
             buildInputs = libInputs;
+            # Every member, so a unit test of any layer gates the flake.
+            cargoExtraArgs = "--workspace --locked";
             meta.description = "Versatile-viewer test suite";
           };
         in

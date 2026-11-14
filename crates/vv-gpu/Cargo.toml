@@ -1,0 +1,42 @@
+[package]
+name = "vv-gpu"
+description = "The wgpu device, the instanced-quad pipeline and the uploaded textures of versatile-viewer."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The renderer: device, swapchain and one instanced-quad pipeline.
+# Pure Rust (wgpu-core, wgpu-hal, naga), so no C toolchain comes back.
+# `default-features = false` with only `vulkan` + `wgsl`: no DX12, Metal or GL
+# instance exists, so no library is opened for one. Issue 94691ce measured the
+# Vulkan loader alone at 28.9 ms of a 59.1 ms first frame.
+wgpu = { version = "30.0.2", default-features = false, features = [
+  "vulkan",
+  "wgsl",
+] }
+# The window this layer paints into, and the surface it configures.
+# X11 only in this build: one display path, tested on the development host.
+winit = { version = "0.30.13", default-features = false, features = [
+  "x11",
+  "rwh_06",
+] }
+# Block on the two async wgpu calls of startup (adapter, device).
+pollster = "1.0.1"
+# The instance bytes of one quad.
+bytemuck = "1.25.2"
+derive_more = { version = "2.1.1", default-features = false, features = [
+  "display",
+  "error",
+  "from",
+] }
+# The layer below: the quads of `draw`, the rectangle of `dim`, and the pixels
+# an upload takes.
+vv-core = { path = "../vv-core" }
+vv-pixels = { path = "../vv-pixels" }
+
+[lints]
+workspace = true
