@@ -38,7 +38,7 @@ use winit::event::MouseButton;
 use crate::{
     DIM_VEIL, DecodedImage,
     blurbg::BlurBg,
-    dim::{PreviewPx, RampTime, Rect, WinH, WinW},
+    dim::{PreviewPx, Rect, WinH, WinW},
     draw::{Color, Quad, Turn, Vec2},
     grid::{DecodeFailure, EntrySource, Grid},
     input::Input,
@@ -65,10 +65,10 @@ pub const SELECTION_BORDER_PX: f32 = 2.0;
 /// It shares the exponential time constant of the ease.
 pub const ZOOM_ANCHOR_DRIFT: f32 = 0.25;
 
-/// The time a held-key motion ramps in or out, in seconds.
+/// The time a held-key motion ramps in or out.
 /// A hold reaches cruise speed after this time, and a release coasts to rest
 /// over it.
-pub const RAMP_TIME: RampTime = RampTime::new(0.36);
+pub const RAMP_TIME: Duration = Duration::from_millis(360);
 
 /// How far one unit of raw device travel moves the picture during a drag.
 ///

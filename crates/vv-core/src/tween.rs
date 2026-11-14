@@ -22,7 +22,7 @@
 //! Opposite keys get one [`Ramp`] each, so reversing direction eases out of
 //! the old motion and into the new one.
 
-use crate::dim::RampTime;
+use std::time::Duration;
 
 /// One linear velocity ramp for one held key.
 /// Feed it once per frame with [`Ramp::tick`].
@@ -46,10 +46,10 @@ impl Ramp {
     /// # Examples
     ///
     /// ```
-    /// # use vv_core::dim::RampTime;
+    /// # use std::time::Duration;
     /// # use vv_core::tween::Ramp;
     /// let mut r = Ramp::default();
-    /// let ramp = RampTime::new(0.2);
+    /// let ramp = Duration::from_millis(200);
     /// // The first frame of a fresh press barely moves.
     /// assert!(r.tick(true, 0.02, ramp) < 0.11);
     /// // Half the ramp time puts the weight at a half.
@@ -61,8 +61,8 @@ impl Ramp {
     /// assert!((r.tick(false, 0.1, ramp) - 0.5).abs() < 1e-6);
     /// assert!(r.tick(false, 0.2, ramp) < 1e-6);
     #[must_use]
-    pub fn tick(&mut self, held: bool, dt: f32, ramp: RampTime) -> f32 {
-        let span = ramp.raw();
+    pub fn tick(&mut self, held: bool, dt: f32, ramp: Duration) -> f32 {
+        let span = ramp.as_secs_f32();
         let step = if span > 0.0 { dt.max(0.0) / span } else { 1.0 };
         self.level = if held {
             (self.level + step).min(1.0)
@@ -81,7 +81,7 @@ mod tests {
     #[test]
     fn ramp_eases_in_and_out() {
         let mut r = Ramp::default();
-        let ramp = RampTime::new(0.2);
+        let ramp = Duration::from_millis(200);
         let w1 = r.tick(true, 0.05, ramp);
         let w2 = r.tick(true, 0.05, ramp);
         let w3 = r.tick(true, 0.05, ramp);
@@ -98,7 +98,7 @@ mod tests {
     #[test]
     fn ramp_reverses_from_the_current_level() {
         let mut r = Ramp::default();
-        let ramp = RampTime::new(0.2);
+        let ramp = Duration::from_millis(200);
         assert!((r.tick(true, 0.1, ramp) - 0.5).abs() < 1e-6);
         // Level 0.5 falls to 0.375 over 25 ms.
         assert!((r.tick(false, 0.025, ramp) - 0.375).abs() < 1e-6);
@@ -108,7 +108,7 @@ mod tests {
     #[test]
     fn zero_ramp_is_a_switch() {
         let mut r = Ramp::default();
-        let ramp = RampTime::new(0.0);
+        let ramp = Duration::ZERO;
         assert!((r.tick(true, 0.016, ramp) - 1.0).abs() < 1e-6);
         assert!(r.tick(false, 0.016, ramp) <= 0.0);
     }
@@ -117,7 +117,7 @@ mod tests {
     #[test]
     fn idle_ramp_stays_at_rest() {
         let mut r = Ramp::default();
-        let ramp = RampTime::new(0.18);
+        let ramp = Duration::from_millis(180);
         assert!(r.tick(false, 0.016, ramp) <= 0.0);
         assert!(r.tick(false, 0.016, ramp) <= 0.0);
     }
@@ -127,7 +127,7 @@ mod tests {
     /// and a frame hiccup does not restart the ramp.
     #[test]
     fn ramp_is_frame_rate_independent() {
-        let ramp = RampTime::new(0.2);
+        let ramp = Duration::from_millis(200);
         let mut slow = Ramp::default();
         for _ in 0..20 {
             let _ = slow.tick(true, 0.01, ramp);
@@ -146,9 +146,9 @@ mod tests {
         fn ramp_stays_in_range(
             held in proptest::collection::vec(proptest::bool::ANY, 1..40),
             dt in 0.0f32..0.2,
-            span in 0.0f32..1.0,
+            span_ms in 0u32..1000,
         ) {
-            let ramp = RampTime::new(span);
+            let ramp = Duration::from_millis(u64::from(span_ms));
             let mut r = Ramp::default();
             for &down in &held {
                 let w = r.tick(down, dt, ramp);
@@ -160,7 +160,7 @@ mod tests {
         /// to rest in one frame.
         #[test]
         fn ramp_with_zero_span_is_a_switch(dt in 0.0f32..0.5) {
-            let ramp = RampTime::new(0.0);
+            let ramp = Duration::ZERO;
             let mut r = Ramp::default();
             proptest::prop_assert!((r.tick(true, dt, ramp) - 1.0).abs() < 1e-6);
             proptest::prop_assert!(r.tick(false, dt, ramp) < 1e-6);

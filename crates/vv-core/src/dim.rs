@@ -4,8 +4,7 @@
 //! [`WinW`] and [`WinH`] name the two axes of the window.
 //! [`LongSide`] wraps a pixel limit.
 //! [`PreviewPx`] wraps a progressive-preview pixel limit.
-//! [`Delay`] and [`Rate`] wrap the key-repeat timing.
-//! [`RampTime`] wraps the ramp time of a held-key motion.
+//! [`Rate`] wraps the key-repeat rate.
 //! [`Rect`] wraps an axis-aligned rectangle in window pixels.
 //! Each wrapper is a newtype over its primitive and costs nothing at runtime.
 //!
@@ -167,9 +166,4 @@ uint_newtype!(
 );
 float_newtype!(WinW, "A window width, in pixels.");
 float_newtype!(WinH, "A window height, in pixels.");
-float_newtype!(Delay, "An auto-repeat initial delay, in seconds.");
 float_newtype!(Rate, "An auto-repeat rate, in repeats per second.");
-float_newtype!(
-    RampTime,
-    "The time an ease-in or ease-out of a held-key motion ramp takes, in seconds."
-);

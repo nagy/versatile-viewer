@@ -12,16 +12,20 @@
 //! It falls back to the Xorg defaults (660 ms delay, 20 repeats/s) when it
 //! cannot read them (Wayland, no X).
 
-use std::{process::Command, sync::OnceLock};
+use std::{
+    process::Command,
+    sync::OnceLock,
+    time::Duration,
+};
 
-use crate::dim::{Delay, Rate};
+use crate::dim::Rate;
 
 /// The initial delay and the repeat rate for key auto-repeat.
 /// The function reads these values once, on first use.
 #[must_use]
-pub fn settings() -> (Delay, Rate) {
-    static CACHE: OnceLock<(Delay, Rate)> = OnceLock::new();
-    *CACHE.get_or_init(|| xset_settings().unwrap_or((Delay::new(0.66), Rate::new(20.0))))
+pub fn settings() -> (Duration, Rate) {
+    static CACHE: OnceLock<(Duration, Rate)> = OnceLock::new();
+    *CACHE.get_or_init(|| xset_settings().unwrap_or((Duration::from_millis(660), Rate::new(20.0))))
 }
 
 /// Per-key auto-repeat state.
@@ -46,10 +50,11 @@ impl RepeatState {
     /// # Examples
     ///
     /// ```
-    /// # use vv_core::dim::{Delay, Rate};
+    /// # use std::time::Duration;
+    /// # use vv_core::dim::Rate;
     /// # use vv_core::keyrepeat::RepeatState;
     /// let mut st = RepeatState::default();
-    /// let (d, r) = (Delay::new(0.66), Rate::new(20.0));
+    /// let (d, r) = (Duration::from_millis(660), Rate::new(20.0));
     /// // The initial press fires immediately.
     /// assert!(st.tick(true, true, 0.0, d, r));
     /// // Repeats wait out the delay (660 ms), then fire every 1/rate (50 ms
@@ -62,10 +67,10 @@ impl RepeatState {
     /// assert!(!st.tick(false, false, 0.8, d, r));
     /// assert!(st.tick(true, true, 1.0, d, r));
     /// ```
-    pub fn tick(&mut self, edge: bool, down: bool, now: f64, delay: Delay, rate: Rate) -> bool {
+    pub fn tick(&mut self, edge: bool, down: bool, now: f64, delay: Duration, rate: Rate) -> bool {
         if edge {
             self.held = true;
-            self.next = now + f64::from(delay.raw()).max(0.0);
+            self.next = now + delay.as_secs_f64();
             return true;
         }
         if !down || !self.held {
@@ -86,7 +91,7 @@ impl RepeatState {
 /// Ask the X server for its keyboard auto-repeat settings.
 /// The command `xset q` shows these values.
 /// The command `xset r rate delay rate` sets them.
-fn xset_settings() -> Option<(Delay, Rate)> {
+fn xset_settings() -> Option<(Duration, Rate)> {
     let out = Command::new("xset").arg("q").output().ok()?;
     if !out.status.success() {
         return None;
@@ -96,21 +101,21 @@ fn xset_settings() -> Option<(Delay, Rate)> {
     let mut rate = None;
     for line in text.lines() {
         if delay.is_none() {
-            delay = num_after(line, "auto repeat delay:").map(|ms| Delay::new(ms / 1000.0));
+            delay = num_after(line, "auto repeat delay:").map(|ms| Duration::from_millis(u64::from(ms)));
         }
         if rate.is_none() {
-            rate = num_after(line, "repeat rate:").map(Rate::new);
+            rate = num_after(line, "repeat rate:").map(|r| Rate::new(r as f32));
         }
     }
     match (delay, rate) {
-        (Some(d), Some(r)) if d.raw() > 0.0 && r.raw() > 0.0 => Some((d, r)),
+        (Some(d), Some(r)) if !d.is_zero() && r.raw() > 0.0 => Some((d, r)),
         _ => None,
     }
 }
 
 /// The first integer after `key` on this line.
 /// "    auto repeat delay:  660    repeat rate:  20" becomes 660.
-fn num_after(line: &str, key: &str) -> Option<f32> {
+fn num_after(line: &str, key: &str) -> Option<u32> {
     let rest = line.split_once(key)?.1;
     let num: String = rest
         .trim_start()
@@ -127,7 +132,7 @@ mod tests {
     #[test]
     fn repeat_fires_on_edge_then_at_rate() {
         let mut st = RepeatState::default();
-        let (d, r) = (Delay::new(0.66), Rate::new(20.0));
+        let (d, r) = (Duration::from_millis(660), Rate::new(20.0));
         assert!(st.tick(true, true, 0.0, d, r)); // initial press fires
         assert!(!st.tick(false, true, 0.1, d, r)); // held, before delay
         assert!(!st.tick(false, true, 0.65, d, r));
@@ -143,9 +148,9 @@ mod tests {
         // Edge caught by the event queue fires once even though the key is
         // already up when polled (IsKeyDown false).
         let mut st = RepeatState::default();
-        assert!(st.tick(true, false, 0.0, Delay::new(0.66), Rate::new(20.0)));
-        assert!(!st.tick(false, false, 0.01, Delay::new(0.66), Rate::new(20.0)));
-        assert!(!st.tick(false, false, 1.0, Delay::new(0.66), Rate::new(20.0)));
+        assert!(st.tick(true, false, 0.0, Duration::from_millis(660), Rate::new(20.0)));
+        assert!(!st.tick(false, false, 0.01, Duration::from_millis(660), Rate::new(20.0)));
+        assert!(!st.tick(false, false, 1.0, Duration::from_millis(660), Rate::new(20.0)));
     }
 
     #[test]
@@ -154,7 +159,7 @@ mod tests {
         // No repeat then fires.
         // The first edge starts the cycle.
         let mut st = RepeatState::default();
-        let (d, r) = (Delay::new(0.66), Rate::new(20.0));
+        let (d, r) = (Duration::from_millis(660), Rate::new(20.0));
         assert!(!st.tick(false, true, 0.0, d, r));
         assert!(!st.tick(false, true, 10.0, d, r));
         assert!(st.tick(true, true, 10.0, d, r));
@@ -165,8 +170,8 @@ mod tests {
     #[test]
     fn xset_delay_and_rate_parse() {
         let line = "    auto repeat delay:  660    repeat rate:  20";
-        assert_eq!(num_after(line, "auto repeat delay:"), Some(660.0));
-        assert_eq!(num_after(line, "repeat rate:"), Some(20.0));
+        assert_eq!(num_after(line, "auto repeat delay:"), Some(660));
+        assert_eq!(num_after(line, "repeat rate:"), Some(20));
         assert_eq!(num_after("nothing here", "repeat rate:"), None);
     }
 }
