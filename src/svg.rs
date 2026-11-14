@@ -586,7 +586,6 @@ mod tests {
         assert_eq!(&data[8..12], &[0, 0, 0, 128]);
     }
 
-    #[cfg(feature = "cache")]
     #[test]
     fn a_vector_thumbnail_round_trips_through_the_cache() {
         use crate::thumbcache::Cache;

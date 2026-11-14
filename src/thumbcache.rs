@@ -28,9 +28,7 @@
 //! when the variable is unset.
 //! Without a home directory the cache is off, and the grid decodes every file
 //! like before.
-//! `VV_CACHE=0` turns the cache off too.
-//! A build without the `cache` feature answers [`CacheError::Off`] from every
-//! call, and `src/thumbcache_off.rs` holds that stub.
+//! `VV_CACHE=0` turns the cache off too, so every launch decodes every file.
 //! The cache directory is created on the first write, so a viewer that only
 //! reads never creates it.
 //! The cache keeps every entry past the exit of the viewer, so the next launch

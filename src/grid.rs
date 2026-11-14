@@ -1650,8 +1650,7 @@ mod tests {
 
     use super::*;
 
-    /// The cache feature owns this path: without it every job decodes.
-    #[cfg(feature = "cache")]
+    /// A fresh decode fills the cache, and the next job hits it.
     #[test]
     fn a_fresh_decode_fills_the_cache_and_hits_it_next() {
         let dir = TempDir::new().unwrap();
@@ -1699,7 +1698,6 @@ mod tests {
     }
 
     /// A vector entry measures its base raster, not its thumbnail.
-    #[cfg(feature = "cache")]
     #[test]
     fn a_vector_entry_measures_its_base_raster() {
         let dir = TempDir::new().unwrap();
@@ -1740,7 +1738,6 @@ mod tests {
 
     /// A cold vector entry learns its shape from the placeholder pass, so the
     /// cell and the image-view fit never wait for the decode.
-    #[cfg(feature = "cache")]
     #[test]
     fn a_cold_vector_entry_measures_before_the_decode() {
         let dir = TempDir::new().unwrap();

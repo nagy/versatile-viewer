@@ -67,10 +67,8 @@ a warm cell matches a fresh one. The cache keeps its entries after the viewer
 exits, so the next launch starts warm. A stale entry re-decodes, and a deleted
 image leaves its thumbnail to the user.
 
-The `cache` cargo feature (on by default) owns the cache.
-`--no-default-features` decodes every file on every launch. It is the only
-optional feature: the SVG backend and the converter path beside it always
-compile, so a `.svg` file and a file a rule claims open in every build.
+The cache always compiles. `VV_CACHE=0` turns it off for one run, so every
+launch decodes every file.
 
 ## Architecture
 

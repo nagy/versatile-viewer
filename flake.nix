@@ -126,36 +126,6 @@
             meta.description = "Versatile-viewer API documentation";
           };
 
-          # The dependency set of the build without the default features.
-          # `--no-default-features` drops the cache dependencies, so a few
-          # crates resolve with a different feature set and cargo recompiles
-          # them in the release profile on every gate run.
-          # An artifact set of their own pays that build once.
-          minimalArtifacts = craneLib.buildDepsOnly {
-            inherit
-              src
-              nativeBuildInputs
-              env
-              ;
-            buildInputs = libInputs;
-            cargoExtraArgs = "--no-default-features";
-          };
-
-          # The build without the default features: no thumbnail cache, so
-          # `src/thumbcache_off.rs` answers from its stubs. That is the only
-          # stub the tree keeps.
-          minimal = craneLib.cargoTest {
-            inherit
-              src
-              nativeBuildInputs
-              env
-              ;
-            cargoArtifacts = minimalArtifacts;
-            buildInputs = libInputs;
-            cargoExtraArgs = "--no-default-features";
-            meta.description = "Versatile-viewer tests without the default features";
-          };
-
           # The headless GPU paints, on Mesa's lavapipe.
           #
           # lavapipe is a software Vulkan driver: it needs no GPU, no device
@@ -232,10 +202,6 @@
           # software Vulkan of its own, so the draw seam is proven and not only
           # compiled.
           checks.gpu = gpu;
-
-          # The build with no default feature, so the `_off` stubs stay
-          # compiled and tested.
-          checks.minimal = minimal;
 
           # The package itself, so `nix flake check` catches a broken rpath or a
           # missing runtime library and not only the test run.

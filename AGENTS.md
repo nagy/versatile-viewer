@@ -202,8 +202,8 @@ The binary name is `vv`.
   A held Ctrl turns the pan keys into zoom keys, so it guards the pan flags of `NavKeys`.
   The grid keeps `Ctrl+j`/`Ctrl+k` as plain selection moves.
 - The grid caches its thumbnails on disk through `xdg` under `$XDG_CACHE_HOME/vv/thumbnails`.
-  The feature `cache` (a default feature) owns `xdg`, `sha2` and `jixel`.
-  Without it `src/thumbcache_off.rs` answers `CacheError::Off` from every call, so every launch decodes every file.
+  The cache is not optional: `xdg`, `sha2` and `jixel` stay plain dependencies, and no feature guards the module.
+  `VV_CACHE=0` turns the cache off for one run, so every launch decodes every file.
   One constant sizes the runtime thumb and the entry: `THUMB_LONG_SIDE` (512).
   A warm cell and a cold one therefore match, because a decode resizes once to the entry size and a cache write copies no pixels.
   A thumb texture is always bilinear (`grid::upload_thumb`), and the `a` key never reaches it: the cell fills with the thumb, and the image view stretches it over the image rect while the full-res decode catches up, so both draw it far larger than the texture and nearest aliases badly there.
@@ -319,10 +319,9 @@ The binary name is `vv`.
 ## Build
 
 - `nix build .#versatile-viewer-doc` makes the rustdoc HTML.
-- `nix flake check` gates clippy (`--all-targets -- --deny warnings`), tests, treefmt, the package build, `checks.gpu` (the ignored headless paints on lavapipe) and `checks.minimal` (`cargo test --no-default-features`, which compiles `src/thumbcache_off.rs`).
+- `nix flake check` gates clippy (`--all-targets -- --deny warnings`), tests, treefmt, the package build and `checks.gpu` (the ignored headless paints on lavapipe).
   One test gate only: `cargo test` in `checks.default` runs the unit tests, the integration tests and the doctests, so no separate `--doc` check exists.
   `checks.package` builds the package with `doCheck = false`, because the fixup owns the rpath gate and a second `cargo test` would only repeat the suite.
-  `checks.minimal` carries its own `minimalArtifacts` dep set, because `--no-default-features` drops the cache dependencies and cargo would recompile that feature set in release on every run.
 ## Run
 
 Run `nix run . -- <image-path-or-directory>`.

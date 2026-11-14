@@ -136,7 +136,6 @@ const CONFIG_ENV: &str = "VV_CONVERTERS";
 /// The key prefix of a cached conversion.
 ///
 /// Bump it when the payload of an entry changes, so no old entry loads.
-#[cfg(feature = "cache")]
 const KEY_VERSION: &str = "vv-converted-2";
 
 /// The magic of a PDF answer.
@@ -252,7 +251,6 @@ pub struct Converters {
     /// The conversions that run at one time.
     slots: Slots,
     /// The converted SVG entries.
-    #[cfg(feature = "cache")]
     cache: crate::thumbcache::Cache,
 }
 
@@ -277,7 +275,6 @@ impl Converters {
         Self {
             rules,
             slots: Slots::new(slots),
-            #[cfg(feature = "cache")]
             cache: crate::thumbcache::Cache::new(),
         }
     }
@@ -294,21 +291,11 @@ impl Converters {
     ///
     /// A host or a test names its own directory, so a throwaway tree holds the
     /// entries and the cache of the user stays untouched.
-    /// A build without the `cache` feature keeps no entries, so it answers the
-    /// table unchanged.
     #[must_use]
     pub fn with_cache_dir(self, dir: &Path) -> Self {
-        #[cfg(feature = "cache")]
-        {
-            Self {
-                cache: crate::thumbcache::Cache::in_dir(dir),
-                ..self
-            }
-        }
-        #[cfg(not(feature = "cache"))]
-        {
-            let _ = dir;
-            self
+        Self {
+            cache: crate::thumbcache::Cache::in_dir(dir),
+            ..self
         }
     }
 
@@ -413,23 +400,16 @@ impl Converters {
         source: &[u8],
         dir: Option<&Path>,
     ) -> Result<Vec<u8>, SurfaceError> {
-        #[cfg(feature = "cache")]
-        {
-            let key = key(rule, source);
-            if let Some(bytes) = self.cache.load_converted(&key) {
-                return Ok(bytes);
-            }
-            let bytes = self.run(rule, source, dir)?;
-            // A cache failure stays silent, like `grid::store_thumb`: the
-            // picture is already in hand, and a switched-off cache, a read-only
-            // cache home or a spent budget is a normal setup.
-            let _ = self.cache.store_converted(&key, &bytes);
-            Ok(bytes)
+        let key = key(rule, source);
+        if let Some(bytes) = self.cache.load_converted(&key) {
+            return Ok(bytes);
         }
-        #[cfg(not(feature = "cache"))]
-        {
-            self.run(rule, source, dir)
-        }
+        let bytes = self.run(rule, source, dir)?;
+        // A cache failure stays silent, like `grid::store_thumb`: the picture
+        // is already in hand, and a switched-off cache, a read-only cache home
+        // or a spent budget is a normal setup.
+        let _ = self.cache.store_converted(&key, &bytes);
+        Ok(bytes)
     }
 
     /// Run one conversion and answer its stdout.
@@ -781,7 +761,6 @@ fn config_path() -> Option<PathBuf> {
 }
 
 /// The cache key of one conversion: the argv and the source bytes.
-#[cfg(feature = "cache")]
 fn key(rule: &Rule, source: &[u8]) -> String {
     use sha2::{Digest as _, Sha256};
     let mut hasher = Sha256::new();
@@ -1366,7 +1345,6 @@ timeout_ms = 30000
         );
     }
 
-    #[cfg(feature = "cache")]
     #[test]
     fn a_second_open_reads_the_cached_svg() {
         let dir = tempfile::tempdir().expect("a temp dir");

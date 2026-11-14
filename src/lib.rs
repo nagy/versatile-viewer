@@ -91,10 +91,6 @@ pub mod sign;
 pub mod surface;
 pub mod svg;
 pub mod texture;
-#[cfg(feature = "cache")]
-pub mod thumbcache;
-#[cfg(not(feature = "cache"))]
-#[path = "thumbcache_off.rs"]
 pub mod thumbcache;
 pub mod tween;
 pub(crate) mod view;
