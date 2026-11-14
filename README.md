@@ -36,20 +36,19 @@ so a deep zoom of a page never stretches a raster. A coarse preview lands
 first, because rasterizing a page takes a moment. The grid thumbnail stays the
 cover page, so a cell never holds a second page.
 
-A Typst source compiles through [typst] to PDF bytes. It then renders through
-that same path, so it shows as the same book and zooms sharply for the same
-reasons. The compile runs with the directory of the file as project root, so
-`#include`, `#image` and `#read` resolve like the Typst CLI. The fonts ship
-inside the binary.
+A Typst source converts through the [typst] CLI to a PDF. It then renders
+through that same path, so it shows as the same book and zooms sharply for the
+same reasons. The command runs with the directory of the file as project root,
+so `#include`, `#image` and `#read` resolve like the Typst CLI.
 
-A source of another format converts to SVG through an external program. The
-answer then parses through the same vector path, so it shows as one vector
-picture and zooms sharply for the same reasons. A converter reads the source
-bytes on stdin and writes an SVG document on stdout, so no format engine links
-into the binary. The viewer ships no rule of its own: write one in the rule
-table below, and every file of that format then lists in the grid and opens as
-a picture. A Mermaid diagram needs one rule, and a browserless renderer serves
-it.
+A source of another format converts through an external program. The answer
+shows as one vector picture when it is an SVG document, and as the same book a
+PDF file shows when it is a PDF. A converter reads the source bytes on stdin
+and writes an SVG document or a PDF on stdout, so no format engine links into
+the binary. The viewer ships no rule of its own: write one in the rule table
+below, and every file of that format then lists in the grid and opens as a
+picture. A Mermaid diagram and a Typst document each need one rule, and a
+browserless renderer and the Typst CLI serve them.
 
 Thumbnails render in a directory grid that fills the window. They decode in
 parallel on a background pool and sort in natural order (`img2` before
@@ -91,17 +90,18 @@ plane indices and regions, and never a file format.
 
 `src/sign.rs` decides the decoder from the file content, and not from the file
 name. A PDF routes on its `%PDF-` magic to the hayro backend in `src/pdf.rs`.
-A Typst source routes by extension to `src/typst.rs`, which compiles it to PDF
-bytes and hands them to that same backend.
 
 A path that a converter rule claims routes to `src/convert.rs`, which runs the
-program of the rule and hands the parsed tree to the vector backend in
-`src/surface.rs`. The content decides first, so a converter rule never takes a
-file this viewer can read. A format that carries no magic it knows falls to
-its rule. A converter reads the source on stdin and answers SVG on stdout. The
-answer caches under `$XDG_CACHE_HOME/vv/converted/`, keyed by the source bytes
-and the argv, so a grid decode and an image view open of one file cost one
-conversion.
+program of the rule and opens its answer. The content decides first, so a
+converter rule never takes a file this viewer can read. A format that carries
+no magic it knows falls to its rule, and a `.typ` source is plain text with no
+magic, so it needs a rule of its own. A converter reads the source on stdin and
+answers an SVG document or a PDF on stdout. The `%PDF-` head becomes the PDF
+backend, so a document keeps its pages and its book. Any other answer parses
+into the vector backend in `src/surface.rs`. The program runs in the directory
+of the source, so a relative path resolves beside the file. The answer caches
+under `$XDG_CACHE_HOME/vv/converted/`, keyed by the source bytes and the argv,
+so a grid decode and an image view open of one file cost one conversion.
 
 The grid holds one cell per file, and a document cell shows its cover page.
 
@@ -109,14 +109,14 @@ The image view shows a document as a book, and a book opens on its first
 spread. The fit frames that spread, so the cover page shows whole, and the
 view scrolls to the top of the document.
 
-A Typst source compiles to the same pages, so it opens as the same book. See
-`docs/adr/0001-*.md` and `src/book.rs`.
+A converted document opens as the same book. See `docs/adr/0001-*.md` and
+`src/book.rs`.
 
 [jxl-oxide]: https://crates.io/crates/jxl-oxide
 [image]: https://crates.io/crates/image
 [resvg]: https://crates.io/crates/resvg
 [hayro]: https://crates.io/crates/hayro
-[typst]: https://crates.io/crates/typst
+[typst]: https://typst.app
 [merman-cli]: https://github.com/Latias94/merman
 [fast_image_resize]: https://crates.io/crates/fast_image_resize
 [ThumbHash]: https://evanw.github.io/thumbhash/
@@ -279,8 +279,9 @@ A `v` press and release without travel drops the region, unless the press
 landed inside it, which commits nothing. `Esc` drops the region too, and stays
 in the image view until the second press.
 
-A PDF or a Typst source opens as a book. The cover page sits alone, the pages
-then pair up, and every spread stacks in one figure. A zoom past a settled
+A PDF opens as a book, and so does any source a converter answers with a PDF.
+The cover page sits alone, the pages then pair up, and every spread stacks in
+one figure. A zoom past a settled
 ease repaints the region the window shows, at the scale it shows it, so a page
 stays sharp at any zoom.
 
@@ -292,10 +293,10 @@ spread, and the step ends on the first and the last spread. `Page-down` and
 ## Converters
 
 A file format this viewer does not parse becomes showable through a program
-that reads the source bytes on stdin and writes an SVG document on stdout.
-Rules live in `$XDG_CONFIG_HOME/vv/converters.toml`, and `VV_CONVERTERS` names
-another file. The viewer holds no rule of its own, so a format converts only
-after you name its program.
+that reads the source bytes on stdin and writes an SVG document or a PDF on
+stdout. Rules live in `$XDG_CONFIG_HOME/vv/converters.toml`, and `VV_CONVERTERS`
+names another file. The viewer holds no rule of its own, so a format converts
+only after you name its program.
 
 ```toml
 [defaults]
@@ -307,12 +308,24 @@ max_output = 67108864    # bytes a converter may write to stdout
 ext = ["mmd", "mermaid"]
 command = ["merman-cli", "render", "-"]
 background = "#ffffff"   # paper under the paints, `#rrggbb` or `#rrggbbaa`
+
+[[convert]]
+ext = ["typ"]
+command = ["typst", "compile", "--format", "pdf", "-", "/dev/stdout"]
+timeout_ms = 30000
 ```
 
-That last table shows a Mermaid diagram. It runs [merman-cli], a browserless
+The first rule shows a Mermaid diagram. It runs [merman-cli], a browserless
 renderer: `merman-cli render -` reads the diagram on stdin and writes the SVG
 document on stdout. The command starts no browser, so one conversion costs a
 few milliseconds and the default limits are enough.
+
+The second rule shows a Typst document. The [typst] CLI reads the source on
+stdin and writes a PDF on stdout. A PDF answer keeps one plane per page, so the
+document shows as the same book a PDF file shows. It names twice the clock of a
+diagram, because a large document takes a while. The command runs in the
+directory of the source, so a relative `#include` or `#image` resolves beside
+the file.
 
 The [merman-cli] SVG leaves its canvas unset, like Mermaid core. Either name
 `background` in the rule, as above, or pass `--background white` to the
@@ -320,12 +333,15 @@ command. Without either one the page stays transparent and the viewer
 background shows through.
 
 A format without a rule stays out of the grid. A rule makes its extension
-list, so `diagram.mmd` appears beside the photos and opens as a picture.
+list, so `diagram.mmd` appears beside the photos and opens as a picture, and so
+does `notes.typ` once a rule claims it.
 
 A converter that starts a browser, such as `mmdc`, takes the same shape:
 `command = ["mmdc", "-i", "-", "-o", "-", "-e", "svg"]`.
 
 The command runs without a shell, so each array element stays one argument.
+It runs in the directory of the source, so a relative path resolves beside the
+file. A PDF answer ignores `background`, because a page paints its own paper.
 
 The converters hold two slots by default, because a browser-backed converter
 costs a second and hundreds of megabytes. The rest of the conversions queue.

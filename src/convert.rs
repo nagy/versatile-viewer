@@ -1,9 +1,9 @@
-//! Converters: an external program turns a file into an SVG document.
+//! Converters: an external program turns a file into an SVG document or a PDF.
 //!
 //! The viewer parses a few formats by itself (see
 //! [`crate::surface::open_surface`]).
 //! Every other format arrives through a converter: a program that reads the
-//! source bytes on stdin and writes an SVG document on stdout.
+//! source bytes on stdin and writes an SVG document or a PDF on stdout.
 //! A rule names the extensions it claims and the argv it runs, so the viewer
 //! never parses an unknown format, never links a heavy engine, and never
 //! needs a rebuild for one.
@@ -23,21 +23,34 @@
 //! ext = ["mmd", "mermaid"]
 //! command = ["merman-cli", "render", "-"]
 //! background = "#ffffff"   # paper under the paints, `#rrggbb` or `#rrggbbaa`
+//!
+//! [[convert]]
+//! ext = ["typ"]
+//! command = ["typst", "compile", "--format", "pdf", "-", "/dev/stdout"]
+//! timeout_ms = 30000
 //! ```
 //!
-//! That rule previews a Mermaid diagram with `merman-cli`, a browserless
+//! The first rule previews a Mermaid diagram with `merman-cli`, a browserless
 //! renderer: it reads the source on stdin and writes the SVG document on
 //! stdout.
 //! A converter that starts a browser serves the same shape with `mmdc`.
+//!
+//! The second compiles a Typst document: the `typst` CLI reads the source on
+//! stdin and writes a PDF on stdout, which keeps one plane per page, so the
+//! document shows as the book a PDF file shows.
 //!
 //! The `[defaults]` table reads before every rule, so a rule inherits its
 //! values whatever the order of the file.
 //!
 //! The command runs without a shell, so every argument stays one argument and
 //! no config file reaches an interpolation.
-//! The output must parse as SVG, because the vector backend paints it: one
-//! parsed tree then serves the grid thumbnail, the base raster and the window
-//! patch, exactly like a `.svg` file.
+//! It runs with the directory of the source as its working directory, so a tool
+//! that resolves a relative path reads it beside the file: a Typst `#include`,
+//! `#image` or `#read` works, and the CLI roots the project there.
+//! The answer decides the backend: `%PDF-` bytes open as a
+//! [`crate::pdf::PdfSurface`], and any other answer must parse as SVG, which the
+//! vector backend paints: one parsed tree then serves the grid thumbnail, the
+//! base raster and the window patch, exactly like a `.svg` file.
 //! The converter runs at open time on a decode worker, so the picture costs one
 //! process start and no main-thread stall.
 //!
@@ -53,9 +66,9 @@
 //! A process that outlives its clock dies as a whole process group, so the
 //! browser a converter started dies with it.
 //!
-//! The converted SVG caches under the XDG cache home, keyed by the source bytes
-//! and the argv, because a grid decode and an image view open the same file
-//! twice (see [`crate::thumbcache`]).
+//! The converted answer caches under the XDG cache home, keyed by the source
+//! bytes and the argv, because a grid decode and an image view open the same
+//! file twice (see [`crate::thumbcache`]).
 //! A rule change therefore invalidates every entry of that rule.
 //!
 //! The table lives in a process-wide [`LazyLock`], because a decode runs deep
@@ -124,12 +137,15 @@ const CONFIG_ENV: &str = "VV_CONVERTERS";
 ///
 /// Bump it when the payload of an entry changes, so no old entry loads.
 #[cfg(feature = "cache")]
-const KEY_VERSION: &str = "vv-converted-1";
+const KEY_VERSION: &str = "vv-converted-2";
+
+/// The magic of a PDF answer.
+const PDF_MAGIC: &[u8] = b"%PDF-";
 
 /// Why a converter table did not load.
 ///
 /// A bad table never stops the viewer: the boundary prints this and keeps the
-/// built-in rule.
+/// empty table.
 #[derive(Debug, Display, Error, From)]
 pub enum ConvertError {
     /// The config file cannot be read.
@@ -362,16 +378,17 @@ impl Converters {
         self.rules.iter().find(|rule| rule.claims(ext))
     }
 
-    /// Convert `path` and open the answer as a vector surface.
+    /// Convert `path` and open the answer as a surface.
     ///
-    /// The conversion runs here, once, and the parsed tree serves every later
-    /// paint.
+    /// The conversion runs here, once, and the answer serves every later
+    /// paint: a PDF keeps one plane per page, and an SVG document keeps one
+    /// parsed tree.
     ///
     /// # Errors
     ///
     /// The function errors when no rule claims the file, the file cannot be
     /// read, the program fails to start, exits with a failure, writes more than
-    /// its cap, or answers text that is not an SVG document.
+    /// its cap, or answers neither a PDF nor an SVG document.
     pub fn open(&self, path: &Path) -> Result<Box<dyn Surface>, SurfaceError> {
         let Some(rule) = self.rule(path) else {
             return Err(SurfaceError::Unsupported(format!(
@@ -380,33 +397,29 @@ impl Converters {
             )));
         };
         let source = read_source(path)?;
-        let svg = self.converted(rule, &source)?;
-        let text = std::str::from_utf8(&svg)
-            .map_err(|_| SurfaceError::Render("the converter answered no UTF-8 text".into()))?;
-        let vector = crate::svg::from_str(text).map_err(|err| {
-            SurfaceError::Render(format!("the converter answered no SVG document: {err}"))
-        })?;
-        let mut surface = VectorSurface::from_vector(vector);
-        if let Some(background) = rule.background {
-            surface = surface.with_background(background);
-        }
-        Ok(Box::new(surface))
+        let answer = self.converted(rule, &source, path.parent())?;
+        surface(rule, answer)
     }
 
-    /// The SVG bytes of `source` under `rule`, from the cache or the program.
+    /// The answer of `source` under `rule`, from the cache or the program.
     ///
     /// # Errors
     ///
     /// The function errors when the program fails, exits with a failure,
     /// writes more than its cap, or runs past its wall clock.
-    fn converted(&self, rule: &Rule, source: &[u8]) -> Result<Vec<u8>, SurfaceError> {
+    fn converted(
+        &self,
+        rule: &Rule,
+        source: &[u8],
+        dir: Option<&Path>,
+    ) -> Result<Vec<u8>, SurfaceError> {
         #[cfg(feature = "cache")]
         {
             let key = key(rule, source);
             if let Some(bytes) = self.cache.load_converted(&key) {
                 return Ok(bytes);
             }
-            let bytes = self.run(rule, source)?;
+            let bytes = self.run(rule, source, dir)?;
             // A cache failure stays silent, like `grid::store_thumb`: the
             // picture is already in hand, and a switched-off cache, a read-only
             // cache home or a spent budget is a normal setup.
@@ -415,7 +428,7 @@ impl Converters {
         }
         #[cfg(not(feature = "cache"))]
         {
-            self.run(rule, source)
+            self.run(rule, source, dir)
         }
     }
 
@@ -429,9 +442,9 @@ impl Converters {
     /// The function errors when the program cannot start, fails, writes more
     /// than its cap, runs past its wall clock, or keeps its output open past
     /// the grace period without writing a byte.
-    fn run(&self, rule: &Rule, source: &[u8]) -> Result<Vec<u8>, SurfaceError> {
+    fn run(&self, rule: &Rule, source: &[u8], dir: Option<&Path>) -> Result<Vec<u8>, SurfaceError> {
         let _slot = self.slots.acquire();
-        let mut child = spawn(rule)?;
+        let mut child = spawn(rule, dir)?;
         let stdin = child.stdin.take();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -522,21 +535,56 @@ fn read_source(path: &Path) -> Result<Vec<u8>, SurfaceError> {
     Ok(bytes)
 }
 
+/// Wrap the answer of `rule` in the surface its content calls for.
+///
+/// `%PDF-` bytes open as a [`crate::pdf::PdfSurface`], so a document keeps its
+/// pages and the book view wraps it like a PDF file.
+/// Every other answer must parse as SVG, which becomes the one plane of a
+/// [`VectorSurface`], with the paper of the rule under its paints.
+/// A PDF answer ignores `background`, because a page paints its own paper.
+///
+/// # Errors
+///
+/// The function errors when the answer is neither a readable PDF nor an SVG
+/// document.
+fn surface(rule: &Rule, answer: Vec<u8>) -> Result<Box<dyn Surface>, SurfaceError> {
+    if answer.starts_with(PDF_MAGIC) {
+        return Ok(Box::new(crate::pdf::PdfSurface::from_bytes(answer)?));
+    }
+    let text = std::str::from_utf8(&answer)
+        .map_err(|_| SurfaceError::Render("the converter answered no UTF-8 text".into()))?;
+    let vector = crate::svg::from_str(text).map_err(|err| {
+        SurfaceError::Render(format!(
+            "the converter answered neither a PDF nor an SVG document: {err}"
+        ))
+    })?;
+    let mut surface = VectorSurface::from_vector(vector);
+    if let Some(background) = rule.background {
+        surface = surface.with_background(background);
+    }
+    Ok(Box::new(surface))
+}
+
 /// Start the program of `rule` with piped stdin, stdout and stderr.
+///
+/// `dir` becomes the working directory, so the program resolves a relative path
+/// beside the source it converts.
 ///
 /// # Errors
 ///
 /// The function errors when the program cannot be started.
-fn spawn(rule: &Rule) -> Result<Child, SurfaceError> {
+fn spawn(rule: &Rule, dir: Option<&Path>) -> Result<Child, SurfaceError> {
     let Some((program, args)) = rule.command.split_first() else {
         return Err(SurfaceError::Unsupported(
             "the converter rule holds no command".into(),
         ));
     };
+    let dir = dir.unwrap_or_else(|| Path::new("."));
     let mut tries = 0;
     loop {
         let started = Command::new(program)
             .args(args)
+            .current_dir(dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1075,6 +1123,11 @@ max_output = 67108864
 ext = [\"mmd\", \"mermaid\"]
 command = [\"merman-cli\", \"render\", \"-\"]
 background = \"#ffffff\"
+
+[[convert]]
+ext = [\"typ\"]
+command = [\"typst\", \"compile\", \"--format\", \"pdf\", \"-\", \"/dev/stdout\"]
+timeout_ms = 30000
 ";
         let table = Converters::parse(text).expect("the documented table parses");
         assert!(table.claims(Path::new("flow.mermaid")));
@@ -1085,6 +1138,11 @@ background = \"#ffffff\"
             vec!["merman-cli".to_owned(), "render".into(), "-".into()]
         );
         assert_eq!(rule.timeout, DEFAULT_TIMEOUT);
+        // The typst rule holds twice the clock of a diagram, because a large
+        // document takes a while.
+        let typst = table.rule(Path::new("doc.typ")).expect("the typ rule");
+        assert_eq!(typst.timeout, Duration::from_secs(30));
+        assert_eq!(typst.background, None, "a page paints its own paper");
         assert_eq!(table.slots.lock().to_string(), "2");
     }
 
@@ -1162,6 +1220,72 @@ background = \"#ffffff\"
     }
 
     #[test]
+    fn a_converter_opens_a_pdf_answer_as_a_document() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        // The stand-in converter answers the bytes of a two-page PDF.
+        let pdf = dir.path().join("answer.pdf");
+        std::fs::write(&pdf, crate::pdf::TWO_PAGE_PDF).expect("write the PDF");
+        let program = script(
+            &dir,
+            "doc.sh",
+            &format!("cat > /dev/null\ncat '{}'", pdf.display()),
+        );
+        let table = Converters::in_dir(vec![rule(&program)], dir.path());
+        let path = dir.path().join("doc.mmd");
+        std::fs::write(&path, "a source the viewer does not parse").expect("write the source");
+        let surface = table.open(&path).expect("the converted document");
+        // A PDF answer keeps one plane per page, so the document keeps its
+        // pages and the book view wraps it.
+        assert_eq!(surface.plane_count(), 2);
+        assert_eq!(
+            surface.bounds(1).expect("the second page"),
+            crate::surface::Size { w: 200.0, h: 100.0 }
+        );
+        assert!(surface.previews());
+        assert!(surface.can_refine());
+    }
+
+    #[test]
+    fn a_pdf_answer_becomes_a_book_over_the_source() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let pdf = dir.path().join("answer.pdf");
+        std::fs::write(&pdf, crate::pdf::TWO_PAGE_PDF).expect("write the PDF");
+        let program = script(
+            &dir,
+            "book.sh",
+            &format!("cat > /dev/null\ncat '{}'", pdf.display()),
+        );
+        let table = Converters::in_dir(vec![rule(&program)], dir.path());
+        let path = dir.path().join("doc.mmd");
+        std::fs::write(&path, "x").expect("write the source");
+        let plain = table.open(&path).expect("the converted document");
+        assert_eq!(plain.plane_count(), 2);
+        // The book view stacks every spread of a multi-plane source.
+        let inner: std::sync::Arc<dyn Surface> = plain.into();
+        let book = crate::book::BookSurface::new(inner).expect("the book");
+        assert_eq!(book.plane_count(), 1, "a book is one plane");
+    }
+
+    #[test]
+    fn a_rule_runs_in_the_directory_of_the_source() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        // The converter answers a relative path, so the answer arrives only
+        // when the working directory holds it.
+        std::fs::write(
+            dir.path().join("part.svg"),
+            "<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'><rect width='10' \
+             height='10' fill='#ff0000'/></svg>",
+        )
+        .expect("write the relative part");
+        let program = script(&dir, "rel.sh", "cat > /dev/null\ncat part.svg");
+        let table = Converters::in_dir(vec![rule(&program)], dir.path());
+        let path = dir.path().join("doc.mmd");
+        std::fs::write(&path, "x").expect("write the source");
+        let surface = table.open(&path).expect("the answer beside the source");
+        assert_eq!(surface.plane_count(), 1);
+    }
+
+    #[test]
     fn a_failing_converter_reports_its_code_and_stderr() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let program = script(&dir, "fail.sh", "echo 'no diagram here' >&2\nexit 3");
@@ -1235,7 +1359,11 @@ background = \"#ffffff\"
         let Err(err) = table.open(&path) else {
             panic!("html is no svg");
         };
-        assert!(err.to_string().contains("no SVG document"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("neither a PDF nor an SVG document"),
+            "{err}"
+        );
     }
 
     #[cfg(feature = "cache")]

@@ -1508,9 +1508,10 @@ fn step_selection(sel: usize, n: usize, step: usize, delta: i128) -> usize {
 /// The list is the formats this build routes by content, plus every path a
 /// converter rule of this process claims (`src/convert.rs`), so a configured
 /// format appears in the grid too.
-/// A PDF or a Typst source carries no image extension but opens as a page
-/// grid, so the filter accepts it too.
-/// A format with no rule of its own stays out: the viewer names no converter.
+/// A PDF carries no image extension but opens as a page grid, so the filter
+/// accepts it too.
+/// A format with no rule of its own stays out: the viewer names no converter,
+/// so a `.typ` source or a `.mmd` diagram lists only when a rule claims it.
 fn is_image_path(path: &Path) -> bool {
     is_image_path_in(path, crate::convert::rules())
 }
@@ -1541,7 +1542,6 @@ fn is_image_extension(path: &Path) -> bool {
                 | "svg"
                 | "svgz"
                 | "pdf"
-                | "typ"
         )
     })
 }
@@ -1985,9 +1985,10 @@ mod tests {
         // A PDF opens as a page grid, so the directory filter keeps it.
         assert!(is_image_extension(Path::new("doc.pdf")));
         assert!(is_image_extension(Path::new("DOC.PDF")));
-        // Same for a Typst source, which compiles into its page grid.
-        assert!(is_image_extension(Path::new("doc.typ")));
-        assert!(is_image_extension(Path::new("DOC.TYP")));
+        // A Typst source and a Mermaid source need a converter rule, so the
+        // plain list leaves them out.
+        assert!(!is_image_extension(Path::new("doc.typ")));
+        assert!(!is_image_extension(Path::new("DOC.TYP")));
         // A Mermaid source needs a converter rule, so the plain list leaves
         // it out.
         assert!(!is_image_extension(Path::new("diagram.mmd")));
@@ -2152,7 +2153,7 @@ mod tests {
         // grid to return to and the cell shows page 0.
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("doc.pdf");
-        std::fs::write(&path, crate::pdf::tests::TWO_PAGE_PDF).unwrap();
+        std::fs::write(&path, crate::pdf::TWO_PAGE_PDF).unwrap();
         let grid = Grid::from_paths(vec![path.clone()]);
         assert_eq!(grid.entries.len(), 1);
         assert_eq!(grid.entries[0].source.path(), path.as_path());
@@ -2184,7 +2185,7 @@ mod tests {
     fn entry_source_opens_a_document_as_page_zero_and_as_a_book() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("doc.pdf");
-        std::fs::write(&path, crate::pdf::tests::TWO_PAGE_PDF).unwrap();
+        std::fs::write(&path, crate::pdf::TWO_PAGE_PDF).unwrap();
         let source = EntrySource::new(path);
         // The cell keeps page 0, so a decode measures the page.
         let (plain, plane) = source.open().unwrap();

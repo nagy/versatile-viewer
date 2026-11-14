@@ -27,11 +27,10 @@
 //! [`book`] shows a multi-page source as a book: every spread (a cover page
 //! alone, then the pages in pairs) stacked in one [`surface::Surface`]
 //! plane.
-//! A Typst source compiles to PDF bytes in [`typst`] and renders through the
-//! same PDF backend, so it shows as the same book.
-//! A source of another format converts to SVG in [`convert`], which runs an
-//! external program, and renders through the SVG backend, so it shows as one
-//! vector picture.
+//! A source of another format converts in [`convert`], which runs an external
+//! program: an SVG answer renders through the SVG backend as one vector
+//! picture, and a PDF answer renders through the PDF backend as the same book
+//! a PDF file shows.
 //! Every showable source is a [`surface::Surface`], so the grid, the loader
 //! and the image view ask for a plane at a scale and never for a file format.
 //! [`downscale_rgba`] and [`cap_texture_side`] keep the
@@ -106,7 +105,6 @@ pub mod thumbcache;
 #[path = "thumbcache_off.rs"]
 pub mod thumbcache;
 pub mod tween;
-pub mod typst;
 pub(crate) mod view;
 pub mod viewer;
 pub mod zoomkeys;

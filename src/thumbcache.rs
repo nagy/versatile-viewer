@@ -58,12 +58,12 @@ use crate::{
 
 /// The directory under the XDG cache home.
 const DIR: &str = "vv/thumbnails";
-/// The directory of the converted sources, beside the thumbnails.
+/// The directory of the converted answers, beside the thumbnails.
 #[cfg(feature = "svg")]
 const CONVERTED_DIR: &str = "vv/converted";
-/// File extension of a converted source.
+/// File extension of a converted answer.
 #[cfg(feature = "svg")]
-const CONVERTED_EXT: &str = "svg";
+const CONVERTED_EXT: &str = "conv";
 /// File extension of a cached thumbnail.
 const EXT: &str = "thumb";
 /// `b"VVTH"`: the cache file magic.
@@ -160,8 +160,7 @@ pub struct CachedThumb {
 pub struct Cache {
     /// The cache directory, or None when the cache is off.
     dir: Option<PathBuf>,
-    /// The directory of the converted SVG documents, or None when the cache is
-    /// off.
+    /// The directory of the converted answers, or None when the cache is off.
     /// The field exists only with the `svg` feature, because only that build
     /// compiles a converter to read it.
     #[cfg(feature = "svg")]
@@ -213,7 +212,7 @@ impl Cache {
     /// The directory is created on the first write, like the real one.
     /// A test uses this to keep its files inside a temporary directory, so it
     /// never fills the cache of the user.
-    /// The converted sources live in a `converted` directory under `dir`, so a
+    /// The converted answers live in a `converted` directory under `dir`, so a
     /// test holds both kinds of entry in one throwaway tree.
     #[must_use]
     pub fn in_dir(dir: impl Into<PathBuf>) -> Self {
@@ -353,12 +352,14 @@ impl Cache {
         self.entry_file(&canonical, long_side).ok()
     }
 
-    /// The converted SVG document of `key`, when one is stored.
+    /// The converted answer of `key`, when one is stored.
     ///
+    /// The answer is an SVG document or a PDF, and [`crate::convert`] decides
+    /// by its head, so the entry carries no kind.
     /// The key is the one [`crate::convert`] builds from the argv and the
     /// source bytes, so a changed rule or a changed source misses.
-    /// The call reads the whole payload, which a diagram keeps at a few
-    /// hundred kilobytes.
+    /// The call reads the whole payload, which a diagram or a short document
+    /// keeps at a few hundred kilobytes.
     /// Run this on a decode worker, never on the main thread.
     #[cfg(feature = "svg")]
     #[must_use]
@@ -370,7 +371,7 @@ impl Cache {
         fs::read(file).ok()
     }
 
-    /// Store the converted SVG document of `key`.
+    /// Store the converted answer of `key`.
     ///
     /// The function writes a temporary file first and renames it, so a reader
     /// never sees a half-written file.

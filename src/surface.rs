@@ -299,11 +299,13 @@ pub enum SurfaceError {
 ///
 /// A PDF routes on the `%PDF-` magic to the multi-plane PDF backend, so a
 /// misnamed file still opens.
-/// A `.typ` source routes by extension to the Typst backend, which compiles it
-/// to PDF bytes and hands them to that same backend.
 /// A path that a converter rule claims routes by extension to
-/// [`crate::convert`], which runs the rule's program and hands the parsed tree
-/// to [`VectorSurface`].
+/// [`crate::convert`], which runs the rule's program and opens its answer: a
+/// PDF becomes a [`crate::pdf::PdfSurface`], so a document keeps its pages, and
+/// an SVG document becomes a [`VectorSurface`].
+/// A `.typ` source is plain UTF-8 text, so it carries no magic: a converter
+/// rule that claims `typ` compiles it, and its PDF answer opens as that same
+/// book.
 /// The content decides first, so a file whose magic names a format this viewer
 /// parses opens through that backend even when a rule also claims its
 /// extension, and only a path whose bytes this viewer cannot read falls to the
@@ -323,15 +325,9 @@ pub fn open_surface(path: &Path) -> Result<Box<dyn Surface>, SurfaceError> {
     if crate::pdf::is_pdf(path) {
         return Ok(Box::new(crate::pdf::PdfSurface::open(path)?));
     }
-    // Typst: the extension decides (.typ is plain UTF-8 text, so there is no
-    // magic to sniff). The backend compiles the file and renders the exported
-    // pages through the PDF path.
-    if crate::typst::is_typst(path) {
-        return Ok(Box::new(crate::typst::TypstSurface::open(path)?));
-    }
     // A converter claims the extensions its rules name, so a format this
-    // viewer does not parse itself reaches the vector backend through an
-    // external program that the user configured.
+    // viewer does not parse itself reaches a backend through an external
+    // program that the user configured.
     // The content decides first, so a rule never takes a file that this viewer
     // can read: a `.png` file opens through the raster backend even when a rule
     // claims `png`, and only a path whose bytes name no known format falls to

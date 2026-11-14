@@ -28,8 +28,8 @@ clap = { version = "4.6.7", features = ["derive"] }
 # JPEG XL decode, pure Rust (no libjxl C dependency).
 jxl-oxide = "0.12.6"
 # Common-format decode. Keep in sync with grid.rs is_image_path(): every
-# extension it accepts must have a feature here, except "pdf" and "typ" (see
-# below).
+# extension it accepts must have a feature here, except "pdf", which the hayro
+# backend in pdf.rs routes on its magic.
 # webp = image-webp, pure Rust (lossy VP8 + lossless VP8L decode).
 image = { version = "0.25.10", default-features = false, features = [
   "bmp",
@@ -73,17 +73,6 @@ rayon = "1.12.0"
 # 0.8 or newer is required: render_into() takes an arbitrary kurbo::Affine,
 # which is what makes a region render (visible crop) possible.
 hayro = "0.9.0"
-# Typst compile -> PDF export pipeline (pure Rust). Confined to typst.rs,
-# which hands the exported PDF bytes to the hayro backend in pdf.rs, so one
-# rasterizer draws every document. The exported pages are resolution
-# independent, so a region render and a settled-zoom refine work for a Typst
-# page exactly as for a PDF.
-typst = "0.15.1"
-typst-layout = "0.15.1"
-typst-pdf = "0.15.1"
-# Fonts embedded in the binary (its "fonts" feature), so the viewer needs no
-# font directory and no environment variable.
-typst-assets = { version = "0.15.1", features = ["fonts"] }
 # SIMD image resize (the grid thumb, the texture cap, the preview and the
 # blur background).
 # Picks the best CPU extension at runtime.
@@ -177,8 +166,8 @@ usvg = { version = "0.50.0", default-features = false, features = [
 # (MIT OR Apache-2.0).
 # `parse` alone, so the writer half of the crate stays out and the code walks
 # the values by hand (no serde derive in this tree).
-# Version 0.8 already resolves through the Typst dependency, so this entry adds
-# no crate to `Cargo.lock`.
+# Version 0.8 brings `toml_edit` and `winnow` with it, far less than the
+# document engine the Typst path used to link.
 toml = { version = "0.8.23", default-features = false, features = ["parse"] }
 # The kill of a timed-out converter, which names its whole process group by the
 # negative pid. Only the one syscall wrapper, and `libc` already resolves

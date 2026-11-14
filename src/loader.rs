@@ -546,7 +546,7 @@ mod tests {
         let tmp = temp_dir();
         let dir = tmp.path();
         let path = dir.join("doc.pdf");
-        std::fs::write(&path, crate::pdf::tests::MINIMAL_PDF).unwrap();
+        std::fs::write(&path, crate::pdf::MINIMAL_PDF).unwrap();
 
         let surface = crate::surface::open_surface(&path).unwrap();
         let loader = Loader::start(surface, PreviewPx::new(512), &None);

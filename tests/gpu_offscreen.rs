@@ -23,7 +23,7 @@
 //!   sharpness rule of `patch_dest` in the viewer;
 //! - straight alpha, and a tint that scales it;
 //! - a turned quad, on the pixels its corners name;
-//! - the decoder-to-draw chain of an SVG, a Typst page and a converted source;
+//! - the decoder-to-draw chain of an SVG, a PDF page and a converted source;
 //! - the transparent gutter of a book plane.
 
 // The tests read and name window pixels as whole numbers, so a float rect
@@ -462,28 +462,6 @@ fn an_svg_paints_its_rect() {
     );
 }
 
-/// A Typst page paints its own paper.
-#[test]
-#[ignore = "needs a Vulkan device"]
-fn a_typst_page_paints_a_red_box() {
-    let mut canvas = canvas!(32, 32);
-    let dir = tempfile::tempdir().expect("a temp dir");
-    let path = dir.path().join("page.typ");
-    std::fs::write(
-        &path,
-        "#set page(width: 32pt, height: 32pt, margin: 0pt, fill: rgb(\"#0000ff\"))\n#rect(width: \
-         100%, height: 100%, fill: rgb(\"#ff0000\"))\n",
-    )
-    .expect("write the typst source");
-    let dest = paint_surface(&mut canvas, &path);
-    let pixels = canvas.print();
-    let middle = (
-        (dest.x + dest.width / 2.0) as usize,
-        (dest.y + dest.height / 2.0) as usize,
-    );
-    assert_eq!(pixels.at(middle.0, middle.1), [255, 0, 0, 255], "the box");
-}
-
 /// A converted source paints the paper its rule names, under its own paints.
 #[cfg(feature = "svg")]
 #[test]
@@ -535,14 +513,9 @@ fn a_converted_source_paints_on_its_paper() {
 #[ignore = "needs a Vulkan device"]
 fn a_book_plane_keeps_its_gutter_transparent() {
     let dir = tempfile::tempdir().expect("a temp dir");
-    let path = dir.path().join("book.typ");
-    // Three pages, so the book holds a cover row and one spread.
-    std::fs::write(
-        &path,
-        "#set page(width: 64pt, height: 64pt, margin: 0pt, fill: \
-         rgb(\"#ffffff\"))\none\n#pagebreak()\ntwo\n#pagebreak()\nthree\n",
-    )
-    .expect("write the typst source");
+    let path = dir.path().join("book.pdf");
+    // Three white pages, so the book holds a cover row and one spread.
+    std::fs::write(&path, page_pdf(3, [255, 255, 255])).expect("write the pdf");
     let surface = versatile_viewer::surface::open_book_surface(&path).expect("a book");
     assert_eq!(surface.plane_count(), 1, "a book is one plane");
     let image = surface
@@ -564,29 +537,37 @@ fn a_book_plane_keeps_its_gutter_transparent() {
     );
 }
 
-/// Build a one-page PDF whose page is filled with `color`.
+/// Build a PDF of `pages` pages, each filled with `color`.
 ///
 /// The xref offsets are computed here, so the file is valid and needs no
 /// fixture on disk.
-fn one_page_pdf(color: [u8; 3]) -> Vec<u8> {
+fn page_pdf(pages: usize, color: [u8; 3]) -> Vec<u8> {
     let content = format!(
         "{} {} {} rg\n0 0 64 64 re f\n",
         f64::from(color[0]) / 255.0,
         f64::from(color[1]) / 255.0,
         f64::from(color[2]) / 255.0
     );
-    let objects = [
+    let kids = (0..pages)
+        .map(|page| format!("{} 0 R", 3 + 2 * page))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut objects = vec![
         "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n".to_string(),
-        "2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n".to_string(),
-        "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 64 64] /Contents 4 0 R /Resources << \
-         >> >> endobj\n"
-            .to_string(),
-        format!(
-            "4 0 obj << /Length {} >> stream\n{}endstream\nendobj\n",
+        format!("2 0 obj << /Type /Pages /Kids [{kids}] /Count {pages} >> endobj\n"),
+    ];
+    for page in 0..pages {
+        let (body, stream) = (3 + 2 * page, 4 + 2 * page);
+        objects.push(format!(
+            "{body} 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 64 64] /Contents {stream} 0 \
+             R /Resources << >> >> endobj\n"
+        ));
+        objects.push(format!(
+            "{stream} 0 obj << /Length {} >> stream\n{}endstream\nendobj\n",
             content.len(),
             content
-        ),
-    ];
+        ));
+    }
     let mut pdf = String::from("%PDF-1.4\n");
     let mut offsets = Vec::new();
     for object in &objects {
@@ -614,7 +595,7 @@ fn a_pdf_page_paints_its_content() {
     let mut canvas = canvas!(32, 32);
     let dir = tempfile::tempdir().expect("a temp dir");
     let path = dir.path().join("page.pdf");
-    std::fs::write(&path, one_page_pdf([0, 128, 0])).expect("write the pdf");
+    std::fs::write(&path, page_pdf(1, [0, 128, 0])).expect("write the pdf");
     let dest = paint_surface(&mut canvas, &path);
     let pixels = canvas.print();
     let middle = (
@@ -687,7 +668,7 @@ fn a_loader_worker_uploads_its_own_frame() {
     let mut canvas = canvas!(32, 32);
     let dir = tempfile::tempdir().expect("a temp dir");
     let path = dir.path().join("page.pdf");
-    std::fs::write(&path, one_page_pdf([200, 200, 0])).expect("write the pdf");
+    std::fs::write(&path, page_pdf(1, [200, 200, 0])).expect("write the pdf");
     let surface = open_surface(&path).expect("the page opens");
     let uploader = Some(canvas.renderer.uploader());
     let loader = Loader::start(surface, PreviewPx::new(32), &uploader);

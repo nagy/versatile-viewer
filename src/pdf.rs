@@ -297,13 +297,12 @@ fn file_magic_at_least(path: &Path, n: usize) -> Option<Vec<u8>> {
         .map(|()| buf)
 }
 
+/// A minimal single-page PDF (8.5x11 in letter, one text object).
+///
+/// A converted answer of a document is a PDF, so a test of that path needs
+/// bytes the parser accepts.
 #[cfg(test)]
-pub(crate) mod tests {
-    use super::*;
-    use crate::surface::open_surface;
-
-    /// A minimal single-page PDF (8.5x11 in letter, one text object).
-    pub(crate) const MINIMAL_PDF: &[u8] = b"%PDF-1.4
+pub(crate) const MINIMAL_PDF: &[u8] = b"%PDF-1.4
 1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj
 2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj
 3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj
@@ -314,8 +313,9 @@ endobj
 5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj
 trailer<</Root 1 0 R/Size 6>>";
 
-    /// A two-page PDF with different page sizes, for the plane-grid tests.
-    pub(crate) const TWO_PAGE_PDF: &[u8] = b"%PDF-1.4
+/// A two-page PDF with different page sizes, for the plane-grid tests.
+#[cfg(test)]
+pub(crate) const TWO_PAGE_PDF: &[u8] = b"%PDF-1.4
 1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj
 2 0 obj<</Type/Pages/Kids[3 0 R 6 0 R]/Count 2>>endobj
 3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj
@@ -330,6 +330,11 @@ BT /F1 12 Tf 10 50 Td (page two) Tj ET
 endstream
 endobj
 trailer<</Root 1 0 R/Size 8>>";
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::surface::open_surface;
 
     #[test]
     fn open_reports_one_page_and_its_size() {
