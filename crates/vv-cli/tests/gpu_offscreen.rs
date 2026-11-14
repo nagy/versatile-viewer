@@ -723,9 +723,9 @@ fn the_region_veil_dims_only_outside_the_selection() {
     let selection = region::crop(16.0, 16.0, 32.0, 32.0);
     for angle in [0.0_f32, 30.0] {
         let frame = region::Frame {
-            img: Vec2::new(64.0, 64.0),
-            win: Vec2::new(64.0, 64.0),
-            pan: Vec2::ZERO,
+            img: dim::SurfaceSize::new(64.0, 64.0),
+            win: dim::WindowSize::new(64.0, 64.0),
+            pan: dim::WindowVector::zero(),
             scale: 1.0,
             angle,
         };
@@ -736,14 +736,14 @@ fn the_region_veil_dims_only_outside_the_selection() {
             Quad::pro(dest, Turn::new(dim::center_origin(dest), angle)),
             Color::WHITE,
         );
-        let outer = region::crop(0.0, 0.0, frame.img.x, frame.img.y);
+        let outer = frame.plane();
         for band in region_sel::around(outer, selection) {
-            let corners = band.map(|point| frame.to_screen(point));
+            let corners = band.map(|point| dim::draw_window(frame.to_screen(point)));
             canvas.renderer.fill(Quad::new(corners), DIM_VEIL);
         }
         let pixels = canvas.print();
         let at = |point: Vec2| {
-            let screen = frame.to_screen(point);
+            let screen = frame.to_screen(dim::surface_point(point));
             pixels.at(screen.x as usize, screen.y as usize)
         };
         // The picture center sits inside the selection at any turn, so it keeps

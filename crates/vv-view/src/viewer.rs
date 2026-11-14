@@ -56,7 +56,7 @@ use crate::{
     DecodedImage, TAP_SLACK,
     blurbg::{self, BlurBg},
     book::BookSurface,
-    dim::{WinH, WinW},
+    dim::{self, WinH, WinW},
     draw::{Color, Vec2},
     grid::{DecodeFailure, Grid, GridAction, LoadPlan},
     input::Input,
@@ -1938,14 +1938,14 @@ impl Viewer {
                 // The cursor stays free, and the rect lives in source units, so
                 // a pan, a zoom and a turn keep the region on the picture while
                 // the drag runs.
-                let img = Vec2::new(self.st.img.w, self.st.img.h);
+                let img = dim::SurfaceSize::new(self.st.img.w, self.st.img.h);
                 let frame = self.st.frame(Vec2::new(win_w, win_h));
                 if v_key
                     && self.region_drag.is_none()
                     && !self.pointer_captured
                     && let Some(frame) = frame
                 {
-                    let mouse = self.input.cursor_position();
+                    let mouse = dim::window_point(self.input.cursor_position());
                     let drag = region_sel::press(
                         frame.to_image(mouse),
                         mouse,
@@ -1973,7 +1973,7 @@ impl Viewer {
                         self.st.frame(Vec2::new(win_w, win_h)),
                         None,
                         Some(drag),
-                        self.input.cursor_position(),
+                        dim::window_point(self.input.cursor_position()),
                     );
                     self.region_drag = None;
                     if self.debug {
@@ -2021,7 +2021,7 @@ impl Viewer {
                 self.st.frame(Vec2::new(win_w, win_h)),
                 self.st.selection,
                 self.region_drag,
-                self.input.cursor_position(),
+                dim::window_point(self.input.cursor_position()),
             )
         } else {
             None

@@ -21,7 +21,7 @@
 
 use crate::{
     TAP_SLACK,
-    draw::Vec2,
+    dim::{SurfacePoint, SurfaceSize, SurfaceVector, WindowPoint},
     region::{self, Crop},
 };
 
@@ -47,9 +47,9 @@ pub enum VPress {
 pub struct Drag {
     /// The press point in source units: the anchor of a span, and the point the
     /// move carries.
-    pub anchor: Vec2,
+    pub anchor: SurfacePoint,
     /// The same point on screen, in window pixels, for the click test.
-    pub grab: Vec2,
+    pub grab: WindowPoint,
     /// Whether the press spans a fresh rect or carries the kept one.
     pub press: VPress,
 }
@@ -58,7 +58,7 @@ impl Drag {
     /// Start a span at `anchor`, which the caller already clamped into the
     /// plane.
     #[must_use]
-    pub fn new(anchor: Vec2, grab: Vec2, square: bool) -> Self {
+    pub fn new(anchor: SurfacePoint, grab: WindowPoint, square: bool) -> Self {
         Self {
             anchor,
             grab,
@@ -68,7 +68,7 @@ impl Drag {
 
     /// Start a move of `from`, grabbed at `anchor`.
     #[must_use]
-    pub fn moving(anchor: Vec2, grab: Vec2, from: Crop) -> Self {
+    pub fn moving(anchor: SurfacePoint, grab: WindowPoint, from: Crop) -> Self {
         Self {
             anchor,
             grab,
@@ -86,7 +86,7 @@ impl Drag {
     /// the region never leaves the picture and never stops being square.
     /// A move keeps the size of the grabbed rect and stops at the picture edge.
     #[must_use]
-    pub fn rect(&self, corner: Vec2, img: Vec2) -> Crop {
+    pub fn rect(&self, corner: SurfacePoint, img: SurfaceSize) -> Crop {
         let anchor = clamp(self.anchor, img);
         let corner = clamp(corner, img);
         match self.press {
@@ -109,7 +109,7 @@ impl Drag {
     /// Whether the pointer stayed close enough to the press point to count as a
     /// click, which commits nothing.
     #[must_use]
-    pub fn tapped(&self, cursor: Vec2) -> bool {
+    pub fn tapped(&self, cursor: WindowPoint) -> bool {
         (cursor - self.grab).length() <= TAP_SLACK
     }
 }
@@ -121,7 +121,13 @@ impl Drag {
 /// Shift only shapes a span: a move keeps the sides the rect already has, so
 /// the Shift state changes nothing inside the region.
 #[must_use]
-pub fn press(point: Vec2, grab: Vec2, img: Vec2, kept: Option<Crop>, square: bool) -> Drag {
+pub fn press(
+    point: SurfacePoint,
+    grab: WindowPoint,
+    img: SurfaceSize,
+    kept: Option<Crop>,
+    square: bool,
+) -> Drag {
     let anchor = clamp(point, img);
     match kept.filter(|rect| region::contains_point(rect, anchor)) {
         Some(from) => Drag::moving(anchor, grab, from),
@@ -131,21 +137,21 @@ pub fn press(point: Vec2, grab: Vec2, img: Vec2, kept: Option<Crop>, square: boo
 
 /// Clamp a source point into the plane.
 #[must_use]
-pub fn clamp(point: Vec2, img: Vec2) -> Vec2 {
-    Vec2::new(
-        point.x.clamp(0.0, img.x.max(0.0)),
-        point.y.clamp(0.0, img.y.max(0.0)),
+pub fn clamp(point: SurfacePoint, img: SurfaceSize) -> SurfacePoint {
+    SurfacePoint::new(
+        point.x.clamp(0.0, img.width.max(0.0)),
+        point.y.clamp(0.0, img.height.max(0.0)),
     )
 }
 
 /// The four corners of a rect, clockwise from the top-left.
 #[must_use]
-pub fn corners(rect: Crop) -> [Vec2; 4] {
+pub fn corners(rect: Crop) -> [SurfacePoint; 4] {
     [
-        Vec2::new(rect.min_x(), rect.min_y()),
-        Vec2::new(rect.max_x(), rect.min_y()),
-        Vec2::new(rect.max_x(), rect.max_y()),
-        Vec2::new(rect.min_x(), rect.max_y()),
+        SurfacePoint::new(rect.min_x(), rect.min_y()),
+        SurfacePoint::new(rect.max_x(), rect.min_y()),
+        SurfacePoint::new(rect.max_x(), rect.max_y()),
+        SurfacePoint::new(rect.min_x(), rect.max_y()),
     ]
 }
 
@@ -162,7 +168,7 @@ pub fn corners(rect: Crop) -> [Vec2; 4] {
 /// `inner` clamps into `outer`, so a drag that ran past the picture still
 /// answers bands that stay on it.
 #[must_use]
-pub fn around(outer: Crop, inner: Crop) -> [[Vec2; 4]; 4] {
+pub fn around(outer: Crop, inner: Crop) -> [[SurfacePoint; 4]; 4] {
     let o = corners(outer);
     let i = corners(inside(inner, outer));
     [
@@ -174,7 +180,7 @@ pub fn around(outer: Crop, inner: Crop) -> [[Vec2; 4]; 4] {
 }
 
 /// The rect that two opposite corners span, in any drag direction.
-fn span(a: Vec2, b: Vec2) -> Crop {
+fn span(a: SurfacePoint, b: SurfacePoint) -> Crop {
     region::crop(
         a.x.min(b.x),
         a.y.min(b.y),
@@ -185,17 +191,25 @@ fn span(a: Vec2, b: Vec2) -> Crop {
 
 /// The square that two opposite corners span, shrunk to the room the plane
 /// leaves past the anchor.
-fn square(anchor: Vec2, corner: Vec2, img: Vec2) -> Crop {
+fn square(anchor: SurfacePoint, corner: SurfacePoint, img: SurfaceSize) -> Crop {
     let dx = corner.x - anchor.x;
     let dy = corner.y - anchor.y;
     let sx = if dx < 0.0 { -1.0 } else { 1.0 };
     let sy = if dy < 0.0 { -1.0 } else { 1.0 };
-    let room_x = if sx > 0.0 { img.x - anchor.x } else { anchor.x };
-    let room_y = if sy > 0.0 { img.y - anchor.y } else { anchor.y };
+    let room_x = if sx > 0.0 {
+        img.width - anchor.x
+    } else {
+        anchor.x
+    };
+    let room_y = if sy > 0.0 {
+        img.height - anchor.y
+    } else {
+        anchor.y
+    };
     let side = dx.abs().max(dy.abs()).min(room_x).min(room_y).max(0.0);
     span(
         anchor,
-        Vec2::new(anchor.x + side * sx, anchor.y + side * sy),
+        SurfacePoint::new(anchor.x + side * sx, anchor.y + side * sy),
     )
 }
 
@@ -203,10 +217,10 @@ fn square(anchor: Vec2, corner: Vec2, img: Vec2) -> Crop {
 ///
 /// The rect keeps its size, so a move that reaches an edge stops there and
 /// never shrinks.
-fn shift(rect: Crop, delta: Vec2, img: Vec2) -> Crop {
+fn shift(rect: Crop, delta: SurfaceVector, img: SurfaceSize) -> Crop {
     region::crop(
-        (rect.min_x() + delta.x).clamp(0.0, (img.x - rect.width()).max(0.0)),
-        (rect.min_y() + delta.y).clamp(0.0, (img.y - rect.height()).max(0.0)),
+        (rect.min_x() + delta.x).clamp(0.0, (img.width - rect.width()).max(0.0)),
+        (rect.min_y() + delta.y).clamp(0.0, (img.height - rect.height()).max(0.0)),
         rect.width(),
         rect.height(),
     )
@@ -226,7 +240,7 @@ fn inside(rect: Crop, outer: Crop) -> Crop {
 
 /// The area of a quad, by the shoelace formula.
 #[cfg(test)]
-fn quad_area(quad: &[Vec2; 4]) -> f32 {
+fn quad_area(quad: &[SurfacePoint; 4]) -> f32 {
     let mut sum = 0.0;
     for i in 0..4 {
         let a = quad[i];
@@ -241,50 +255,60 @@ fn quad_area(quad: &[Vec2; 4]) -> f32 {
 mod tests {
     use super::*;
 
-    fn plane() -> Vec2 {
-        Vec2::new(1000.0, 500.0)
+    /// A surface point, in the units of the plane.
+    fn point(x: f32, y: f32) -> SurfacePoint {
+        SurfacePoint::new(x, y)
     }
 
-    fn drag(anchor: Vec2) -> Drag {
-        Drag::new(anchor, Vec2::ZERO, false)
+    /// A window point, in the units of the pointer.
+    fn cursor(x: f32, y: f32) -> WindowPoint {
+        WindowPoint::new(x, y)
+    }
+
+    fn plane() -> SurfaceSize {
+        SurfaceSize::new(1000.0, 500.0)
+    }
+
+    fn drag(anchor: SurfacePoint) -> Drag {
+        Drag::new(anchor, WindowPoint::zero(), false)
     }
 
     #[test]
     fn a_drag_spans_its_corners_in_any_direction() {
-        let a = Vec2::new(200.0, 100.0);
-        let out = drag(a).rect(Vec2::new(500.0, 400.0), plane());
+        let a = point(200.0, 100.0);
+        let out = drag(a).rect(point(500.0, 400.0), plane());
         assert_eq!((out.min_x(), out.min_y()), (200.0, 100.0));
         assert_eq!((out.width(), out.height()), (300.0, 300.0));
         // A drag that runs up and to the left reads the same way.
-        let back = drag(a).rect(Vec2::new(50.0, 20.0), plane());
+        let back = drag(a).rect(point(50.0, 20.0), plane());
         assert_eq!((back.min_x(), back.min_y()), (50.0, 20.0));
         assert_eq!((back.width(), back.height()), (150.0, 80.0));
     }
 
     #[test]
     fn a_drag_clamps_to_the_plane() {
-        let a = Vec2::new(200.0, 100.0);
-        let r = drag(a).rect(Vec2::new(5000.0, -80.0), plane());
+        let a = point(200.0, 100.0);
+        let r = drag(a).rect(point(5000.0, -80.0), plane());
         assert_eq!((r.min_x(), r.min_y()), (200.0, 0.0));
         assert_eq!((r.width(), r.height()), (800.0, 100.0));
         // An anchor that a resize pushed past the plane clamps too.
-        let past = Drag::new(Vec2::new(2000.0, 900.0), Vec2::ZERO, false);
-        let r = past.rect(Vec2::new(2000.0, 900.0), plane());
+        let past = Drag::new(point(2000.0, 900.0), WindowPoint::zero(), false);
+        let r = past.rect(point(2000.0, 900.0), plane());
         assert!(r.is_empty());
         assert_eq!((r.min_x(), r.min_y()), (1000.0, 500.0));
     }
 
     #[test]
     fn a_square_drag_takes_the_longer_side() {
-        let a = Vec2::new(200.0, 100.0);
-        let square = Drag::new(a, Vec2::ZERO, true);
-        let r = square.rect(Vec2::new(500.0, 200.0), plane());
+        let a = point(200.0, 100.0);
+        let square = Drag::new(a, WindowPoint::zero(), true);
+        let r = square.rect(point(500.0, 200.0), plane());
         assert_eq!((r.width(), r.height()), (300.0, 300.0));
         // The taller travel wins the same way.
-        let r = square.rect(Vec2::new(260.0, 400.0), plane());
+        let r = square.rect(point(260.0, 400.0), plane());
         assert_eq!((r.width(), r.height()), (300.0, 300.0));
         // A corner past the plane still lands inside it.
-        let r = square.rect(Vec2::new(900.0, 400.0), plane());
+        let r = square.rect(point(900.0, 400.0), plane());
         assert_eq!((r.min_x(), r.min_y()), (200.0, 100.0));
         assert_eq!((r.width(), r.height()), (400.0, 400.0));
     }
@@ -293,22 +317,22 @@ mod tests {
     fn a_square_drag_shrinks_to_the_room_past_the_anchor() {
         // The anchor sits 10 px from the right edge, so a square that grows
         // rightward cannot pass it.
-        let square = Drag::new(Vec2::new(990.0, 10.0), Vec2::ZERO, true);
-        let r = square.rect(Vec2::new(1500.0, 400.0), plane());
+        let square = Drag::new(point(990.0, 10.0), WindowPoint::zero(), true);
+        let r = square.rect(point(1500.0, 400.0), plane());
         assert_eq!((r.width(), r.height()), (10.0, 10.0));
         assert_eq!((r.min_x(), r.min_y()), (990.0, 10.0));
         // The same anchor growing leftward keeps the room the left side has.
-        let r = square.rect(Vec2::new(0.0, 400.0), plane());
+        let r = square.rect(point(0.0, 400.0), plane());
         assert_eq!((r.width(), r.height()), (490.0, 490.0));
         assert_eq!((r.min_x(), r.min_y()), (500.0, 10.0));
     }
 
     #[test]
     fn a_tap_counts_up_to_the_slack() {
-        let d = Drag::new(Vec2::new(100.0, 100.0), Vec2::new(400.0, 300.0), false);
-        assert!(d.tapped(Vec2::new(400.0, 300.0)));
-        assert!(d.tapped(Vec2::new(403.0, 300.0)));
-        assert!(!d.tapped(Vec2::new(405.0, 300.0)));
+        let d = Drag::new(point(100.0, 100.0), cursor(400.0, 300.0), false);
+        assert!(d.tapped(cursor(400.0, 300.0)));
+        assert!(d.tapped(cursor(403.0, 300.0)));
+        assert!(!d.tapped(cursor(405.0, 300.0)));
     }
 
     #[test]
@@ -316,16 +340,34 @@ mod tests {
         let img = plane();
         let kept = region::crop(100.0, 100.0, 200.0, 100.0);
         // A press on the border counts as inside, so the edge still moves it.
-        let inside = press(Vec2::new(300.0, 150.0), Vec2::ZERO, img, Some(kept), false);
+        let inside = press(
+            point(300.0, 150.0),
+            WindowPoint::zero(),
+            img,
+            Some(kept),
+            false,
+        );
         assert!(matches!(inside.press, VPress::Move { .. }));
         // Shift only shapes a span, so a move reads the same with it.
-        let shifted = press(Vec2::new(300.0, 150.0), Vec2::ZERO, img, Some(kept), true);
+        let shifted = press(
+            point(300.0, 150.0),
+            WindowPoint::zero(),
+            img,
+            Some(kept),
+            true,
+        );
         assert_eq!(shifted.press, inside.press);
         // A press outside the region still spans a fresh rect.
-        let outside = press(Vec2::new(10.0, 10.0), Vec2::ZERO, img, Some(kept), false);
+        let outside = press(
+            point(10.0, 10.0),
+            WindowPoint::zero(),
+            img,
+            Some(kept),
+            false,
+        );
         assert!(matches!(outside.press, VPress::Span { square: false }));
         // With no kept region every press spans.
-        let fresh = press(Vec2::new(10.0, 10.0), Vec2::ZERO, img, None, true);
+        let fresh = press(point(10.0, 10.0), WindowPoint::zero(), img, None, true);
         assert!(matches!(fresh.press, VPress::Span { square: true }));
     }
 
@@ -333,22 +375,22 @@ mod tests {
     fn a_move_carries_the_rect_and_stops_at_the_edge() {
         let img = plane();
         let kept = region::crop(100.0, 100.0, 200.0, 100.0);
-        let grab = Vec2::new(150.0, 150.0);
-        let d = press(grab, Vec2::ZERO, img, Some(kept), false);
+        let grab = point(150.0, 150.0);
+        let d = press(grab, WindowPoint::zero(), img, Some(kept), false);
         // The rect follows the pointer and keeps its size.
-        let moved = d.rect(Vec2::new(250.0, 250.0), img);
+        let moved = d.rect(point(250.0, 250.0), img);
         assert_eq!(
             (moved.min_x(), moved.min_y(), moved.width(), moved.height()),
             (200.0, 200.0, 200.0, 100.0)
         );
         // A move past the edge stops there and never shrinks.
-        let far = d.rect(Vec2::new(5000.0, 5000.0), img);
-        assert_eq!((far.max_x(), far.max_y()), (img.x, img.y));
+        let far = d.rect(point(5000.0, 5000.0), img);
+        assert_eq!((far.max_x(), far.max_y()), (img.width, img.height));
         assert_eq!((far.width(), far.height()), (200.0, 100.0));
         // A tap keeps the rect the move grabbed, and a span tap commits
         // nothing.
         assert_eq!(d.tap_rect(), Some(kept));
-        assert_eq!(Drag::new(grab, Vec2::ZERO, false).tap_rect(), None);
+        assert_eq!(Drag::new(grab, WindowPoint::zero(), false).tap_rect(), None);
     }
 
     #[test]
@@ -360,19 +402,19 @@ mod tests {
         assert_eq!(
             bands[0],
             [
-                Vec2::new(0.0, 0.0),
-                Vec2::new(1000.0, 0.0),
-                Vec2::new(300.0, 50.0),
-                Vec2::new(100.0, 50.0),
+                point(0.0, 0.0),
+                point(1000.0, 0.0),
+                point(300.0, 50.0),
+                point(100.0, 50.0),
             ]
         );
         assert_eq!(
             bands[1],
             [
-                Vec2::new(1000.0, 0.0),
-                Vec2::new(1000.0, 500.0),
-                Vec2::new(300.0, 150.0),
-                Vec2::new(300.0, 50.0),
+                point(1000.0, 0.0),
+                point(1000.0, 500.0),
+                point(300.0, 150.0),
+                point(300.0, 50.0),
             ]
         );
     }
@@ -399,6 +441,10 @@ mod property_tests {
     use proptest::prelude::*;
 
     use super::*;
+
+    fn plane_size() -> SurfaceSize {
+        SurfaceSize::new(1000.0, 500.0)
+    }
 
     fn plane() -> Crop {
         region::crop(0.0, 0.0, 1000.0, 500.0)
@@ -447,15 +493,16 @@ mod property_tests {
             px in -500.0f32..1500.0,
             py in -500.0f32..1000.0,
         ) {
-            let img = Vec2::new(1000.0, 500.0);
-            let rect = region::crop(x, y, w.min(img.x - x), h.min(img.y - y));
-            let grab = Vec2::new(x + rect.width() / 2.0, y + rect.height() / 2.0);
-            let moved = Drag::moving(grab, Vec2::ZERO, rect).rect(Vec2::new(px, py), img);
+            let img = plane_size();
+            let rect = region::crop(x, y, w.min(img.width - x), h.min(img.height - y));
+            let grab = SurfacePoint::new(x + rect.width() / 2.0, y + rect.height() / 2.0);
+            let moved = Drag::moving(grab, WindowPoint::zero(), rect)
+                .rect(SurfacePoint::new(px, py), img);
             prop_assert!((moved.width() - rect.width()).abs() < 1e-3);
             prop_assert!((moved.height() - rect.height()).abs() < 1e-3);
             prop_assert!(moved.min_x() >= -1e-3 && moved.min_y() >= -1e-3);
-            prop_assert!(moved.max_x() <= img.x + 1e-3);
-            prop_assert!(moved.max_y() <= img.y + 1e-3);
+            prop_assert!(moved.max_x() <= img.width + 1e-3);
+            prop_assert!(moved.max_y() <= img.height + 1e-3);
         }
 
         /// A drag always answers a rect inside the plane, whatever the
@@ -468,12 +515,12 @@ mod property_tests {
             y in -500.0f32..1000.0,
             square in any::<bool>(),
         ) {
-            let img = Vec2::new(1000.0, 500.0);
-            let d = Drag::new(Vec2::new(ax, ay), Vec2::ZERO, square);
-            let r = d.rect(Vec2::new(x, y), img);
+            let img = plane_size();
+            let d = Drag::new(SurfacePoint::new(ax, ay), WindowPoint::zero(), square);
+            let r = d.rect(SurfacePoint::new(x, y), img);
             prop_assert!(r.min_x() >= 0.0 && r.min_y() >= 0.0);
-            prop_assert!(r.max_x() <= img.x + 1e-3);
-            prop_assert!(r.max_y() <= img.y + 1e-3);
+            prop_assert!(r.max_x() <= img.width + 1e-3);
+            prop_assert!(r.max_y() <= img.height + 1e-3);
             if square {
                 prop_assert!((r.width() - r.height()).abs() < 1e-3);
             }

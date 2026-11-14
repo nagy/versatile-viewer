@@ -123,7 +123,8 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   A raster plane measures the capped size it renders, so `bounds` and the pixels of a scale-1.0 render agree.
   The trait decisions live in `docs/adr/0001-surface-one-region-based-render-trait.md`.
 - The image view repaints the region its window shows, from the open surface, when `Surface::can_refine` says a sharper picture is possible.
-  `crates/vv-core/src/region.rs` holds the pure geometry and policy: `Frame` (`to_screen`, `to_image`, `crop`), `Crop`, `Patch`, `worth_painting`, `patch_reaches_window`, `patch_covers_at_scale`, `MARGIN`, `SCALE_SLACK`, `QUIET`.
+  `crates/vv-core/src/region.rs` holds the pure geometry and policy: `Frame` (`to_screen`, `to_image`, `crop`, `plane`), `Crop`, `Patch`, `worth_painting`, `patch_reaches_window`, `patch_covers_at_scale`, `MARGIN`, `SCALE_SLACK`, `QUIET`.
+  `Frame` keeps `img: SurfaceSize`, `win: WindowSize` and `pan: WindowVector`, `to_screen` takes a `SurfacePoint` and answers a `WindowPoint`, and `to_image` inverts that, so the one conversion pair of the view carries the space of each side.
   `patch_reaches_window` reads the two rects alone and answers whether the painted rect reaches every source pixel the window shows; the draw asks it (`patch_covers` in `crates/vv-view/src/view.rs`) before it skips the whole-image texture, and so does `worth_painting`.
   `Frame` bundles one window mapping (`img`, `win`, `pan`, `scale`, `angle`), and `ViewState::frame` (`main.rs`) builds it, so a caller never re-derives the transform and never mixes window units with source units.
   The mapping and the crop are methods of `Frame`, so no free function takes the five numbers loose and no call site can swap the scale for the angle; `ViewState::frame_at` answers the same frame for a pan the view aims at (a glide target) rather than the one on screen.
@@ -196,6 +197,7 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   A rectangle is `euclid`'s, not a local type: `dim::Rect` is `euclid::Rect<f32, WindowSpace>` and `region::Crop` is `euclid::Rect<f32, SurfaceSpace>`, so the two space tags refuse a mix at compile time and the edges, the size and the containment come from that crate.
   `dim::rect(x, y, w, h)` is the four-number constructor, `dim::whole(w, h)` the rect of a whole texture at the origin, and `region::crop(x, y, w, h)` the same for surface units.
   `dim::center_square`, `dim::center_origin` and `dim::contains_point` are the three readings the viewer adds: a square crop of a cell, the origin that keeps a turned draw in place, and the containment where the far edge counts as inside, which `euclid::Rect::contains` excludes.
+  A point, a size and an offset carry the same tags (`dim::WindowPoint`, `WindowSize`, `WindowVector`, `SurfacePoint`, `SurfaceSize`, `SurfaceVector`), and `dim::window_point`/`surface_point`/`draw_window` are the crossings to `draw::Vec2`, so the region geometry names its space and only the draw boundary reads a bare pair.
   `draw::Quad` is the only thing that turns a rect into corners.
 - `DecodedImage` (`crates/vv-pixels/src/lib.rs`) keeps its fields private: `DecodedImage::new(width, height, data)` is the only checked entrance, and it answers `DecodeError::Buffer` unless `data` holds exactly `width * height * 4` bytes.
   Read the pixels with `as_rgba`, the extents with `width` and `height`, and consume it with `into_rgba` or `into_parts`.

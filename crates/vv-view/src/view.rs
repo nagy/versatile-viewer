@@ -482,9 +482,9 @@ impl ViewState {
     /// `v` region drag, so no caller re-derives the transform on its own.
     pub fn frame(&self, win: Vec2) -> Option<region::Frame> {
         Some(region::Frame {
-            img: Vec2::new(self.img.w, self.img.h),
-            win,
-            pan: self.pan,
+            img: dim::SurfaceSize::new(self.img.w, self.img.h),
+            win: dim::WindowSize::new(win.x, win.y),
+            pan: dim::WindowVector::new(self.pan.x, self.pan.y),
             scale: self.view_scale?,
             angle: self.angle,
         })
@@ -499,9 +499,9 @@ impl ViewState {
     #[must_use]
     pub fn frame_at(&self, win: Vec2, pan: Vec2, scale: f32) -> region::Frame {
         region::Frame {
-            img: Vec2::new(self.img.w, self.img.h),
-            win,
-            pan,
+            img: dim::SurfaceSize::new(self.img.w, self.img.h),
+            win: dim::WindowSize::new(win.x, win.y),
+            pan: dim::WindowVector::new(pan.x, pan.y),
             scale,
             angle: self.angle,
         }
@@ -1158,7 +1158,14 @@ pub const fn view_filter(pixelated: bool) -> Filter {
 /// A turned patch has no pixel grid to land on, so the caller keeps the free
 /// draw.
 #[must_use]
-pub fn patch_dest(center: Vec2, dw: f32, dh: f32, tw: f32, th: f32, angle: f32) -> Option<Rect> {
+pub fn patch_dest(
+    center: dim::WindowPoint,
+    dw: f32,
+    dh: f32,
+    tw: f32,
+    th: f32,
+    angle: f32,
+) -> Option<Rect> {
     if angle != 0.0 || !(dw > 0.0 && dh > 0.0) {
         return None;
     }
@@ -1193,7 +1200,7 @@ pub fn patch_dest(center: Vec2, dw: f32, dh: f32, tw: f32, th: f32, angle: f32) 
 pub fn draw_patch(r: &mut Renderer, patch: &CropState, frame: &region::Frame, filter: Filter) {
     let rect = patch.patch.rect;
     let (scale, angle) = (frame.scale, frame.angle);
-    let middle = Vec2::new(
+    let middle = dim::SurfacePoint::new(
         rect.min_x() + rect.width() / 2.0,
         rect.min_y() + rect.height() / 2.0,
     );
@@ -1224,7 +1231,7 @@ pub fn draw_patch(r: &mut Renderer, patch: &CropState, frame: &region::Frame, fi
                 h: rect.height(),
             },
             scale,
-            center,
+            dim::draw_window(center),
             angle,
             filter,
         ),
@@ -1247,7 +1254,7 @@ pub fn selection_rect(
     frame: Option<region::Frame>,
     kept: Option<region::Crop>,
     drag: Option<region_sel::Drag>,
-    mouse: Vec2,
+    mouse: dim::WindowPoint,
 ) -> Option<region::Crop> {
     let frame = frame.filter(region::Frame::has_drawable_plane)?;
     let Some(drag) = drag else {
@@ -1270,13 +1277,14 @@ pub fn selection_rect(
 /// The bands and the border map through [`region::Frame::to_screen`], so they
 /// follow the pan, the zoom and the turn of the draw.
 pub fn draw_selection(r: &mut Renderer, frame: region::Frame, selection: region::Crop) {
-    let outer = region::crop(0.0, 0.0, frame.img.x, frame.img.y);
+    let outer = frame.plane();
     for band in region_sel::around(outer, selection) {
-        let p = band.map(|point| frame.to_screen(point));
+        let p = band.map(|point| dim::draw_window(frame.to_screen(point)));
         // The pipeline culls nothing, so a band draws in either winding.
         r.fill(Quad::new(p), DIM_VEIL);
     }
-    let corners = region_sel::corners(selection).map(|point| frame.to_screen(point));
+    let corners =
+        region_sel::corners(selection).map(|point| dim::draw_window(frame.to_screen(point)));
     for i in 0..4 {
         r.line(
             corners[i],
@@ -1512,7 +1520,15 @@ mod tests {
     fn a_patch_that_matches_the_view_lands_on_whole_pixels() {
         // A patch of 1532x1180 px whose screen center falls between pixels.
         let (cx, cy) = (512.32f32, 384.68f32);
-        let dest = patch_dest(Vec2::new(cx, cy), 1532.0, 1180.0, 1532.0, 1180.0, 0.0).unwrap();
+        let dest = patch_dest(
+            dim::WindowPoint::new(cx, cy),
+            1532.0,
+            1180.0,
+            1532.0,
+            1180.0,
+            0.0,
+        )
+        .unwrap();
         // The corner snaps to the nearest whole pixel, and the patch keeps the
         // pixel size it was painted at.
         assert_eq!(
@@ -1531,7 +1547,7 @@ mod tests {
     fn a_patch_rounds_into_the_painted_pixel_size() {
         // The paint rounds its buffer, so a screen size within a pixel takes
         // the painted size instead of resampling the whole patch.
-        let center = Vec2::new(400.0, 300.0);
+        let center = dim::WindowPoint::new(400.0, 300.0);
         let dest = patch_dest(center, 800.6, 600.4, 801.0, 600.0, 0.0).unwrap();
         assert_eq!((dest.width(), dest.height()), (801.0, 600.0));
         assert_eq!((dest.min_x(), dest.min_y()), (0.0, 0.0));
@@ -1542,7 +1558,7 @@ mod tests {
         // A zoom past the slack leaves the patch stretched, so its pixel size
         // is not the screen size: the size follows the view, and the position
         // still snaps so sampling stays stable.
-        let center = Vec2::new(400.4, 300.6);
+        let center = dim::WindowPoint::new(400.4, 300.6);
         assert_eq!(
             patch_dest(center, 1200.0, 900.0, 800.0, 600.0, 0.0),
             Some(dim::rect(-200.0, -149.0, 1200.0, 900.0))
@@ -1608,28 +1624,46 @@ mod tests {
         // The window holds the plane one to one, so the pointer and the source
         // units agree here and the test reads the region alone.
         let frame = region::Frame {
-            img: Vec2::new(1000.0, 500.0),
-            win: Vec2::new(1000.0, 500.0),
-            pan: Vec2::ZERO,
+            img: dim::SurfaceSize::new(1000.0, 500.0),
+            win: dim::WindowSize::new(1000.0, 500.0),
+            pan: dim::WindowVector::zero(),
             scale: 1.0,
             angle: 0.0,
         };
         let kept = region::crop(10.0, 10.0, 100.0, 100.0);
-        let drag = region_sel::Drag::new(Vec2::new(200.0, 100.0), Vec2::ZERO, false);
-        let still = region_sel::Drag::new(Vec2::ZERO, Vec2::ZERO, false);
+        let drag = region_sel::Drag::new(
+            dim::SurfacePoint::new(200.0, 100.0),
+            dim::WindowPoint::zero(),
+            false,
+        );
+        let still =
+            region_sel::Drag::new(dim::SurfacePoint::zero(), dim::WindowPoint::zero(), false);
         // A press that has not left the tap slack spans no rect, so the old
         // region keeps its place on screen.
         assert_eq!(
-            selection_rect(Some(frame), Some(kept), Some(still), Vec2::ZERO),
+            selection_rect(
+                Some(frame),
+                Some(kept),
+                Some(still),
+                dim::WindowPoint::zero()
+            ),
             Some(kept)
         );
         // Any travel replaces it with the fresh rect.
         assert_eq!(
-            selection_rect(Some(frame), Some(kept), Some(drag), Vec2::new(500.0, 400.0)),
+            selection_rect(
+                Some(frame),
+                Some(kept),
+                Some(drag),
+                dim::WindowPoint::new(500.0, 400.0)
+            ),
             Some(region::crop(200.0, 100.0, 300.0, 300.0))
         );
         // A plane with no size and no drag marks nothing.
-        assert_eq!(selection_rect(None, Some(kept), None, Vec2::ZERO), None);
+        assert_eq!(
+            selection_rect(None, Some(kept), None, dim::WindowPoint::zero()),
+            None
+        );
     }
 
     #[test]
@@ -1638,32 +1672,55 @@ mod tests {
         // middle sits on the plane middle, one window pixel spans two source
         // pixels, and the pan moves the picture the other way.
         let frame = region::Frame {
-            img: Vec2::new(1000.0, 500.0),
-            win: Vec2::new(800.0, 600.0),
-            pan: Vec2::new(100.0, 0.0),
+            img: dim::SurfaceSize::new(1000.0, 500.0),
+            win: dim::WindowSize::new(800.0, 600.0),
+            pan: dim::WindowVector::new(100.0, 0.0),
             scale: 0.5,
             angle: 0.0,
         };
-        let drag = region_sel::Drag::new(Vec2::new(500.0, 250.0), Vec2::ZERO, false);
+        let drag = region_sel::Drag::new(
+            dim::SurfacePoint::new(500.0, 250.0),
+            dim::WindowPoint::zero(),
+            false,
+        );
         // The pointer at (600, 200) lands on the source point (700, 50), so the
         // rect runs from the anchor to there.
         // A raw window reading would answer (500, 200, 100, 50) instead.
         assert_eq!(
-            selection_rect(Some(frame), None, Some(drag), Vec2::new(600.0, 200.0)),
+            selection_rect(
+                Some(frame),
+                None,
+                Some(drag),
+                dim::WindowPoint::new(600.0, 200.0)
+            ),
             Some(region::crop(500.0, 50.0, 200.0, 200.0))
         );
         // A press that has not left the tap slack keeps the old region, so a
         // `v` click never flashes a sliver rect.
-        let tap = region_sel::Drag::new(Vec2::new(500.0, 250.0), Vec2::new(600.0, 200.0), false);
+        let tap = region_sel::Drag::new(
+            dim::SurfacePoint::new(500.0, 250.0),
+            dim::WindowPoint::new(600.0, 200.0),
+            false,
+        );
         let kept = region::crop(10.0, 10.0, 100.0, 100.0);
         assert_eq!(
-            selection_rect(Some(frame), Some(kept), Some(tap), Vec2::new(601.0, 200.0)),
+            selection_rect(
+                Some(frame),
+                Some(kept),
+                Some(tap),
+                dim::WindowPoint::new(601.0, 200.0)
+            ),
             Some(kept)
         );
         // The release reads the same call, so a tap answers no region and
         // drops the kept one.
         assert_eq!(
-            selection_rect(Some(frame), None, Some(tap), Vec2::new(601.0, 200.0)),
+            selection_rect(
+                Some(frame),
+                None,
+                Some(tap),
+                dim::WindowPoint::new(601.0, 200.0)
+            ),
             None
         );
     }

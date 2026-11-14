@@ -84,6 +84,42 @@ pub enum WindowSpace {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfaceSpace {}
 
+/// A point in window pixels, for the draw and the pointer.
+pub type WindowPoint = euclid::Point2D<f32, WindowSpace>;
+
+/// A size in window pixels.
+pub type WindowSize = euclid::Size2D<f32, WindowSpace>;
+
+/// An offset in window pixels.
+pub type WindowVector = euclid::Vector2D<f32, WindowSpace>;
+
+/// A point in surface units, for the plane and the region.
+pub type SurfacePoint = euclid::Point2D<f32, SurfaceSpace>;
+
+/// A size in surface units.
+pub type SurfaceSize = euclid::Size2D<f32, SurfaceSpace>;
+
+/// An offset in surface units.
+pub type SurfaceVector = euclid::Vector2D<f32, SurfaceSpace>;
+
+/// A window point from the draw value of a pointer or a rect corner.
+#[must_use]
+pub const fn window_point(point: Vec2) -> WindowPoint {
+    WindowPoint::new(point.x, point.y)
+}
+
+/// A surface point from the draw value of a rect corner.
+#[must_use]
+pub const fn surface_point(point: Vec2) -> SurfacePoint {
+    SurfacePoint::new(point.x, point.y)
+}
+
+/// The draw value of a window point, which the draw and the `f` hit test take.
+#[must_use]
+pub const fn draw_window(point: WindowPoint) -> Vec2 {
+    Vec2::new(point.x, point.y)
+}
+
 /// An axis-aligned rectangle in window pixels.
 ///
 /// The origin gives the top-left corner, and `y` grows down.
