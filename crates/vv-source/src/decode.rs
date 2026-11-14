@@ -14,7 +14,7 @@
 use std::path::Path;
 
 use vv_core::dim::{ImgH, ImgW};
-use vv_pixels::{DecodeError, DecodedImage, cap_texture_side};
+use vv_pixels::{DecodeError, DecodedImage, cap_texture_side, rgba_from_samples};
 
 use crate::{sign, svg};
 
@@ -34,12 +34,13 @@ pub fn decode_jxl(path: &Path) -> Result<DecodedImage, DecodeError> {
 }
 
 /// Convert a jxl-oxide framebuffer to RGBA8.
-/// The framebuffer holds f32 samples and 1 to 4 interleaved channels.
 ///
-/// The code replicates grayscale (1 channel) into R, G and B.
-/// Gray plus alpha (2 channels) also takes alpha from channel 1.
-/// RGB (3 channels) gets alpha = 1.
-/// The code takes RGBA (4 channels) as is.
+/// The framebuffer holds f32 samples and 1 to 4 interleaved channels, and
+/// [`rgba_from_samples`] owns the conversion: grayscale replicates into R, G
+/// and B, gray plus alpha takes its alpha from channel 1, and RGB or RGBA pass
+/// through.
+/// The thumbnail cache decodes its own codestream through the same function,
+/// so an entry and a file decode one way.
 ///
 /// The function applies [`cap_texture_side`], so the result is uploadable as
 /// is, like [`decode_common`].
@@ -49,39 +50,14 @@ pub fn decode_jxl(path: &Path) -> Result<DecodedImage, DecodeError> {
 ///
 /// The function errors when the framebuffer holds an unexpected channel
 /// count.
+#[must_use = "a decode that nobody reads only costs time"]
 pub fn fb_to_rgba(fb: &jxl_oxide::FrameBuffer) -> Result<DecodedImage, DecodeError> {
-    let width = ImgW::new(fb.width() as u32);
-    let height = ImgH::new(fb.height() as u32);
-    let channels = fb.channels();
-    let samples = fb.buf();
-    if !matches!(channels, 1..=4) {
-        return Err(DecodeError::Channels(channels as u32));
-    }
-
-    let mut rgba = vec![0u8; width.raw() as usize * height.raw() as usize * 4];
-    for (dst, src) in rgba
-        .as_chunks_mut::<4>()
-        .0
-        .iter_mut()
-        .zip(samples.chunks_exact(channels))
-    {
-        let g = to_u8(src[0]);
-        dst[0] = g;
-        dst[1] = if channels >= 3 { to_u8(src[1]) } else { g };
-        dst[2] = if channels >= 3 { to_u8(src[2]) } else { g };
-        dst[3] = if channels == 2 || channels == 4 {
-            to_u8(src[channels - 1])
-        } else {
-            255
-        };
-    }
-    Ok(cap_texture_side(DecodedImage::from_exact(
-        width, height, rgba,
-    )))
-}
-
-const fn to_u8(v: f32) -> u8 {
-    (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+    rgba_from_samples(
+        ImgW::new(fb.width() as u32),
+        ImgH::new(fb.height() as u32),
+        fb.channels(),
+        fb.buf(),
+    )
 }
 
 /// Decode common formats (PNG, JPEG, ...) with the `image` crate.
@@ -142,19 +118,6 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-
-    // Compile-time check that this stays const-evaluable.
-    const _: u8 = to_u8(0.5);
-
-    #[test]
-    fn to_u8_clamps_and_rounds() {
-        assert_eq!(to_u8(0.0), 0);
-        assert_eq!(to_u8(1.0), 255);
-        assert_eq!(to_u8(-5.0), 0);
-        assert_eq!(to_u8(42.0), 255);
-        assert_eq!(to_u8(0.5), 128); // 0.5 * 255 + 0.5 = 128
-        assert_eq!(to_u8(1.0 / 255.0), 1);
-    }
 
     #[test]
     fn fb_to_rgba_replicates_grayscale() {

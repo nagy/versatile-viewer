@@ -1,4 +1,24 @@
-//! On-disk thumbnail cache under `$XDG_CACHE_HOME`.
+// Pixel and coordinate math lives in f32 (window and source units) and
+// indices in usize and u32.
+// The casts between them belong to that boundary.
+// Every value here (window pixels, texture dimensions) stays far below
+// the f32 exact-integer range.
+// The pedantic cast lints are therefore noise.
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::similar_names
+)]
+
+//! The on-disk cache of versatile-viewer, under `$XDG_CACHE_HOME`.
+//!
+//! The crate holds both entry kinds the viewer derives from a source file: the
+//! grid thumbnails (`vv/thumbnails`) and the answers of a converter rule
+//! (`vv/converted`).
+//! It sits below both consumers, so `vv-source` stores a converted answer and
+//! `vv-view` stores a grid thumb through one type, and no edge points back up.
 //!
 //! The cache keeps the grid thumbnails of a whole directory on disk, so a
 //! second launch of the same directory uploads textures instead of decoding
@@ -9,8 +29,8 @@
 //! The content carries the source stamp (length and modification time) and
 //! the image dimensions in a fixed header, so a changed source file never
 //! shows a stale thumbnail.
-//! A vector source stores its base raster size there (see [`crate::svg`]),
-//! because the file declares no pixel size of its own.
+//! A vector source stores its base raster size there, because the file
+//! declares no pixel size of its own.
 //! The header also carries the [`Placeholder`] of the thumbnail: a `ThumbHash`
 //! of at most 32 bytes.
 //! A launch reads that header only (see [`Cache::load_placeholder`]), so a
@@ -47,9 +67,12 @@ use std::{
 
 use derive_more::{Display, Error, From};
 use sha2::{Digest, Sha256};
+// The layers below, named through this crate as well, so one `crate::dim` path
+// serves a module of this crate and a caller of it.
+pub use vv_core::dim;
+pub use vv_pixels::{DecodedImage, MAX_TEXTURE_SIDE, placeholder, rgba_from_samples};
 
 use crate::{
-    DecodedImage,
     dim::{ImgH, ImgW, LongSide},
     placeholder::Placeholder,
 };
@@ -344,10 +367,10 @@ impl Cache {
 
     /// The converted answer of `key`, when one is stored.
     ///
-    /// The answer is an SVG document or a PDF, and [`crate::convert`] decides
-    /// by its head, so the entry carries no kind.
-    /// The key is the one [`crate::convert`] builds from the argv and the
-    /// source bytes, so a changed rule or a changed source misses.
+    /// The answer is an SVG document or a PDF, and the converter table of
+    /// `vv-source` decides by its head, so the entry carries no kind.
+    /// The key is the one that table builds from the argv and the source
+    /// bytes, so a changed rule or a changed source misses.
     /// The call reads the whole payload, which a diagram or a short document
     /// keeps at a few hundred kilobytes.
     /// Run this on a decode worker, never on the main thread.
@@ -640,13 +663,22 @@ fn decode_entry(bytes: &[u8], stamp: &Stamp, path: &Path) -> Result<CachedThumb,
 ///
 /// A truncated or damaged codestream answers [`CacheError::Corrupt`], so the
 /// grid decodes the source instead.
+/// The samples take the same [`rgba_from_samples`] path a JPEG XL file takes,
+/// so an entry and a source convert one way.
 /// The decode runs on a decode worker, never on the main thread.
 fn decode_codestream(codestream: &[u8]) -> Result<DecodedImage, CacheError> {
     let image = jxl_oxide::JxlImage::builder()
         .read(codestream)
         .map_err(|_| CacheError::Corrupt)?;
     let render = image.render_frame(0).map_err(|_| CacheError::Corrupt)?;
-    crate::fb_to_rgba(&render.image_all_channels()).map_err(|_| CacheError::Corrupt)
+    let fb = render.image_all_channels();
+    rgba_from_samples(
+        ImgW::new(fb.width() as u32),
+        ImgH::new(fb.height() as u32),
+        fb.channels(),
+        fb.buf(),
+    )
+    .map_err(|_| CacheError::Corrupt)
 }
 
 /// A cursor over the fixed header, which keeps the reads bounds checked.

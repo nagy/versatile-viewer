@@ -1,6 +1,9 @@
 # Split one crate into a workspace of layers
 
 Status: accepted. Implemented on the tree that carries this record.
+Amended by ADR 0005: the thumbnail cache later left `vv-source` into
+`vv-cache`, so the chart below carries one more node between `vv-pixels` and
+`{vv-source, vv-view}`, and the tree holds seven libraries.
 
 ## Context
 
@@ -41,6 +44,9 @@ vv-view    -> vv-core vv-pixels vv-gpu vv-source
 vv-mcp     (no dependency)
 vv-cli     -> vv-core vv-gpu vv-mcp vv-view (+ vv-source in tests)
 ```
+
+ADR 0005 lifted the thumbnail cache out of `vv-source` afterwards, into
+`vv-cache` over `vv-core` and `vv-pixels`.
 
 The grouping answers the cycles instead of breaking them. Every mutual pair of
 the old crate lands inside one new crate, so no trait moved and no call site

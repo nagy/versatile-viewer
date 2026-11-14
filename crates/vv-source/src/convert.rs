@@ -67,7 +67,7 @@
 //!
 //! The converted answer caches under the XDG cache home, keyed by the source
 //! bytes and the argv, because a grid decode and an image view open the same
-//! file twice (see [`crate::thumbcache`]).
+//! file twice (see `vv_cache::Cache`).
 //! A rule change therefore invalidates every entry of that rule.
 //!
 //! The table lives in a process-wide [`LazyLock`], because a decode runs deep
@@ -250,7 +250,7 @@ pub struct Converters {
     /// The conversions that run at one time.
     slots: Slots,
     /// The converted SVG entries.
-    cache: crate::thumbcache::Cache,
+    cache: vv_cache::Cache,
 }
 
 impl Default for Converters {
@@ -274,7 +274,7 @@ impl Converters {
         Self {
             rules,
             slots: Slots::new(slots),
-            cache: crate::thumbcache::Cache::new(),
+            cache: vv_cache::Cache::new(),
         }
     }
 
@@ -293,7 +293,7 @@ impl Converters {
     #[must_use]
     pub fn with_cache_dir(self, dir: &Path) -> Self {
         Self {
-            cache: crate::thumbcache::Cache::in_dir(dir),
+            cache: vv_cache::Cache::in_dir(dir),
             ..self
         }
     }

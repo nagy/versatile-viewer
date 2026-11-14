@@ -8,24 +8,27 @@ The binary name is `vv`.
 
 ## Workspace
 
-The tree is a cargo workspace of six libraries and one binary.
+The tree is a cargo workspace of seven libraries and one binary.
 The root `Cargo.toml` holds no package: it declares `members = ["crates/*"]`, `resolver = "3"`, `[workspace.package]` and `[workspace.lints.clippy]`, and every member inherits both tables.
 `[workspace.package]` carries the version, the edition, `rust-version` (1.88, the floor of the slice API), the license, the repository and `publish = false`, so a member repeats none of them.
 No `[workspace.dependencies]` table exists: a member declares its own dependencies beside their why-comments, so a comment never drifts from the crate that reads the dependency.
 
 ```
 crates/vv-core/    dim draw region region_sel rotate tween keyrepeat, the shared constants
-crates/vv-pixels/  DecodedImage, resample_rgba, cap_texture_side, error, placeholder
+crates/vv-pixels/  DecodedImage, resample_rgba, cap_texture_side, rgba_from_samples, error, placeholder
+crates/vv-cache/   Cache, CacheError, CachedThumb, WRITE_BUDGET (thumbnails and converted answers)
 crates/vv-gpu/     gpu render texture
-crates/vv-source/  sign surface svg pdf book convert thumbcache decode
+crates/vv-source/  sign surface svg pdf book convert decode
 crates/vv-view/    input zoomkeys pane blurbg loader grid view viewer
 crates/vv-mcp/     mcp
 crates/vv-cli/     main.rs (bin vv), tests/, examples/
 ```
 
-The edges run one way: `vv-core` <- `vv-pixels` <- {`vv-gpu`, `vv-source`} <- `vv-view` <- `vv-cli`, and `vv-mcp` stands alone.
+The edges run one way: `vv-core` <- `vv-pixels` <- {`vv-gpu`, `vv-cache`, `vv-source`} <- `vv-view` <- `vv-cli`, and `vv-mcp` stands alone.
 A module therefore never names a layer above it, and the compiled graph carries no cycle.
 `vv-source` holds no wgpu and no winit, so the whole `Surface` API runs headless.
+`vv-cache` holds the two derived entry kinds of the viewer (grid thumbnails and converted answers), so the decoder layer and the view layer store through one type and neither owns the other's disk format.
+ADR 0005 records the cache split, and ADR 0004 records the layers around it.
 `crates/vv-cli` holds no library target, so the binary, its two integration tests and its two examples import each layer by its own crate name (`vv_view::viewer`, `vv_gpu::gpu`), and no facade crate sits between them.
 
 A crate root re-exports the lower modules it names in its own API (`pub use vv_core::{dim, draw}` and friends), so a module writes `crate::dim::ImgW` and the intra-crate path never spells the crate name.
@@ -100,7 +103,8 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   One `GRACE` (2 s) deadline covers both reader pipes together and never one period apiece, so a lingering helper costs the worker 2 s and not 4 s.
   The reader threads share their buffer (`PipeBytes`) with the worker, so `bytes_until` takes the bytes that arrived when that deadline passes: a pipe a grandchild keeps open costs no picture.
   A failure of any kind becomes `SurfaceError::Render` with the program name and the exit code or the stderr head, and a program that cannot start becomes `SurfaceError::Unsupported`.
-  The converted answer caches at `$XDG_CACHE_HOME/vv/converted/<key>.conv`, keyed by `KEY_VERSION` + the argv + the source bytes (`Cache::load_converted`, `Cache::store_converted`), because a grid decode and an image view open of one file run the conversion twice; the entry carries no kind, because `surface` sniffs the head, the payload counts against `thumbcache::WRITE_BUDGET`, a failed store stays silent like `grid::store_thumb`, and a key change invalidates an entry, so no `FORMAT` bump is necessary.
+  The converted answer caches at `$XDG_CACHE_HOME/vv/converted/<key>.conv`, keyed by `KEY_VERSION` + the argv + the source bytes (`Cache::load_converted`, `Cache::store_converted`, from `vv-cache`), because a grid decode and an image view open of one file run the conversion twice; the entry carries no kind, because `surface` sniffs the head, the payload counts against `vv_cache::WRITE_BUDGET`, a failed store stays silent like `grid::store_thumb`, and a key change invalidates an entry, so no `FORMAT` bump is necessary.
+  `crates/vv-source/src/convert.rs` hashes that key itself with `sha2`, because the key format belongs to the converter seam and `vv-cache` sees an opaque string.
 - Every showable source is a `crates/vv-source/src/surface.rs` `Surface`: `plane_count`, `bounds`, `render_whole`, `render`, `progressive` and `previews`.
   `open_surface` sniffs the content with `crates/vv-source/src/sign.rs` and picks the backend: a raster file (`ImageSurface`), a vector file (`VectorSurface`), a PDF (`PdfSurface`) or a path a converter rule claims (`crates/vv-source/src/convert.rs`, which runs the rule and opens its answer).
   A backend writes `render_whole`; `render` is a provided method that renders the whole plane and crops the region out of it.
@@ -179,7 +183,7 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   Property tests are dev-only and never gate a release build.
   The `region` proptests keep `failure_persistence` off, so no `proptest-regressions/` entry exists: a saved case becomes a plain `#[test]` beside the strategies, with its shrunk values written out.
 - Public error types derive `derive_more::{Display, Error, From}` (feature `from` on).
-  Each module owns its error enum: `crates/vv-pixels/src/error.rs` (`DecodeError`), `crates/vv-source/src/sign.rs` (`SignError`), `crates/vv-source/src/surface.rs` (`SurfaceError`), `crates/vv-source/src/pdf.rs` (`PdfError`), `crates/vv-view/src/grid.rs` (`GridError`), `crates/vv-view/src/loader.rs` (`LoadError`), `crates/vv-mcp/src/mcp.rs` (`SpawnError`), `crates/vv-source/src/thumbcache.rs` (`CacheError`), `crates/vv-source/src/convert.rs` (`ConvertError`, the rule table of the config file).
+  Each module owns its error enum: `crates/vv-pixels/src/error.rs` (`DecodeError`), `crates/vv-source/src/sign.rs` (`SignError`), `crates/vv-source/src/surface.rs` (`SurfaceError`), `crates/vv-source/src/pdf.rs` (`PdfError`), `crates/vv-view/src/grid.rs` (`GridError`), `crates/vv-view/src/loader.rs` (`LoadError`), `crates/vv-mcp/src/mcp.rs` (`SpawnError`), `crates/vv-cache/src/lib.rs` (`CacheError`), `crates/vv-source/src/convert.rs` (`ConvertError`, the rule table of the config file).
   `crates/vv-source/src/convert.rs` keeps the same split for the conversion: a failed or timed-out program, a flood past its output cap and an answer that is neither a PDF nor an SVG document become `SurfaceError::Render`, and a source past its cap or a program that cannot start becomes `SurfaceError::Unsupported`. Its own `ConvertError` covers the rule table alone, and that never reaches a surface.
   `main.rs` keeps `anyhow`.
 - Wrap raw pixel and window primitives in the `crates/vv-core/src/dim.rs` newtypes (`ImgW`, `ImgH`, `WinW`, `WinH`, `LongSide`, `PreviewPx`, `Delay`, `Rate`, `RampTime`, `Rect`).
@@ -226,8 +230,9 @@ The `pub use` line also carries what the public API names, so a caller reaches o
 - The image view zooms with `+`/`-` and with `Ctrl+j`/`Ctrl+k` (in, out), all as held states.
   A held Ctrl turns the pan keys into zoom keys, so it guards the pan flags of `NavKeys`.
   The grid keeps `Ctrl+j`/`Ctrl+k` as plain selection moves.
-- The grid caches its thumbnails on disk through `xdg` under `$XDG_CACHE_HOME/vv/thumbnails`.
-  The cache is not optional: `xdg`, `sha2` and `jixel` stay plain dependencies, and no feature guards the module.
+- The grid caches its thumbnails on disk through `crates/vv-cache/src/lib.rs` (`Cache`) under `$XDG_CACHE_HOME/vv/thumbnails`.
+  The cache is not optional: `xdg`, `sha2` and `jixel` stay plain dependencies of `vv-cache`, and no feature guards the crate.
+  `vv-source` and `vv-view` each name the crate (`pub use vv_cache as cache;`), so `crate::cache::Cache` reads the same in both.
   `VV_CACHE=0` turns the cache off for one run, so every launch decodes every file.
   One constant sizes the runtime thumb and the entry: `THUMB_LONG_SIDE` (512).
   A warm cell and a cold one therefore match, because a decode resizes once to the entry size and a cache write copies no pixels.
@@ -235,7 +240,7 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   The flag reaches the whole-image texture and the region patches only.
   An entry holds a fixed header and a JPEG XL codestream, so a 512 px thumb costs tens of kilobytes instead of one megabyte of RGBA8.
   The encode is `jixel`, pure Rust (BSD-3-Clause OR Apache-2.0), lossy at `QUALITY` (95) with `ALPHA_DISTANCE` 0, so only the alpha channel stays exact.
-  The decode is the same `jxl-oxide` the viewer uses for a file.
+  The decode is the same `jxl-oxide` the viewer uses for a file, and both entry decode and file decode share `rgba_from_samples` (`crates/vv-pixels/src/lib.rs`), so one conversion serves the framebuffer of each.
   Both run on a decode worker.
   A `FORMAT` bump rejects every old entry, so a payload change needs no migration.
   The decode worker reads the cache first and decodes only on a miss, then stores the new thumbnail.

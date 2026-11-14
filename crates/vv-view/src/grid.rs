@@ -68,12 +68,12 @@ use winit::{event::MouseButton, keyboard::KeyCode};
 use crate::{
     DIM_TINT, DecodedImage,
     blurbg::{self},
+    cache::Cache,
     dim::{ImgH, ImgW, LongSide, Rect, WinH, WinW},
     draw::{Color, Turn, Vec2},
     render::Renderer,
     surface::{Surface, SurfaceError, View, open_book_surface, open_surface},
     texture::{Filter, Ready, Texture, Uploader},
-    thumbcache::Cache,
 };
 
 /// The source of a grid cell: a file on disk, opened (and sniffed) lazily at

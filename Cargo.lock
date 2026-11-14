@@ -3301,6 +3301,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "vv-cache"
+version = "0.1.0"
+dependencies = [
+ "derive_more",
+ "jixel",
+ "jxl-oxide",
+ "sha2",
+ "tempfile",
+ "vv-core",
+ "vv-pixels",
+ "xdg",
+]
+
+[[package]]
 name = "vv-cli"
 version = "0.1.0"
 dependencies = [
@@ -3371,7 +3385,6 @@ dependencies = [
  "fontdb",
  "hayro",
  "image",
- "jixel",
  "jxl-oxide",
  "libc",
  "memmap2",
@@ -3382,9 +3395,9 @@ dependencies = [
  "tiny-skia",
  "toml",
  "usvg",
+ "vv-cache",
  "vv-core",
  "vv-pixels",
- "xdg",
 ]
 
 [[package]]
@@ -3399,6 +3412,7 @@ dependencies = [
  "proptest",
  "rayon",
  "tempfile",
+ "vv-cache",
  "vv-core",
  "vv-gpu",
  "vv-pixels",

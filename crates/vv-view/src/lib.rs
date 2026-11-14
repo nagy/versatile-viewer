@@ -41,6 +41,7 @@ pub mod zoomkeys;
 
 // The layers below, named through this crate as well, so one `crate::dim` path
 // serves a module of this crate and a caller of it.
+pub use vv_cache as cache;
 pub use vv_core::{
     DIM_LEVEL, DIM_TINT, DIM_VEIL, SHIFT_SPEED_MULTIPLIER, TAP_SLACK, dim, draw, keyrepeat, region,
     region_sel, rotate, timing_enabled, tween,
@@ -50,6 +51,4 @@ pub use vv_pixels::{
     DecodedImage, cap_texture_side, downscale_rgba, downscale_rgba_ref, error, placeholder,
     resample_rgba,
 };
-pub use vv_source::{
-    book, convert, fb_to_rgba, measure_vector, pdf, sign, surface, svg, thumbcache,
-};
+pub use vv_source::{book, convert, fb_to_rgba, measure_vector, pdf, sign, surface, svg};

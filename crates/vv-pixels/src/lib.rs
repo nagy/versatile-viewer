@@ -20,6 +20,9 @@
 //! path with Lanczos3), and [`cap_texture_side`] is the one texture budget.
 //! [`placeholder`] holds the few-byte
 //! `ThumbHash` a cache header carries.
+//! [`rgba_from_samples`] turns the f32 samples of a framebuffer into RGBA8,
+//! so the JPEG XL file decode and the thumbnail entry decode share one
+//! conversion.
 //!
 //! Every function here runs on a decode worker, never on the main thread.
 //! No decoder and no GPU handle lives here: the crates above bring their own.
@@ -148,6 +151,74 @@ fn pixel_bytes(width: ImgW, height: ImgH) -> Option<usize> {
 /// The code downscales anything larger here instead of failing the load.
 pub const MAX_TEXTURE_SIDE: u32 = 8192;
 
+/// Turn interleaved f32 samples into an RGBA8 picture.
+///
+/// A framebuffer holds its samples as f32 values in 1 to 4 interleaved
+/// channels.
+/// One channel (grayscale) replicates into R, G and B.
+/// Two channels (gray plus alpha) also take alpha from the second channel.
+/// Three channels (RGB) take alpha = 1, and four channels (RGBA) pass as they
+/// come.
+///
+/// The function applies [`cap_texture_side`], so the result is uploadable as
+/// it comes back, and it runs on a decode worker, never on the main thread.
+/// A `samples` slice shorter than `width * height * channels` leaves the rest
+/// of the picture black, and a longer one never reads past the last pixel.
+///
+/// # Errors
+///
+/// The function errors when `channels` names a count outside 1..=4.
+///
+/// # Examples
+///
+/// ```
+/// # use vv_pixels::{DecodedImage, rgba_from_samples};
+/// # use vv_pixels::dim::{ImgH, ImgW};
+/// // One gray channel replicates into R, G and B, and alpha stays opaque.
+/// let img = rgba_from_samples(ImgW::new(2), ImgH::new(1), 1, &[0.0, 0.5]).unwrap();
+/// assert_eq!(img.as_rgba(), [0, 0, 0, 255, 128, 128, 128, 255]);
+/// // Four channels pass as they come.
+/// let img = rgba_from_samples(ImgW::new(1), ImgH::new(1), 4, &[1.0, 0.0, 0.0, 0.5]).unwrap();
+/// assert_eq!(img.as_rgba(), [255, 0, 0, 128]);
+/// ```
+#[must_use = "a decode that nobody reads only costs time"]
+pub fn rgba_from_samples(
+    width: ImgW,
+    height: ImgH,
+    channels: usize,
+    samples: &[f32],
+) -> Result<DecodedImage, DecodeError> {
+    if !matches!(channels, 1..=4) {
+        return Err(DecodeError::Channels(channels as u32));
+    }
+
+    let mut rgba = vec![0u8; width.raw() as usize * height.raw() as usize * 4];
+    for (dst, src) in rgba
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(samples.chunks_exact(channels))
+    {
+        let g = to_u8(src[0]);
+        dst[0] = g;
+        dst[1] = if channels >= 3 { to_u8(src[1]) } else { g };
+        dst[2] = if channels >= 3 { to_u8(src[2]) } else { g };
+        dst[3] = if channels == 2 || channels == 4 {
+            to_u8(src[channels - 1])
+        } else {
+            255
+        };
+    }
+    Ok(cap_texture_side(DecodedImage::from_exact(
+        width, height, rgba,
+    )))
+}
+
+/// One f32 sample as a clamped, rounded `u8`.
+const fn to_u8(v: f32) -> u8 {
+    (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+}
+
 /// Downscale an RGBA8 buffer to the uploadable [`MAX_TEXTURE_SIDE`].
 ///
 /// Run this function off the main thread, where the decode runs.
@@ -195,6 +266,7 @@ pub fn cap_texture_side(image: DecodedImage) -> DecodedImage {
 /// It never upscales.
 /// The output aspect matches the input.
 ///
+/// # Examples
 /// # Examples
 ///
 /// ```
@@ -324,6 +396,52 @@ pub fn downscale_rgba_ref(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_u8_clamps_and_rounds() {
+        assert_eq!(to_u8(0.0), 0);
+        assert_eq!(to_u8(1.0), 255);
+        assert_eq!(to_u8(-5.0), 0);
+        assert_eq!(to_u8(42.0), 255);
+        assert_eq!(to_u8(0.5), 128); // 0.5 * 255 + 0.5 = 128
+        assert_eq!(to_u8(1.0 / 255.0), 1);
+    }
+
+    #[test]
+    fn rgba_from_samples_replicates_gray_and_keeps_alpha() {
+        // One gray channel: the value reaches R, G and B, and alpha stays
+        // opaque.
+        let img = rgba_from_samples(ImgW::new(2), ImgH::new(1), 1, &[0.0, 0.5]).expect("gray");
+        assert_eq!(img.as_rgba(), [0, 0, 0, 255, 128, 128, 128, 255]);
+        // Gray plus alpha: the gray value replicates, and channel 1 carries
+        // the alpha.
+        let img =
+            rgba_from_samples(ImgW::new(1), ImgH::new(1), 2, &[1.0, 0.5]).expect("gray alpha");
+        assert_eq!(img.as_rgba(), [255, 255, 255, 128]);
+        // RGB takes alpha = 1, and RGBA passes as it comes.
+        let img = rgba_from_samples(ImgW::new(1), ImgH::new(1), 3, &[1.0, 0.0, 0.0]).expect("rgb");
+        assert_eq!(img.as_rgba(), [255, 0, 0, 255]);
+        let img =
+            rgba_from_samples(ImgW::new(1), ImgH::new(1), 4, &[1.0, 0.0, 0.0, 0.5]).expect("rgba");
+        assert_eq!(img.as_rgba(), [255, 0, 0, 128]);
+    }
+
+    #[test]
+    fn rgba_from_samples_rejects_a_bad_channel_count() {
+        let err = rgba_from_samples(ImgW::new(1), ImgH::new(1), 5, &[0.0; 5]);
+        assert!(matches!(err, Err(DecodeError::Channels(5))));
+        let err = rgba_from_samples(ImgW::new(1), ImgH::new(1), 0, &[]);
+        assert!(matches!(err, Err(DecodeError::Channels(0))));
+    }
+
+    #[test]
+    fn rgba_from_samples_caps_a_tall_framebuffer() {
+        // The conversion applies the texture cap like every other decode.
+        let samples = vec![0.0f32; (MAX_TEXTURE_SIDE as usize + 1) * 4];
+        let img = rgba_from_samples(ImgW::new(1), ImgH::new(MAX_TEXTURE_SIDE + 1), 4, &samples)
+            .expect("tall");
+        assert_eq!(img.height(), ImgH::new(MAX_TEXTURE_SIDE));
+    }
 
     #[test]
     fn cap_texture_side_never_upscales_and_caps() {

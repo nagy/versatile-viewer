@@ -25,7 +25,9 @@
 //! No layer of this crate touches a GPU handle or a window, so the whole
 //! surface API runs headless.
 //! The decoder crates stay behind this seam: jxl-oxide, the `image` crate,
-//! resvg for SVG, hayro for PDF, and the cache encoder jixel.
+//! resvg for SVG, and hayro for PDF.
+//! The entries a converted source caches live in `vv-cache`, beside the grid
+//! thumbnails, so one crate owns every derived byte on disk.
 
 pub mod book;
 pub mod convert;
@@ -34,10 +36,10 @@ pub mod pdf;
 pub mod sign;
 pub mod surface;
 pub mod svg;
-pub mod thumbcache;
 
 // The layers below, named through this crate as well, so one `crate::dim` path
 // serves a module of this crate and a caller of it.
+pub use vv_cache as cache;
 pub use vv_core::{dim, draw, region};
 pub use vv_pixels::{
     DecodeError, DecodedImage, MAX_TEXTURE_SIDE, cap_texture_side, downscale_rgba,

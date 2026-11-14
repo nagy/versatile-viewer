@@ -77,27 +77,18 @@ toml = { version = "0.8.23", default-features = false, features = ["parse"] }
 # The kill of a timed-out converter, which names its whole process group by the
 # negative pid. Only the one syscall wrapper.
 libc = "0.2.191"
-# The thumbnail cache directory.
-# `get_cache_home` resolves $XDG_CACHE_HOME, and falls back to `~/.cache`.
-xdg = "3.0.0"
-# The thumbnail cache file name: SHA-256 of the canonical image path.
+# The cache key of one conversion: SHA-256 of the argv and the source bytes.
+# The key format belongs to the converter seam, so this crate hashes it and
+# hands `vv-cache` an opaque string.
 sha2 = "0.11.1"
-# Lossy JPEG XL encode for a cache entry. Pure Rust, BSD-3-Clause OR
-# Apache-2.0, so it carries no license drag.
-# It is a second JXL codebase beside jxl-oxide, which only decodes.
-# `extraslow` stays off: it pulls the perceptual metric crates, and a 512 px
-# thumbnail never needs them. The SIMD backends stay on.
-jixel = { version = "0.5.7", default-features = false, features = [
-  "avx",
-  "sse",
-] }
 derive_more = { version = "2.1.1", default-features = false, features = [
   "display",
   "error",
   "from",
 ] }
-# The layers below: the crop and the newtypes, and the pixel buffer every
-# backend answers with.
+# The layers below: the crop and the newtypes, the pixel buffer every backend
+# answers with, and the entry a converted source caches.
+vv-cache = { path = "../vv-cache" }
 vv-core = { path = "../vv-core" }
 vv-pixels = { path = "../vv-pixels" }
 

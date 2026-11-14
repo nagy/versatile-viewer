@@ -45,7 +45,9 @@ derive_more = { version = "2.1.1", default-features = false, features = [
   "from",
 ] }
 # The layers below: the geometry and the shared constants, the pixel buffer,
-# the pipeline an upload goes through, and every showable source.
+# the pipeline an upload goes through, the entry a thumb caches in, and every
+# showable source.
+vv-cache = { path = "../vv-cache" }
 vv-core = { path = "../vv-core" }
 vv-pixels = { path = "../vv-pixels" }
 vv-gpu = { path = "../vv-gpu" }

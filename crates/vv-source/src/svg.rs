@@ -588,7 +588,7 @@ mod tests {
 
     #[test]
     fn a_vector_thumbnail_round_trips_through_the_cache() {
-        use crate::thumbcache::Cache;
+        use vv_cache::Cache;
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("drawing.svg");
         std::fs::write(&path, SQUARE).expect("write");

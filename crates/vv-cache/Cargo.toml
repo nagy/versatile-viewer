@@ -1,0 +1,43 @@
+[package]
+name = "vv-cache"
+description = "The on-disk cache of versatile-viewer: thumbnails, placeholders and converted answers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Decode of a cached thumbnail codestream: the same decoder the viewer uses for
+# a JPEG XL file, so an entry and a source decode through one codebase.
+jxl-oxide = "0.12.6"
+# Lossy JPEG XL encode of a cache entry. Pure Rust, BSD-3-Clause OR
+# Apache-2.0, so it carries no license drag.
+# It is a second JXL codebase beside jxl-oxide, which only decodes.
+# `extraslow` stays off: it pulls the perceptual metric crates, and a 512 px
+# thumbnail never needs them. The SIMD backends stay on.
+jixel = { version = "0.5.7", default-features = false, features = [
+  "avx",
+  "sse",
+] }
+# The cache directory.
+# `get_cache_home` resolves $XDG_CACHE_HOME, and falls back to `~/.cache`.
+xdg = "3.0.0"
+# The entry file name: SHA-256 of the canonical source path.
+sha2 = "0.11.1"
+derive_more = { version = "2.1.1", default-features = false, features = [
+  "display",
+  "error",
+  "from",
+] }
+# The layers below: the dimension newtypes, the pixel buffer an entry decodes
+# to, and the sample conversion the entry and a JPEG XL file share.
+vv-core = { path = "../vv-core" }
+vv-pixels = { path = "../vv-pixels" }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[lints]
+workspace = true
