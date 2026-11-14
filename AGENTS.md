@@ -349,6 +349,7 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   The profile is the whole opt-level policy: no member overrides it.
 - Every cargo invocation of the flake passes `--workspace --locked`, so one derivation covers all seven members, cargo never re-fingerprints the dependency graph between the deps drv and the package drv, and a drifted lockfile fails the build instead of fetching.
   `checks.gpu` narrows to `-p vv-cli --test gpu_offscreen`, because those paints live in the binary crate.
+  A `nix build -L --rebuild .#checks.x86_64-linux.gpu` run measured that narrowing: the check recompiles the seven members and one dev dependency (`tempfile`), and no third-party crate re-fingerprints, so `--workspace` there would add every member dev dependency and buy nothing.
   `pname` stays `versatile-viewer`, so a store path matches the flake attribute that carries it.
 - `nix flake check` gates clippy (`--all-targets -- --deny warnings`), tests, treefmt, the package build and `checks.gpu` (the ignored headless paints on lavapipe).
   One test gate only: `cargo test` in `checks.default` runs the unit tests, the integration tests and the doctests, so no separate `--doc` check exists.

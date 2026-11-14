@@ -186,6 +186,13 @@
             # The paints live in the binary crate, so the member is named: the
             # test gate reads that crate alone, and the deps drv above already
             # holds every artifact it needs.
+            # A `nix build -L --rebuild .#checks.x86_64-linux.gpu` run measured
+            # that narrowing: the check recompiles the seven members and one
+            # dev dependency (`tempfile`), and no third-party crate
+            # re-fingerprints, so cargo sees the deps drv artifacts.
+            # `--workspace` here would add every member dev dependency
+            # (`proptest`, the image encoders, `x11rb`, `pollster`) and buy
+            # nothing.
             cargoExtraArgs = "-p vv-cli --locked";
             cargoTestExtraArgs = "--test gpu_offscreen -- --ignored";
             meta.description = "Versatile-viewer headless GPU paints on lavapipe";
