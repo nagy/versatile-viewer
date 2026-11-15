@@ -161,7 +161,7 @@ impl Frame {
 
     /// The plane as a crop: the whole of `img` at the origin.
     #[must_use]
-    pub fn plane(&self) -> Crop {
+    pub const fn plane(&self) -> Crop {
         crop(0.0, 0.0, self.img.width, self.img.height)
     }
 

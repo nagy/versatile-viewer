@@ -15,10 +15,12 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-# The floor the tree builds on: edition 2024 asks for 1.85, and the first
-# slice API (`as_chunks_mut` in `decode.rs` and `svg.rs`) landed in 1.88.
+# The floor the tree builds on: edition 2024 asks for 1.85, the first slice API
+# (`as_chunks_mut` in `decode.rs` and `svg.rs`) landed in 1.88, and the value
+# layer of `vv-core` stays one step of `const` through `Color::tint` and
+# `Frame::plane`, so the floor is the toolchain the flake builds with.
 # A member declares no edition or version of its own.
-rust-version = "1.88"
+rust-version = "1.99"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/nagy/versatile-viewer"
 # Nothing in this tree publishes: the workspace is one application, so every

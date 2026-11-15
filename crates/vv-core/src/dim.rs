@@ -41,7 +41,7 @@ macro_rules! uint_newtype {
 
             /// The wrapped value as `f32`.
             #[must_use]
-            pub fn as_f32(self) -> f32 {
+            pub const fn as_f32(self) -> f32 {
                 self.0 as f32
             }
         }

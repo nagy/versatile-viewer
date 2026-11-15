@@ -211,7 +211,7 @@ impl Cache {
     /// A cache with no directory, for a viewer without a home directory and
     /// for tests.
     #[must_use]
-    pub fn off() -> Self {
+    pub const fn off() -> Self {
         Self {
             dir: None,
             converted: None,

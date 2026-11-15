@@ -10,7 +10,7 @@ The binary name is `vv`.
 
 The tree is a cargo workspace of seven libraries and one binary.
 The root `Cargo.toml` holds no package: it declares `members = ["crates/*"]`, `resolver = "3"`, `[workspace.package]` and `[workspace.lints.clippy]`, and every member inherits both tables.
-`[workspace.package]` carries the version, the edition, `rust-version` (1.88, the floor of the slice API), the license, the repository and `publish = false`, so a member repeats none of them.
+`[workspace.package]` carries the version, the edition, `rust-version` (1.99, the toolchain the flake builds with), the license, the repository and `publish = false`, so a member repeats none of them.
 No `[workspace.dependencies]` table exists: a member declares its own dependencies beside their why-comments, so a comment never drifts from the crate that reads the dependency.
 
 ```
@@ -406,6 +406,9 @@ The `pub use` line also carries what the public API names, so a caller reaches o
 - `nix flake check` gates clippy (`--all-targets -- --deny warnings`), tests, treefmt, the package build and `checks.gpu` (the ignored headless paints on lavapipe).
   One test gate only: `cargo test` in `checks.default` runs the unit tests, the integration tests and the doctests, so no separate `--doc` check exists.
   `checks.package` builds the package with `doCheck = false`, because the fixup owns the rpath gate and a second `cargo test` would only repeat the suite.
+- The value layer stays `const`: `dim`'s `as_f32`, `draw::Color::tint`, `region::Frame::plane`, the `region_sel` constructors and the cache-off value answer `const fn`, so a size table or a derived color lands at compile time.
+  The workspace does not enable `clippy::missing_const_for_fn`, because it would force `const` on the accessors that read a runtime handle, a held key or a decoded texture, and a `const` body refuses a later `debug!` or `Vec` call.
+  `rust-version` is therefore the toolchain the flake builds with (`1.99`), not the oldest compiler that reads the syntax.
 ## Run
 
 Run `nix run . -- <image-path-or-directory>`.

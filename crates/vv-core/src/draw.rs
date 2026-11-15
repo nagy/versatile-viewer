@@ -92,7 +92,7 @@ impl Color {
     /// The alpha of the tint scales nothing: a dimmed cell keeps its opacity
     /// and darkens its channels, which is what a grid selection needs.
     #[must_use]
-    pub fn tint(self, tint: Self) -> Self {
+    pub const fn tint(self, tint: Self) -> Self {
         Self::new(
             mul_channel(self.r, tint.r),
             mul_channel(self.g, tint.g),

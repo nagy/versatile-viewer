@@ -86,7 +86,7 @@ impl Placeholder {
     /// A placeholder always holds at least one byte, so this answers false.
     /// It exists beside [`Self::len`], as the standard library pairing asks.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         false
     }
 

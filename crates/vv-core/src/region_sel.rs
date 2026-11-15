@@ -58,7 +58,7 @@ impl Drag {
     /// Start a span at `anchor`, which the caller already clamped into the
     /// plane.
     #[must_use]
-    pub fn new(anchor: SurfacePoint, grab: WindowPoint, square: bool) -> Self {
+    pub const fn new(anchor: SurfacePoint, grab: WindowPoint, square: bool) -> Self {
         Self {
             anchor,
             grab,
@@ -68,7 +68,7 @@ impl Drag {
 
     /// Start a move of `from`, grabbed at `anchor`.
     #[must_use]
-    pub fn moving(anchor: SurfacePoint, grab: WindowPoint, from: Crop) -> Self {
+    pub const fn moving(anchor: SurfacePoint, grab: WindowPoint, from: Crop) -> Self {
         Self {
             anchor,
             grab,
@@ -99,7 +99,7 @@ impl Drag {
     /// The rect a tap leaves behind: a move keeps the rect it grabbed, and a
     /// span commits nothing, so an empty `v` click outside the region drops it.
     #[must_use]
-    pub fn tap_rect(&self) -> Option<Crop> {
+    pub const fn tap_rect(&self) -> Option<Crop> {
         match self.press {
             VPress::Move { from } => Some(from),
             VPress::Span { .. } => None,
@@ -137,7 +137,7 @@ pub fn press(
 
 /// Clamp a source point into the plane.
 #[must_use]
-pub fn clamp(point: SurfacePoint, img: SurfaceSize) -> SurfacePoint {
+pub const fn clamp(point: SurfacePoint, img: SurfaceSize) -> SurfacePoint {
     SurfacePoint::new(
         point.x.clamp(0.0, img.width.max(0.0)),
         point.y.clamp(0.0, img.height.max(0.0)),
