@@ -80,9 +80,9 @@ pub const QUIET: Duration = Duration::from_millis(150);
 /// like the base raster the region belongs to.
 /// The unit is the plane's own: base raster pixels for an image or a vector
 /// file, and PostScript points for a document page.
-/// [`SurfaceSpace`] tags the type, so a window rect never passes where a crop
-/// belongs, and the surface `View` carries this same type, so the view and a
-/// backend pass one value and never convert between two rect shapes.
+/// [`crate::dim::SurfaceSpace`] tags the type, so a window rect never passes
+/// where a crop belongs, and the surface `View` carries this same type, so the
+/// view and a backend pass one value and never convert between two rect shapes.
 pub type Crop = euclid::Rect<f32, crate::dim::SurfaceSpace>;
 
 /// A crop rect from its top-left corner and its size.

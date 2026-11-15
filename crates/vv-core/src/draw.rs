@@ -87,10 +87,10 @@ impl Color {
     /// The sky blue of the debug grab ring.
     pub const SKYBLUE: Self = Self::new(102, 191, 255, 255);
 
-    /// This color multiplied by `tint`, channel by channel.
+    /// This color multiplied by `tint`, channel by channel, alpha included.
     ///
-    /// The alpha of the tint scales nothing: a dimmed cell keeps its opacity
-    /// and darkens its channels, which is what a grid selection needs.
+    /// A grid selection multiplies with the opaque [`crate::DIM_TINT`], so a
+    /// dimmed cell keeps its opacity and darkens its channels alone.
     #[must_use]
     pub const fn tint(self, tint: Self) -> Self {
         Self::new(

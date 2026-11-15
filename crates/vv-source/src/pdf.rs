@@ -45,7 +45,7 @@ use crate::{
 
 /// Pixel budget for one render.
 /// A huge page at a deep zoom could otherwise ask for gigabytes.
-/// About 67 MP is 256 MB of RGBA8.
+/// About 25 MP is 100 MB of RGBA8.
 /// A clamped render is smaller than the request, and the returned scale
 /// tells the truth, so the view upscales the short texture on the GPU
 /// instead of stretching a wrong one.

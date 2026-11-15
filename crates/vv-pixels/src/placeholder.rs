@@ -11,7 +11,8 @@
 //! The crate is `thumbhash` (MIT, pure Rust, no dependencies).
 //!
 //! Encode and render both run on a decode worker, never on the main thread.
-//! The main thread uploads the rendered texture.
+//! The worker that renders the image uploads its texture, so the main thread
+//! copies no pixels.
 //!
 //! The placeholder is a cosmetic hint, so every failure answers `None` and
 //! the grid keeps its plain grey cell.
@@ -114,7 +115,7 @@ impl Placeholder {
     /// The code renders the DCT at its natural size and upscales it to
     /// [`RENDER_LONG_SIDE`], so the GPU bilinear filter smooths a 64 px source
     /// and not the raw 32 px grid.
-    /// Run this on a decode worker, then upload the result on the main thread.
+    /// Run this and the upload of its texture on one decode worker.
     #[must_use]
     pub fn render(&self) -> Option<DecodedImage> {
         let (w, h, rgba) = thumbhash::thumb_hash_to_rgba(self.as_bytes()).ok()?;

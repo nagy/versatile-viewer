@@ -1,16 +1,17 @@
-//! Auto-repeat for the keys the viewer handles manually (nav keys, grid
-//! moves).
+//! Auto-repeat for the keys the image view steps with: next/previous and the
+//! mouse side buttons.
 //!
-//! Raylib reports key presses as edges only.
-//! `IsKeyPressed` fires once per physical press.
-//! Raylib discards GLFW repeat events.
-//! Holding a key then does nothing.
-//! This module reimplements the X server auto-repeat on top of
-//! `IsKeyDown`.
-//! It uses the same delay and rate values that `xset r rate` configures.
+//! A discrete step must repeat while its key stays down, and the X server
+//! repeats only the key that went down last, so a hold of two keys cannot ride
+//! one platform repeat. The mouse side buttons repeat nothing at all.
+//! This module keeps one schedule per key, from the delay and rate values that
+//! `xset r rate` configures, so each held key fires on its own clock.
 //! The module reads these values once from `xset q`.
 //! It falls back to the Xorg defaults (660 ms delay, 20 repeats/s) when it
 //! cannot read them (Wayland, no X).
+//!
+//! The grid selection steps on the platform repeat flag instead, because a
+//! selection step is a one-shot move and reads one key alone.
 
 use std::{process::Command, sync::OnceLock, time::Duration};
 
@@ -35,10 +36,10 @@ pub struct RepeatState {
 impl RepeatState {
     /// Feed this key's state once per frame.
     ///
-    /// `edge`: the raw event queue reports the key press this frame.
-    /// `IsKeyPressed` can miss taps that fit inside one frame.
+    /// `edge`: the press event of this frame reports the key, which catches a
+    /// tap that begins and ends inside one frame.
     /// `down`: the key is held now.
-    /// `now`: the value from `rl.get_time()`.
+    /// `now`: the viewer's clock, in seconds since it started.
     /// The function returns true exactly when the action fires.
     /// It fires on the initial press.
     /// It then fires every 1/rate seconds after the hold outlasts the delay.
@@ -143,7 +144,7 @@ mod tests {
     #[test]
     fn repeat_press_release_within_one_frame() {
         // Edge caught by the event queue fires once even though the key is
-        // already up when polled (IsKeyDown false).
+        // already up when the frame polls it.
         let mut st = RepeatState::default();
         assert!(st.tick(
             true,

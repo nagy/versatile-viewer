@@ -765,7 +765,8 @@ impl Viewer {
         let win_w = size.0 as f32;
         let win_h = size.1 as f32;
         // Post-drag restore: verify the warp landed where the code sent it.
-        // If a competing re-warp (GLFW, WM, XWayland) moved it, snap again.
+        // If a competing re-warp (the window manager, XWayland) moved it, snap
+        // again.
         // The code gives up after a few tries so a user moving the mouse is
         // never pinned.
         if let Some(target) = self.pending_restore {
@@ -827,8 +828,8 @@ impl Viewer {
         // While the image view still waits for its own decode, only the
         // open entry decodes and the code pauses the rest of the queue, so
         // the visible image gets all the cores.
-        // load_pending drains finished decodes (texture uploads happen here,
-        // on the main thread) and dispatches new ones to the rayon pool.
+        // load_pending drains finished decodes (each decode worker uploads its
+        // own texture) and dispatches new ones to the rayon pool.
         let plan = if self.st.mode == Mode::Image {
             match self
                 .st
@@ -879,7 +880,8 @@ impl Viewer {
         }
 
         // Image mode: drain the streaming loader first.
-        // Texture uploads need the main thread.
+        // The loader uploads every frame on its own worker, so this only takes
+        // the result.
         if self.st.mode == Mode::Image {
             let mut open_failed: Option<String> = None;
             // Waiting on a the grid decode (no streaming loader for this open).
@@ -2028,8 +2030,8 @@ impl Viewer {
 
         // The visible-region patch of a vector file: adopt a parsed source and
         // a finished paint, then repaint once the view holds still.
-        // The upload needs the main thread, and the request reads the scale
-        // and the pan of this frame.
+        // The request reads the scale and the pan of this frame, and the worker
+        // uploads the patch it paints.
         if self.st.mode == Mode::Image {
             self.st.drain_crops();
             self.st

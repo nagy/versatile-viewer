@@ -28,8 +28,9 @@
 //!
 //! Decoding runs on the shared rayon pool, so several files decode in
 //! parallel.
-//! The main thread only drains finished decodes and uploads textures.
-//! Texture uploads need the GL context.
+//! The main thread only drains finished decodes.
+//! A decode worker uploads its own texture through `texture::Uploader`, because
+//! `wgpu::Queue` is `Send + Sync`, so no pixel copy lands on the main thread.
 //! The code dispatches jobs priority-first.
 //! The neighbors of whatever is on screen (grid selection, or the open image
 //! in image view) decode before the rest.

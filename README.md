@@ -248,7 +248,7 @@ container, pane).
 |mouse wheel          |scroll (when zoomed in)     |free zoom (25% steps, anchored)|
 |mouse side buttons   |—                           |next / previous image          |
 |left-drag            |blockwise visual selection (`Ctrl+v` style)|pan                  |
-|click / click        |select / open               |—                              |
+|click / click again  |select / open               |—                              |
 
 `Esc` never quits the program.
 

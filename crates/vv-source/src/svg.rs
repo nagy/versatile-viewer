@@ -250,8 +250,8 @@ fn guard(w: f32, h: f32) -> Size {
 
 /// Convert premultiplied RGBA to straight alpha, in place.
 ///
-/// `tiny-skia` paints premultiplied, and raylib blends straight alpha, so the
-/// upload needs this pass.
+/// `tiny-skia` paints premultiplied, and the pipeline blends straight alpha, so
+/// the upload needs this pass.
 /// A fully transparent pixel becomes all zero.
 fn demultiply(data: &mut [u8]) {
     for px in data.as_chunks_mut::<4>().0 {

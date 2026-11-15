@@ -60,7 +60,7 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   One PDF page is one plane, and the natural unit is the PostScript point (1 pt = 1 px at scale 1.0), so `bounds` answers from a page-size table captured once at open time.
   `open_surface` routes on the `%PDF-` magic, so a misnamed file still opens.
   hayro 0.9 renders through an arbitrary `kurbo::Affine` (`render_into`), so the backend overrides `render` as a region anchor: it translates the requested rect to the origin and rasterizes only those pixels.
-  A single render caps at `MAX_RENDER_PIXELS` (about 67 MP) and `MAX_RENDER_SIDE` (65535), and the returned scale is the clamped one.
+  A single render caps at `MAX_RENDER_PIXELS` (about 25 MP) and `MAX_RENDER_SIDE` (65535), and the returned scale is the clamped one.
   `previews` and `can_refine` answer true, so a coarse preview lands first and the image view repaints the window patch over a rested zoom.
   A document opens as a book, so the loader paints its first spread first (see the book section below).
   Every render runs in `catch_unwind`, because a young rasterizer can panic on a malformed page and the job runs on a pool thread: a panic becomes `SurfaceError::Render`, never a crash.
@@ -74,8 +74,8 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   `render` converts the request back to points, walks only the spreads the rect touches, and asks each page for its own part at one shared scale.
   `Surface::open_box` names the box a fresh open frames: a book answers its first spread, every other source answers `None`.
   The fit measures that box, so whichever side binds decides and the cover page shows whole.
-  A fit centers the whole plane, so `ViewState::align_open_box` holds the pan on `main.rs` `top_pan` until the user moves the view: the align repeats every frame, because a window manager often resizes the window right after it maps and a resize re-fits the scale.
-  `ViewState::open_pan` records the pan the align wrote, so a pan or a target that moved away from it marks a user move and the align stops.
+  A fit centers the whole plane, so `ViewState::align_open_box` holds the pan on `ViewState::top_pan` (`crates/vv-view/src/view.rs`) until the user moves the view: the align repeats every frame, because a window manager often resizes the window right after it maps and a resize re-fits the scale.
+  `ViewState::open_align` (an `OpenAlign::Holding`) records the pan the align wrote, so a pan or a target that moved away from it marks a user move and the align stops.
   `ViewState::refit_open` arms the same framing again when the loader header or the first frame brings the real plane size.
   `open_book_surface` wraps when the source holds two planes or more; the grid thumbnail keeps the plain `open_surface`, so a cell shows page 0 and never a second page.
   A book holds every page in one plane, so a whole-plane render interprets every page and its cost grows with the page count: a 20-page A4 document costs about 250 ms at scale 1.0, and still about 177 ms at a coarse preview scale, because the interpreter dominates the rasterizer.
@@ -133,7 +133,7 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   `crates/vv-core/src/region.rs` holds the pure geometry and policy: `Frame` (`to_screen`, `to_image`, `crop`, `plane`), `Crop`, `Patch`, `worth_painting`, `patch_reaches_window`, `patch_covers_at_scale`, `MARGIN`, `SCALE_SLACK`, `QUIET`.
   `Frame` keeps `img: SurfaceSize`, `win: WindowSize` and `pan: WindowVector`, `to_screen` takes a `SurfacePoint` and answers a `WindowPoint`, and `to_image` inverts that, so the one conversion pair of the view carries the space of each side.
   `patch_reaches_window` reads the two rects alone and answers whether the painted rect reaches every source pixel the window shows; the draw asks it (`patch_covers` in `crates/vv-view/src/view.rs`) before it skips the whole-image texture, and so does `worth_painting`.
-  `Frame` bundles one window mapping (`img`, `win`, `pan`, `scale`, `angle`), and `ViewState::frame` (`main.rs`) builds it, so a caller never re-derives the transform and never mixes window units with source units.
+  `Frame` bundles one window mapping (`img`, `win`, `pan`, `scale`, `angle`), and `ViewState::frame` (`view.rs`) builds it, so a caller never re-derives the transform and never mixes window units with source units.
   The mapping and the crop are methods of `Frame`, so no free function takes the five numbers loose and no call site can swap the scale for the angle; `ViewState::frame_at` answers the same frame for a pan the view aims at (a glide target) rather than the one on screen.
   A `Patch` is a `Crop` beside the scale its pixels were painted at, so `worth_painting` and `patch_covers_at_scale` compare two values instead of a rect and two loose scales; `CropState`, `LoadPlan`-driven prefetch state and the crop messages carry one.
   A patch covers the window plus `MARGIN` (0.25 of each side), in source pixels, so the paint area follows the window and a deep zoom costs no more pixels than a shallow one.
@@ -141,7 +141,7 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   The region rect lives in surface units: base raster pixels for a vector file (`Vector::declared_per_base` converts to the tree's declared units), points for a PDF page.
   The view repaints when it held still for `QUIET` (150 ms) and `worth_painting` pays: a scale step past `SCALE_SLACK` (1.002) or a consumed margin.
   The rule stays tight because a patch stretched by even a few percent resamples every pixel through the GPU filter, and that softening reads as blurry text.
-  A patch that still matches the view scale draws on whole window pixels and takes its painted pixel size (`patch_dest` in `main.rs`), so the bilinear sample sits on texel centers and the pixels land 1:1 on the screen.
+  A patch that still matches the view scale draws on whole window pixels and takes its painted pixel size (`patch_dest` in `view.rs`), so the bilinear sample sits on texel centers and the pixels land 1:1 on the screen.
   A turned patch, and one a zoom stretched since its paint, keep the true rect through `draw_turned`.
   One paint in flight, because resvg cannot cancel mid-paint.
   A load in flight never holds the paint back: `ViewState::tick_crop` reads `source` alone and not `view_loading`, because a book's whole-plane fallback costs one page render per page and waiting for it would hold the sharp picture back for seconds.
@@ -154,9 +154,8 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   The spread math reads only the y axis, so it takes a `Column` (`Column::new(Size, scale, win_h)`), which names the plane height, the scale and the window height instead of passing three loose floats.
   The whole-image texture (`view_tex`) stays as the fallback and draws only where the patch cannot reach (`patch_covers`), so a resize, a pan or a zoom out that outruns the repaint never shows background.
   Drawing both over the same pixels would double the alpha of an antialiased edge, so the patch hides the whole image where it covers.
-  A spread step paints the region it lands on before the glide ends: `ViewState::prefetch_spread` (`main.rs`) renders the target rect on a `rayon` worker at the press edge, so the glide never waits on it.
-  The result rides `CropMsg::Prefetch` with a `prefetch_id` token into `ViewState::prefetch`, a second `CropState` that drops when the aim moved.
-  `ViewState::prefetch_want` holds the aim still in flight, so `tick_crop` waits for it instead of starting a duplicate paint, and `PREFETCH_GIVE_UP` (3 s) bounds that wait for a worker that never answers.
+  A spread step paints the region it lands on before the glide ends: `ViewState::prefetch_spread` (`view.rs`) renders the target rect on a `rayon` worker at the press edge, so the glide never waits on it.
+  The result rides `CropMsg::Prefetch` with a `prefetch_id` token into `ViewState::prefetch`, a `Prefetch` that drops when the aim moved; its `Prefetch::Painting` holds the aim still in flight, so `tick_crop` waits for it instead of starting a duplicate paint, and `PREFETCH_GIVE_UP` (3 s) bounds that wait for a worker that never answers.
   The patch draws in place while it arrives, and `region::patch_covers_at_scale` adopts it into `crop` on the first frame that holds the window, so the landing frame skips `QUIET` and shows the sharp spread at once.
   A resize or a pan away drops it, because a patch of an aim the view left would only linger as a stretched texture.
 - Grid extension filter: `crates/vv-view/src/grid.rs` `is_image_path`, which asks `convert::rules` (`is_image_path_in`) and then the static list `is_image_extension` (also `pdf`).
@@ -216,14 +215,15 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   A borrow conflict (`E0502`, `E0499`) is fixed in the structure that the error describes, never in a clone that silences it.
   A value that must outlive a borrow and has more than one holder is an `Arc`, and its `.clone()` is the honest answer: a handle moves into a `rayon` closure, because `rayon::spawn` needs `'static`.
   `EntrySource` therefore holds an `Arc<PathBuf>` and `Job` copies it with one refcount bump, and `ViewState::source` is an `Arc<dyn Surface>` that a paint moves into a worker.
-  An mpsc `Sender` clone and a `NativeFontContext` clone are the same kind of thing: a shared handle, not a copy of the data.
+  An mpsc `Sender` clone and the font database handle (`svg::fontdb`, an `Arc<fontdb::Database>`) are the same kind of thing: a shared handle, not a copy of the data.
   `mem::replace` swaps the visual anchor, and no code clones a pixel buffer: `downscale_rgba_ref` borrows.
   A function that only reads takes `&Path`, `&str` or `&[T]`, and takes ownership only when it stores the value.
   A process-wide table is a `LazyLock` or an `OnceLock` (the embedded font list and its book, the converter rule table, the host font database, the X auto-repeat rate, the core count), because a third-party API reads it with no seam for an owner, and each static docstring names that reason.
   The one `RefCell` (`Grid::layout_cache`) is a memo of a pure function of its key, and the grid is its only owner.
 - Two motion styles, and a key picks one:
   - Auto-repeat steps a discrete move.
-    `crates/vv-core/src/keyrepeat.rs` reimplements the X rate for the grid selection and image next/previous.
+    `crates/vv-core/src/keyrepeat.rs` reimplements the X rate for image next/previous and the mouse side buttons, one schedule per key, because the X server repeats only the key that went down last and repeats no mouse button.
+    The grid selection steps on winit's repeat flag (`Input::repeated_keys`) instead, because its step is a one-shot move that reads one key alone.
   - A velocity ramp eases a continuous move.
     `crates/vv-core/src/tween.rs` ramps the speed in, holds it, and ramps it out for the image pan and the image free zoom.
     The ramp is linear, and it reads only the held state.
@@ -234,14 +234,14 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   The image view passes it as the `speed` argument of `Ramps::tick`, which scales the pan and the zoom rate but not the ramp, so the ease keeps its length at any speed.
 - A book view takes `Shift+J` / `Shift+K` as a spread step instead of a pan.
   `Page-down` / `Page-up` do the same step, so a reader who never learned the Shift pair still turns the page.
-  `ViewState::step_spread` (`main.rs`) reads the row from `Surface::spread_count` and `Surface::spread_box`, eases one spread to the top of the window with `spread_pan`, and stops there: a press past the first or the last spread does nothing.
+  `ViewState::step_spread` (`view.rs`) reads the row from `Surface::spread_count` and `Surface::spread_box`, eases one spread to the top of the window with `spread_pan`, and stops there: a press past the first or the last spread does nothing.
   The image view drops `Shift+J`/`Shift+K` from the pan while the open surface names a spread column, so those two keys step and never pan on a book.
   The press queue fires once per press, and the `spread_armed` latch in `main` needs a release of `j`, `k`, `Page-down` or `Page-up` before the next step, so a hold never chains steps.
-  The row comes from the aimed pan (`spread_row`), not the pixels on screen, so a step pressed while an earlier step still glides continues from the spread that step aimed at.
+  The row comes from the aimed pan (`Column::spread_at_top`), not the pixels on screen, so a step pressed while an earlier step still glides continues from the spread that step aimed at.
   The step glides at `SPREAD_EASE_TIME` (now the same as `EASE_TIME`) while `ViewState::spread_glide` holds the goal, and any other pan motion clears that field.
   The step also prefetches the patch of the spread it lands on (`ViewState::prefetch_spread`), so the sharp spread arrives with the glide.
   A book answers both methods from `BookSurface`, and every other source keeps the defaults (0 and `None`), so its `Shift+J`/`Shift+K` still pans at double speed.
-- Read the held state of a key that no `KeyboardKey` names by learning its keycode.
+- Read the held state of a key that no `KeyCode` constant names by learning its keycode.
   `crates/vv-view/src/zoomkeys.rs` pairs a typed `+`/`-` with the key that went down in the same frame, then the code polls that keycode.
   The X server repeats only the key that went down last, so a time window cannot stand in for the held state.
 - The image view zooms with `+`/`-` and with `Ctrl+j`/`Ctrl+k` (in, out), all as held states.
@@ -253,7 +253,7 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   `VV_CACHE=0` turns the cache off for one run, so every launch decodes every file.
   One constant sizes the runtime thumb and the entry: `THUMB_LONG_SIDE` (512).
   A warm cell and a cold one therefore match, because a decode resizes once to the entry size and a cache write copies no pixels.
-  A thumb texture is always bilinear (`grid::upload_thumb`), and the `a` key never reaches it: the cell fills with the thumb, and the image view stretches it over the image rect while the full-res decode catches up, so both draw it far larger than the texture and nearest aliases badly there.
+  A thumb always draws with `Filter::Linear` (`crates/vv-view/src/grid.rs`), and the `a` key never reaches it: the cell fills with the thumb, and the image view stretches it over the image rect while the full-res decode catches up, so both draw it far larger than the texture and nearest aliases badly there.
   The flag reaches the whole-image texture and the region patches only.
   An entry holds a fixed header and a JPEG XL codestream, so a 512 px thumb costs tens of kilobytes instead of one megabyte of RGBA8.
   The header is one `#[repr(C, packed)]` `bytemuck::Pod` struct of 81 bytes (`vv-cache` `Header`), so the file carries the bytes the toolchain lays out, one call writes it (`bytes_of`) and one call reads it (`pod_read_unaligned`), and the write side and the read side name the same fields.
@@ -345,7 +345,7 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   `Input::capture` owns the swap: while a drag holds the pointer, the raw travel moves the logical pointer and `WindowEvent::CursorMoved` is ignored, because the grab keeps the real pointer in place.
   A free pointer is the opposite: the platform position is the truth and the raw travel only accumulates for a drag that starts inside the same frame.
   That rule lives in `crates/vv-view/src/input.rs`, so a hover point never drifts by the travel since the last `CursorMoved`.
-  The pan multiplies the travel by `PAN_DRAG_SPEED` (`main.rs`, 1.0), and `VV_PAN_DRAG_SPEED` overrides it for one run.
+  The pan multiplies the travel by `PAN_DRAG_SPEED` (`view.rs`, 1.0), and `VV_PAN_DRAG_SPEED` overrides it for one run.
   The factor is a feel constant and not a geometry one: raw counts are units of the mouse, so their ratio to window pixels depends on the hardware DPI and on the desktop's pointer speed.
   1.0 moves the picture one window pixel per count, which is the feel the spike at `~/agent/versatile-viewer-wgpu-spike` picked; the raylib path multiplied the same raw travel by 2.0 (see `git bug show 94691ce`), and issue 94691ce carries the history of that number.
   `RUST_LOG=vv=debug` prints the window scale factor at startup and, at every drag release, the `speed` in use and the `travel` the drag accumulated, so a feel report carries numbers and the input source can be checked without a rebuild.
@@ -414,14 +414,14 @@ The `pub use` line also carries what the public API names, so a caller reaches o
 Run `nix run . -- <image-path-or-directory>`.
 ESC never quits.
 
-The window clears to `BACKGROUND` (`#062329`, `main.rs`).
+The window clears to `BACKGROUND` (`#062329`, `view.rs`).
 Both views share it, so the letterbox bars and the grid gaps match.
 A source that paints no paper carries it in its pixels, so no clear color ever has to follow a picture.
 
 - Keys: see the README table.
   `Space` steps forward and `Shift+Space` steps back, both as held states, so one key serves both ways.
   Shift at the press edge picks the direction, and the held state follows the same rule, so a hold repeats the way it stepped.
-- `Shift+F` hold turns vertical mouse travel into the free zoom (`ZOOM_DRAG_SPAN` in `main.rs`).
+- `Shift+F` hold turns vertical mouse travel into the free zoom (`ZOOM_DRAG_SPAN` in `view.rs`).
   Up zooms in, down zooms out.
   The hold captures the pointer like the `f` pan drag, so the travel is unbounded and the motion never stops at a screen edge.
   The zoom anchor starts at the grab point and then drifts toward the window center by the wheel rule (`ZOOM_ANCHOR_DRIFT`), so the image point being zoomed into recenters.
@@ -455,18 +455,18 @@ A source that paints no paper carries it in its pixels, so no clear color ever h
   ESC drops a region first and stays in the image view, and only an ESC with nothing to drop returns to the grid.
   A fresh open, a step to another image and a return to the grid all drop the region.
   The rect lives in source units, so `region::Frame::to_screen` maps its corners through the same transform the picture uses, and a pan, a zoom and a turn all keep it on the picture.
-  The free pointer converts back through `region::Frame::to_image`, and `selection_rect` (`main.rs`) owns that conversion for the frame draw and for the release, so the border, the veil and the committed rect never read the pointer in different units.
-  `region_sel::around` answers the four bands of the plane outside the rect, `draw_selection` (`main.rs`) paints them with one `DIM_VEIL` and draws the bright `SELECTION_BORDER` around the rect.
+  The free pointer converts back through `region::Frame::to_image`, and `selection_rect` (`view.rs`) owns that conversion for the frame draw and for the release, so the border, the veil and the committed rect never read the pointer in different units.
+  `region_sel::around` answers the four bands of the plane outside the rect, `draw_selection` (`view.rs`) paints them with one `DIM_VEIL` and draws the bright `SELECTION_BORDER` around the rect.
   The pipeline culls nothing (`cull_mode: None`), so a band draws in either winding and `draw_selection` fills the four quads of `region_sel::around` directly: the raylib triangle reversal is gone, and no helper splits a band.
   `DIM_VEIL` keeps the share of brightness that the grid's `DIM_TINT` keeps, because both read `DIM_LEVEL`, so the two views dim alike.
   The bands draw after the whole-image texture and the region patches, so the dim holds over whatever the view paints below it.
 - Shift at the `r` press edge turns the image around the mouse point (`ViewState::pivot`) instead of the image center.
-  The hold keeps the image point under that pivot on its window spot, so `rotate::pivot` shifts the pan and its target every frame, and again through the release snap (`keep_pivot` in `main.rs`).
+  The hold keeps the image point under that pivot on its window spot, so `rotate::pivot` shifts the pan and its target every frame, and again through the release snap (`keep_pivot` in `view.rs`).
   The pivot is a pan shift and not a second draw origin: the draw and the `f` hit test keep one center, the window middle plus the pan.
   A plain `r` press resets the pivot to the center, and a newly opened image resets it too.
   The hold captures and hides the pointer like a plain `r`, so the travel stays unbounded and the pivot sits under the hidden pointer at the grab point.
   A Shift+R hold therefore also doubles the pan and zoom speed, like every other Shift chord.
-- Mouse side buttons step next / previous in image view, like `n` / `p` (`read_nav_mouse` in `main.rs`).
+- Mouse side buttons step next / previous in image view, like `n` / `p` (`read_nav_mouse` in `view.rs`).
   A book holds every spread in one plane, so a step always moves to another file.
 - Env vars `RUST_LOG`, `VV_DEBUG`, `VV_TIMING`, `VV_SLOW_STREAM`, `VV_BLUR_BG`, `VV_BG_DIM`, `VV_BLUR_PX`, `VV_CACHE`, `VV_PRESENT`: see the README table.
   `VV_DEBUG` and `VV_TIMING` only pick the filter `RUST_LOG` would set, so the two never compete.

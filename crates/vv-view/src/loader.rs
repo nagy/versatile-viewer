@@ -13,7 +13,7 @@
 //! from [`Surface::bounds`] first, so the window fits the picture at once.
 //! A book is the exception: one plane holds every page, so a whole-plane
 //! render interprets every page.
-//! [`stream_book`] paints the spread the fit frames first and sends it as a
+//! `stream_book` paints the spread the fit frames first and sends it as a
 //! [`DecodeMsg::Preview`] that carries its [`region::Patch`], so the sharp open
 //! picture lands after one spread render, and the coarse whole book follows as
 //! the zoom-out fallback.
@@ -463,7 +463,8 @@ fn stream_jxl(
     img.finalize().map_err(jxl_err)?;
     let render = img.render_frame(0).map_err(jxl_err)?;
     let image = fb_to_rgba(&render.image_all_channels())?;
-    // Cap here, on the worker: the main thread uploads the buffer as is.
+    // Cap here, on the worker, before the upload, so a buffer past the texture
+    // side never reaches a texture.
     let image = cap_texture_side(image);
     let blur = blur.map(|config| config.blur(&image));
     Ok(Some(DecodeMsg::Done {

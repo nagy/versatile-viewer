@@ -12,10 +12,12 @@
 //! A one-shot action reads an edge, which [`Input::pressed_keys`] answers for
 //! one frame only.
 //!
-//! X11 auto-repeat arrives as a fresh press event with `repeat` set. raylib
-//! dropped those events, so `src/keyrepeat.rs` rebuilt the repeat rate from
-//! `xset q`. winit reports the flag, so the grid steps its selection on
-//! [`Input::repeated_keys`] and every one-shot action skips it.
+//! X11 auto-repeat arrives as a fresh press event with `repeat` set. winit
+//! reports the flag, so the grid steps its selection on [`Input::repeated_keys`]
+//! and every one-shot action skips it.
+//! The image nav keys repeat from their held state instead
+//! (`vv_core::keyrepeat`), because a hold of two keys and the mouse side
+//! buttons need one schedule per key.
 //!
 //! # A press this window saw
 //!
