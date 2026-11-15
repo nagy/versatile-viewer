@@ -114,9 +114,9 @@ the whole graph and the release build stays short.
 The flake passes `--workspace --locked` to every cargo invocation, so one
 derivation covers the whole graph, cargo never re-fingerprints it between the
 deps drv and the package drv, and a lockfile that drifted fails the build
-instead of fetching. `checks.gpu` names `-p vv-cli` alone, because the headless
-paints live in the binary crate and the deps drv already holds every artifact
-that crate needs.
+instead of fetching. The paint run narrows to `-p vv-cli`, because the headless
+paints live in the binary crate and the workspace run of that derivation already
+linked the binary.
 
 ## Alternatives
 

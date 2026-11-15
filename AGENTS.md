@@ -402,17 +402,20 @@ The `pub use` line also carries what the public API names, so a caller reaches o
 - Every cargo invocation of the flake passes `--workspace --locked`, so one derivation covers all seven members, cargo never re-fingerprints the dependency graph between the deps drv and the package drv, and a drifted lockfile fails the build instead of fetching.
   The paint run inside the test drv narrows to `-p vv-cli --test gpu_offscreen` and builds nothing, because the workspace run of that drv already linked that binary.
   `pname` stays `versatile-viewer`, so a store path matches the flake attribute that carries it.
-- `nix flake check` gates clippy (`--all-targets -- --deny warnings`), the test suite, treefmt and the package build.
+- `nix flake check` gates clippy (`--all-targets -- --deny warnings`), the test suite and treefmt.
   One test gate only: `cargo test` in `checks.default` runs the unit tests, the integration tests and the doctests, so no separate `--doc` check exists.
   The same drv runs the ignored headless paints on lavapipe as the second command of its `checkPhase`, and `checks.gpu` names that one derivation, so `nix flake check` builds it once.
   A second drv cost 83 s in release and 10 s in dev, to run sixteen tests that the first drv had already linked.
   `checkPhase` replaces crane's own phase for that reason: `cargoTest` writes `checkPhaseCargoCommand` after it merges its arguments, so a caller's value of that name never survives.
-  `checks.package` builds the package with `doCheck = false`, because the fixup owns the rpath gate and a second `cargo test` would only repeat the suite.
+- No check builds the package: `nix build .#default` is the package gate.
+  `checks.package` used to name `packages.default` again, and the two are one derivation (one store path), so the check bought no second gate and repeated the build that the packages output already holds.
+  The gates differ in what they prove. `nix flake check` builds `checks.*` alone and builds no part of `packages.*`, so the release link, `shrink-rpath`, `autoPatchelfHook` and `appendRunpaths` of the fixup belong to `nix build .#default`: a missing runtime library or a broken `DT_RUNPATH` fails there and nowhere else.
+  Run both when a change touches the build: `nix flake check` proves the tests, clippy and the formatting, and `nix build .#default` proves the shipped binary.
 - The fast gates build in the `dev` profile, and only the package builds in `release`.
   `devEnv` (`flake.nix`) sets `CARGO_PROFILE = "dev"` for the tests and clippy, because crane answers `release` when that variable stays unset, and `[profile.release]` inlines across the seven members.
-  A test binary gains nothing from that inlining: an incremental `nix flake check` after a one-line source change measured 294 s wall and about 90 min CPU with every check in release, and 74 s wall with the tests in dev.
+  A test binary gains nothing from that inlining: an incremental `nix flake check` after a one-line source change measured 294 s wall and about 90 min CPU with every check in release, and about 30 s wall with the tests in dev.
   `cargoArtifactsDev` is the second `buildDepsOnly`, because cargo keys every artifact on its profile and the dev gates cannot read the release cache.
-  The package keeps the release cache, because it ships the optimized binary, and `checks.package` (62 s, the one release build left) is the critical path of a warm `nix flake check`.
+  The package keeps the release cache, because it ships the optimized binary, and it is the one release build left in the tree.
   `CARGO_PROFILE_DEV_DEBUG` and `CARGO_PROFILE_TEST_DEBUG` stay `1`, so a failing test still names its line: full debuginfo cost 5.8 s more on that rebuild and buys no gate.
   `RUSTFLAGS` in `env` names `mold` for every cargo invocation of the flake, so the package drv and the check drvs share one flag set and the linker stops being the tail of the build.
   The devshell appends the same flag to `rpathFlags`, so `cargo build` there links as fast as a check does.

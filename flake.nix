@@ -296,9 +296,13 @@
           # one build serves both runs, so `nix flake check` builds it once.
           checks.gpu = tests;
 
-          # The package itself, so `nix flake check` catches a broken rpath or a
-          # missing runtime library and not only the test run.
-          checks.package = versatileViewer;
+          # The package itself stays out of the checks: `checks.package` and
+          # `packages.default` are one derivation, so a check of it only repeats
+          # the build that `nix build .#default` runs.
+          # The two gates differ in what they prove, and both stay reachable.
+          # `nix flake check` reads no `packages` output at all: it evaluates the
+          # attribute and builds no part of it, so the release link and the rpath
+          # gate of the fixup belong to `nix build .#default`.
 
           apps.default = {
             type = "app";
