@@ -83,6 +83,11 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   It paints `spread_box(0)` first and sends it as a `DecodeMsg::Preview` that carries `Some(region::Patch)`, so the spread the fit frames lands sharp after one spread render (about 22 ms) and the view adopts it as `ViewState::crop`.
   The coarse whole book follows as the `Done` frame at `min(preview_px / long, 1.0)`, and that texture is the fallback the patch draws over.
   A document launch renders nothing before the window either, because a book keeps the default window size: `Viewer::start_launch` starts a `Loader` for it, so the window maps at once.
+  `Surface::page_box` names the slot page `N` fills in the plane, and a book answers it (`BookSurface::page_slot`), so a caller that holds a page-sized picture can land it where the page will paint.
+  The image view draws the picture a grid cell holds while the decode catches up (`view::draw_cell`), and `view::cell_place` decides where: over the whole plane when the cell measures it (`view::same_plane`), and into `ViewState::cell_box`, page 0's slot, for a document.
+  A book's cell holds page 0 and never the whole book, so the view never stretches one page over the plane: a white page across the whole book reads as a white flash.
+  `show_entry` opens the plane, the opening box and the slot beside the loader, so the first frame frames the spread instead of easing from the cell's page fit.
+  The plane the view holds is a guess until its surface measures it, so `ViewState::tick_crop` paints only while `Surface::bounds` agrees with `ViewState::img`, and a page-sized cell never paints a patch of the page rect onto the book.
 - Compile Typst through the converter seam.
   A converter rule claims `typ` and runs the `typst` CLI with `compile --format pdf - /dev/stdout`, and the PDF answer opens in the hayro backend, so a document keeps one plane per page, its preview and its refine.
   The `typst`, `typst-layout`, `typst-pdf` and `typst-assets` crates leave the tree: no document engine links into the binary, and a Typst source stays one rule of the config file.
@@ -126,6 +131,7 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   `Surface::progressive` returns a `Box<dyn ChunkSource>` and not a path, so an in-memory or network source can stream, and the default `Ok(None)` means one step.
   `Surface::can_refine` says whether a settled zoom can yield a sharper picture of the same plane: a vector tree or a document page answers true, a raster image false.
   `Surface::spread_count` and `Surface::spread_box` name the spread column of a book (0 and `None` for every other source), so the image view steps a spread with the book's own geometry.
+  `Surface::page_box` names the slot one page of the plane fills (`None` for a source that shows one picture), so the view can land a page-sized picture where that page will paint.
   A source that paints no paper fills it into its own renders (`convert` through `VectorSurface::with_background`), never into the window clear: a window color that waits on the async source handle would flip after the picture lands, so a picture never picks the window color for itself.
   A raster plane measures the capped size it renders, so `bounds` and the pixels of a scale-1.0 render agree.
   The trait decisions live in `docs/adr/0001-surface-one-region-based-render-trait.md`.
@@ -145,6 +151,7 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   A turned patch, and one a zoom stretched since its paint, keep the true rect through `draw_turned`.
   One paint in flight, because resvg cannot cancel mid-paint.
   A load in flight never holds the paint back: `ViewState::tick_crop` reads `source` alone and not `view_loading`, because a book's whole-plane fallback costs one page render per page and waiting for it would hold the sharp picture back for seconds.
+  The paint still waits for the plane: `tick_crop` asks `Surface::bounds` and paints only while that pair agrees with `ViewState::img` (`view::same_plane`), because a grid cell measures one page of a document and a patch of that guess would land in the wrong place.
   The paint waits for its source instead, which `request_source` opens on its own worker.
   `ViewState` keeps `Arc<dyn Surface>`, the `CropState` (texture, source rect, raster scale), the pending flag and one generation counter.
   Every open, every n/p step and every return to the grid bumps that counter, so the result of a worker for an earlier image drops.

@@ -66,13 +66,12 @@ use crate::{
     render::Renderer,
     rotate,
     surface::{Size, Surface, View, open_surface},
-    texture::Filter,
     view::{
         BACKGROUND, CropState, EASE_TIME, Mode, NavKeys, OpenAlign, PAN_RATE, Prefetch,
         ROTATE_DRAG_SPAN, ROTATE_DRAG_SPEED, Ramps, SPREAD_EASE_TIME, ViewState, ZOOM_ANCHOR_DRIFT,
-        ZOOM_DRAG_SPAN, ZOOM_DRAG_SPEED, ZoomMode, aim_fill_pan, attach_blur_bg, draw_patch,
-        draw_selection, draw_turned, keep_pivot, pan_drag_speed, patch_covers, put_back_view,
-        read_nav_mouse, selection_rect, show_entry, view_filter,
+        ZOOM_DRAG_SPAN, ZOOM_DRAG_SPEED, ZoomMode, aim_fill_pan, attach_blur_bg, draw_cell,
+        draw_patch, draw_selection, draw_turned, keep_pivot, pan_drag_speed, patch_covers,
+        put_back_view, read_nav_mouse, selection_rect, show_entry, view_filter,
     },
     zoomkeys::TypedKeys,
 };
@@ -501,6 +500,7 @@ impl Viewer {
                 source: None,
                 source_plane: 0,
                 open_box: None,
+                cell_box: None,
                 open_align: OpenAlign::Free,
                 spread_glide: None,
                 prefetch: Prefetch::Idle,
@@ -588,8 +588,12 @@ impl Viewer {
             // [`crate::loader`]).
             // The view holds the surface already, so the region painter can
             // refine the spread as soon as the fit lands.
+            // The book opens without a render, so the plane and the page slot
+            // cost a header read: the first frame already frames the spread
+            // instead of easing from the launch's empty plane.
             self.st.open_box = open_box;
-            self.st.img = Size { w: 0.0, h: 0.0 };
+            self.st.img = book.bounds(0).unwrap_or(Size { w: 0.0, h: 0.0 });
+            self.st.cell_box = book.page_box(0);
             self.st.reset_view();
             self.st.view_loading = true;
             self.st.adopt_source(Some(book.clone()));
@@ -2104,37 +2108,26 @@ impl Viewer {
                         self.st.angle,
                         view_filter(self.st.pixelated),
                     );
-                } else if self.st.img.w > 0.0
-                    && let Some(g) = self.grid.as_ref()
+                } else if let Some(g) = self.grid.as_ref()
                     && let Some(id) = self.st.open_id
-                    && let Some(i) = g.index_of(id)
-                    && let Some(tex) = g
-                        .entries
-                        .get(i)
-                        // The decoded thumb first, then its few-byte
-                        // placeholder.
-                        .and_then(|e| e.cell.texture())
+                    && let Some(e) = g.index_of(id).and_then(|i| g.entries.get(i))
+                    // The decoded thumb first, then its few-byte placeholder.
+                    && let Some(tex) = e.cell.texture()
                 {
                     // No full-res frame yet (decode in flight): show the entry
                     // thumb instead of flashing black, or its ThumbHash
                     // placeholder while the thumb itself still decodes.
-                    // Both hold the whole image with the aspect preserved, so
-                    // they map 1:1 onto the image rect and the later swap to
-                    // the full-res texture is pixel-aligned.
-                    let scale = self
-                        .st
-                        .view_scale
-                        .unwrap_or((win_w / self.st.img.w).min(win_h / self.st.img.h));
-                    let center =
-                        Vec2::new(win_w / 2.0 + self.st.pan.x, win_h / 2.0 + self.st.pan.y);
-                    draw_turned(
+                    // A book's cell holds page 0 and never the whole book, so
+                    // that picture lands in the page slot (see [`draw_cell`]).
+                    draw_cell(
                         r,
+                        &self.st,
                         tex,
-                        self.st.img,
-                        scale,
-                        center,
-                        self.st.angle,
-                        Filter::Linear,
+                        Size {
+                            w: e.width.as_f32(),
+                            h: e.height.as_f32(),
+                        },
+                        Vec2::new(win_w, win_h),
                     );
                 }
             }

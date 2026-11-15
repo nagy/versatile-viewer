@@ -252,6 +252,33 @@ impl BookSurface {
         )
     }
 
+    /// The slot page `page` fills, in base units, or `None` when the document
+    /// holds no such page.
+    ///
+    /// The page centers in its slot and keeps its own size, so the box is the
+    /// one [`Self::paint`] draws it in: the caller that holds a page-sized
+    /// picture can put it where the page will land.
+    #[must_use]
+    fn page_slot(&self, page: usize) -> Option<Crop> {
+        if page >= self.inner.plane_count() {
+            return None;
+        }
+        let cover = COVER_SLOTS.min(self.inner.plane_count());
+        let (row, side) = if page < cover {
+            (page, usize::from(COVER_ON_RIGHT))
+        } else {
+            let k = page - cover;
+            (cover + k / SLOTS, k % SLOTS)
+        };
+        if row >= self.rows {
+            return None;
+        }
+        let size = self.inner.bounds(page).ok()?;
+        let (x, y) = self.page_origin(row, side, size);
+        let upp = self.units_per_point;
+        Some(region::crop(x * upp, y * upp, size.w * upp, size.h * upp))
+    }
+
     /// Paint `region` (in base units) at `scale` output pixels per base unit.
     fn paint(&self, region: Crop, scale: f32) -> Result<DecodedImage, SurfaceError> {
         if !(scale.is_finite() && scale > 0.0) {
@@ -373,6 +400,10 @@ impl Surface for BookSurface {
             self.canvas.w * self.units_per_point,
             self.slot.h * self.units_per_point,
         ))
+    }
+
+    fn page_box(&self, page: usize) -> Option<Crop> {
+        self.page_slot(page)
     }
 }
 
@@ -565,6 +596,43 @@ mod tests {
         assert!(
             pixels <= MAX_RENDER_PIXELS as u64,
             "pixels {pixels} past the cap"
+        );
+    }
+
+    #[test]
+    fn a_page_names_the_slot_it_fills() {
+        // Page 0 is the cover, alone in the right slot of row 0; then pages 1
+        // and 2 share row 1, and page 3 sits alone in the left slot of row 2.
+        let b = book(vec![(100.0, 200.0); 4]);
+        let cover = b.page_box(0).unwrap();
+        assert_eq!(
+            cover,
+            region::crop(100.0 + GUTTER, 0.0, 100.0, 200.0),
+            "the cover takes the right slot"
+        );
+        assert_eq!(
+            b.page_box(1).unwrap(),
+            region::crop(0.0, 200.0, 100.0, 200.0)
+        );
+        assert_eq!(
+            b.page_box(2).unwrap(),
+            region::crop(100.0 + GUTTER, 200.0, 100.0, 200.0)
+        );
+        assert_eq!(
+            b.page_box(3).unwrap(),
+            region::crop(0.0, 400.0, 100.0, 200.0)
+        );
+        assert!(b.page_box(4).is_none(), "a page the document does not hold");
+    }
+
+    #[test]
+    fn a_narrow_page_centers_in_its_slot() {
+        // Every slot measures the widest page, so page 0 leaves an even border
+        // on both sides of the right slot, and its own size stays whole.
+        let b = book(vec![(50.0, 200.0), (100.0, 200.0)]);
+        assert_eq!(
+            b.page_box(0).unwrap(),
+            region::crop(100.0 + GUTTER + 25.0, 0.0, 50.0, 200.0)
         );
     }
 

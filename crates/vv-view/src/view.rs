@@ -300,6 +300,14 @@ pub struct ViewState {
     /// A book answers its first spread, so the cover page shows whole; every
     /// other source answers `None` and the fit frames the whole plane.
     pub open_box: Option<Size>,
+    /// The slot page 0 fills inside the open plane, in surface units, or `None`
+    /// for a source that shows one picture and no page geometry (see
+    /// [`Surface::page_box`]).
+    ///
+    /// The grid cell of a document holds page 0 and never the whole book, so
+    /// the view draws that picture here while the loader paints the spread,
+    /// instead of stretching one page over every spread.
+    pub cell_box: Option<region::Crop>,
     /// Whether the align still holds the opening box at the top of the
     /// window.
     ///
@@ -738,11 +746,23 @@ impl ViewState {
     /// seconds, so waiting for it would only delay the sharp picture.
     /// The paint waits for its source instead, which [`Self::request_source`]
     /// opens on its own worker.
+    /// The source is also the truth about the plane: a document's cell measures
+    /// one page of it, so a patch of the pair the view holds would land in the
+    /// wrong place until the plane the source answers agrees with it.
     /// A spread step paints its landing region before the glide ends, so a
     /// patch that already covers the window replaces the one on screen here and
     /// skips the debounce and the paint.
     pub fn tick_crop(&mut self, now: Instant, win: Vec2, uploader: &Uploader) {
-        if self.source.is_none() || self.crop_pending || self.img.w <= 0.0 {
+        let Some(source) = self.source.as_ref() else {
+            return;
+        };
+        if self.crop_pending || self.img.w <= 0.0 {
+            return;
+        }
+        if source
+            .bounds(self.source_plane)
+            .is_ok_and(|plane| !same_plane(plane, self.img))
+        {
             return;
         }
         let Some(scale) = self.view_scale else {
@@ -1340,6 +1360,82 @@ pub fn patch_covers(st: &ViewState, win_w: f32, win_h: f32) -> bool {
     region::patch_reaches_window(&needed, &crop.patch)
 }
 
+/// Whether two sizes name the same plane, to within a pixel.
+///
+/// The image view trusts the plane a grid cell reports while the decode
+/// catches up, and it paints a region patch of the plane its source measures.
+/// Both are honest only while the two pairs agree: a document's cell holds page
+/// 0 and never the whole book, so its picture never covers the book plane and a
+/// patch of the cell's guess lands in the wrong place.
+#[must_use]
+pub fn same_plane(a: Size, b: Size) -> bool {
+    (a.w - b.w).abs() <= 1.0 && (a.h - b.h).abs() <= 1.0
+}
+
+/// Where the picture a grid cell holds lands on the open plane: the box it
+/// covers, in surface units, and the point it turns around.
+///
+/// A cell keeps one plane: the whole plane of a single-plane source, or page 0
+/// of a document (see [`Grid::from_dir`]).
+/// A single-plane source maps its picture onto the whole plane, so the later
+/// swap to the sharp texture is pixel-aligned.
+/// A book stacks every spread into one plane, so one page never covers it: the
+/// picture draws into page 0's slot ([`ViewState::cell_box`]), which is where
+/// the loader's spread will paint it.
+/// Neither place is honest for a book whose slot the view does not know yet: a
+/// picture stretched over the whole book would paint one white page across the
+/// window.
+#[must_use]
+pub fn cell_place(
+    img: Size,
+    cell_box: Option<region::Crop>,
+    cell: Size,
+) -> Option<(Size, dim::SurfacePoint)> {
+    match cell_box {
+        Some(slot) => Some((
+            Size {
+                w: slot.width(),
+                h: slot.height(),
+            },
+            dim::SurfacePoint::new(
+                slot.min_x() + slot.width() / 2.0,
+                slot.min_y() + slot.height() / 2.0,
+            ),
+        )),
+        None if same_plane(img, cell) => {
+            Some((img, dim::SurfacePoint::new(img.w / 2.0, img.h / 2.0)))
+        }
+        None => None,
+    }
+}
+
+/// Draw the picture a grid cell holds, while the open plane has no frame of its
+/// own.
+///
+/// The picture lands where [`cell_place`] puts it, so a document's page shows in
+/// its slot and never stretched over the whole book.
+pub fn draw_cell(r: &mut Renderer, st: &ViewState, tex: &Texture, cell: Size, win: Vec2) {
+    if st.img.w <= 0.0 {
+        return;
+    }
+    let scale = st
+        .view_scale
+        .unwrap_or((win.x / st.img.w).min(win.y / st.img.h));
+    let Some((size, middle)) = cell_place(st.img, st.cell_box, cell) else {
+        return;
+    };
+    let frame = st.frame_at(win, st.pan, scale);
+    draw_turned(
+        r,
+        tex,
+        size,
+        scale,
+        dim::draw_window(frame.to_screen(middle)),
+        st.angle,
+        Filter::Linear,
+    );
+}
+
 /// Keep the pivot of a turned image on its window spot.
 ///
 /// The angle already ran from `from` to the value `st.angle` shows, so the code
@@ -1435,6 +1531,7 @@ pub fn show_entry(
     };
     st.open_id = Some(id);
     st.mode = Mode::Image;
+    st.cell_box = None;
     st.reset_view();
     // A new image starts with no region patch: the source request names what
     // the window shows.
@@ -1499,7 +1596,21 @@ pub fn show_entry(
             // it, so the fit frames the first spread.
             match source.open_book() {
                 Ok((surface, plane)) => {
+                    // The opened plane measures the view, never the cell: a book
+                    // stacks every spread, and its page 0 fills one slot of the
+                    // first one.
+                    // Both numbers land here, so the first draw frames the
+                    // spread and puts the cell picture in that slot, and the
+                    // loader's header changes neither.
                     st.open_box = surface.open_box(plane);
+                    if let Ok(plane) = surface.bounds(plane) {
+                        st.img = plane;
+                        // The fit measures the plane the surface reports, so the
+                        // first frame frames the spread instead of easing from
+                        // the cell's fit.
+                        st.refit_open();
+                    }
+                    st.cell_box = surface.page_box(0);
                     Some(Loader::start_plane(
                         surface,
                         plane,
@@ -1521,6 +1632,37 @@ pub fn show_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_books_cell_picture_never_covers_its_plane() {
+        // A grid cell of a document holds page 0, and the image view opens the
+        // whole book, so the cell picture measures neither the plane nor the
+        // slot the page fills.
+        let page = Size { w: 612.0, h: 792.0 };
+        let slot = region::crop(613.0, 0.0, 612.0, 792.0);
+        let book = Size {
+            w: 1224.5,
+            h: 8712.0,
+        };
+        // The slot the page fills, never the plane.
+        assert_eq!(
+            cell_place(book, Some(slot), page),
+            Some((
+                page,
+                dim::SurfacePoint::new(slot.min_x() + 306.0, slot.min_y() + 396.0)
+            ))
+        );
+        // A book whose slot the view does not know yet paints no stretched
+        // page: one white page over the whole book reads as a white flash.
+        assert_eq!(cell_place(book, None, page), None);
+        // A single-plane source covers its own plane, so its picture maps onto
+        // the middle of it and the sharp texture later lands on the same
+        // pixels.
+        assert_eq!(
+            cell_place(page, None, page),
+            Some((page, dim::SurfacePoint::new(306.0, 396.0)))
+        );
+    }
 
     #[test]
     fn a_patch_that_matches_the_view_lands_on_whole_pixels() {

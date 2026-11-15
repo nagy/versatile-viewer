@@ -250,6 +250,17 @@ pub trait Surface: Send + Sync {
     fn spread_box(&self, _spread: usize) -> Option<Crop> {
         None
     }
+
+    /// The slot page `page` fills inside the plane, in surface units, or `None`
+    /// for a source that shows one picture and no page geometry.
+    ///
+    /// A book answers the slot its page takes in its spread, so a caller can
+    /// place a page-sized picture before the plane itself paints: the image
+    /// view draws a document's grid thumb there while the loader renders the
+    /// spread (see [`crate::book`]).
+    fn page_box(&self, _page: usize) -> Option<Crop> {
+        None
+    }
 }
 
 /// Why a surface could not open, describe or render a plane.

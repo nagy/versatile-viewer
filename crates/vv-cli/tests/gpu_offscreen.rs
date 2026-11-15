@@ -256,6 +256,40 @@ macro_rules! canvas {
     };
 }
 
+/// A host that answers no window action and presses keys for a test.
+struct NullHost;
+
+impl vv_view::viewer::Host for NullHost {
+    fn set_title(&mut self, _title: &str) {}
+
+    fn grab_pointer(&mut self) {}
+
+    fn release_pointer(&mut self) {}
+
+    fn place_pointer(&mut self, _at: Vec2) {}
+}
+
+impl NullHost {
+    /// Press and release `key`, so the viewer sees one press edge.
+    fn press(&mut self, viewer: &mut vv_view::viewer::Viewer, key: winit::keyboard::KeyCode) {
+        for state in [
+            winit::event::ElementState::Pressed,
+            winit::event::ElementState::Released,
+        ] {
+            viewer.handle_event(
+                vv_view::viewer::Event::Key {
+                    key,
+                    state,
+                    repeat: false,
+                    synthetic: false,
+                    text: None,
+                },
+                self,
+            );
+        }
+    }
+}
+
 /// The clear color reaches the whole frame, even with nothing to draw.
 #[test]
 #[ignore = "needs a Vulkan device"]
@@ -540,12 +574,18 @@ fn a_book_plane_keeps_its_gutter_transparent() {
 /// The xref offsets are computed here, so the file is valid and needs no
 /// fixture on disk.
 fn page_pdf(pages: usize, color: [u8; 3]) -> Vec<u8> {
-    let content = format!(
+    let fill = format!(
         "{} {} {} rg\n0 0 64 64 re f\n",
         f64::from(color[0]) / 255.0,
         f64::from(color[1]) / 255.0,
         f64::from(color[2]) / 255.0
     );
+    pdf_with(pages, &fill, &fill)
+}
+
+/// Build a PDF of `pages` 64x64 pages: the first one draws `first`, and every
+/// other one draws `rest`.
+fn pdf_with(pages: usize, first: &str, rest: &str) -> Vec<u8> {
     let kids = (0..pages)
         .map(|page| format!("{} 0 R", 3 + 2 * page))
         .collect::<Vec<_>>()
@@ -560,10 +600,10 @@ fn page_pdf(pages: usize, color: [u8; 3]) -> Vec<u8> {
             "{body} 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 64 64] /Contents {stream} 0 \
              R /Resources << >> >> endobj\n"
         ));
+        let content = if page == 0 { first } else { rest };
         objects.push(format!(
-            "{stream} 0 obj << /Length {} >> stream\n{}endstream\nendobj\n",
-            content.len(),
-            content
+            "{stream} 0 obj << /Length {} >> stream\n{content}endstream\nendobj\n",
+            content.len()
         ));
     }
     let mut pdf = String::from("%PDF-1.4\n");
@@ -858,6 +898,93 @@ fn a_document_launch_paints_its_first_spread() {
         width > 64 && height > 64,
         "a book, not one page: {width}x{height}"
     );
+}
+
+/// Opening a document from the grid paints no stretched page.
+///
+/// A grid cell holds page 0 and never the whole book, so the thumb of a white
+/// page measures one page of a plane that stacks every spread.
+/// The open used to stretch that picture over the whole plane, which painted the
+/// window white until the loader's spread landed.
+/// The cell picture now draws into page 0's slot, so the empty slot beside the
+/// cover keeps the background and the page lands in the slot it fills.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_document_opened_from_the_grid_keeps_its_page_in_its_slot() {
+    // A window wider than the book, so both slots of the cover row show beside
+    // the plane and the empty one stays background.
+    let canvas = canvas!(160, 64);
+    let dir = tempfile::tempdir().expect("a temp dir");
+    std::fs::write(
+        dir.path().join("a.svg"),
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="#0000ff"/></svg>"##,
+    )
+    .expect("write the svg");
+    // Three white pages, so the book holds a cover row and one spread.
+    // The first page carries many white paths, so its render costs a while and
+    // the cell picture shows for a few frames before the sharp spread lands.
+    let mut ink = String::from("1 1 1 rg\n");
+    for i in 0..4000 {
+        let _ = writeln!(ink, "{} {} 1 1 re f", i % 64, (i / 64) % 64);
+    }
+    let paper = "1 1 1 rg\n0 0 64 64 re f\n";
+    std::fs::write(dir.path().join("b.pdf"), pdf_with(3, &ink, paper)).expect("write the pdf");
+    // A directory launch lists before any decode, so it keeps the default
+    // window size and shows the grid: the document opens from a cell, which is
+    // the path that holds a page-sized picture.
+    let launch = vv_view::viewer::Launch::open(dir.path(), true).expect("the launch opens");
+    assert_eq!(launch.window_size(), (1024, 768));
+    let mut viewer = vv_view::viewer::Viewer::new(
+        canvas.device.clone(),
+        canvas.queue.clone(),
+        FORMAT,
+        canvas.device.limits().max_texture_dimension_2d,
+        launch,
+        canvas.size,
+    );
+
+    let mut host = NullHost;
+    // Let the grid decode both cells, then open the document in the second
+    // one.
+    for _ in 0..60 {
+        let view = canvas
+            .target
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        viewer
+            .render(&mut host, &view, canvas.size, 0.016)
+            .expect("the grid frame renders");
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
+    host.press(&mut viewer, winit::keyboard::KeyCode::ArrowRight);
+    host.press(&mut viewer, winit::keyboard::KeyCode::Enter);
+
+    // The cover row spans two slots of one 64 px page at a fit scale of 1, so
+    // the plane starts at x 16: the empty left slot covers x 16..80 and the
+    // cover covers x 80..144.
+    // The sample sits in the empty slot and left of every page a correct draw
+    // makes, so only a picture stretched over the whole plane reaches it.
+    let (empty, cover) = ((30, 32), (112, 32));
+    let background = [0x06, 0x23, 0x29, 0xff];
+    let mut landed = false;
+    for _ in 0..120 {
+        let view = canvas
+            .target
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        viewer
+            .render(&mut host, &view, canvas.size, 0.016)
+            .expect("the image frame renders");
+        let pixels = canvas.read();
+        assert_eq!(
+            pixels.at(empty.0, empty.1),
+            background,
+            "the slot beside the cover keeps the background"
+        );
+        landed = landed || pixels.at(cover.0, cover.1) == [255, 255, 255, 255];
+        // The spread paints on a worker, so the early frames hold the cell
+        // picture and the sharp spread lands a moment later.
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
+    assert!(landed, "the page paints in the slot it fills");
 }
 
 /// A `Viewer` paints into a texture its host owns.
