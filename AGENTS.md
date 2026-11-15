@@ -400,12 +400,22 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   The layer split pays cross-crate inlining (ADR 0004), so every member builds under one profile that inlines across members.
   The profile is the whole opt-level policy: no member overrides it.
 - Every cargo invocation of the flake passes `--workspace --locked`, so one derivation covers all seven members, cargo never re-fingerprints the dependency graph between the deps drv and the package drv, and a drifted lockfile fails the build instead of fetching.
-  `checks.gpu` narrows to `-p vv-cli --test gpu_offscreen`, because those paints live in the binary crate.
-  A `nix build -L --rebuild .#checks.x86_64-linux.gpu` run measured that narrowing: the check recompiles the seven members and one dev dependency (`tempfile`), and no third-party crate re-fingerprints, so `--workspace` there would add every member dev dependency and buy nothing.
+  The paint run inside the test drv narrows to `-p vv-cli --test gpu_offscreen` and builds nothing, because the workspace run of that drv already linked that binary.
   `pname` stays `versatile-viewer`, so a store path matches the flake attribute that carries it.
-- `nix flake check` gates clippy (`--all-targets -- --deny warnings`), tests, treefmt, the package build and `checks.gpu` (the ignored headless paints on lavapipe).
+- `nix flake check` gates clippy (`--all-targets -- --deny warnings`), the test suite, treefmt and the package build.
   One test gate only: `cargo test` in `checks.default` runs the unit tests, the integration tests and the doctests, so no separate `--doc` check exists.
+  The same drv runs the ignored headless paints on lavapipe as the second command of its `checkPhase`, and `checks.gpu` names that one derivation, so `nix flake check` builds it once.
+  A second drv cost 83 s in release and 10 s in dev, to run sixteen tests that the first drv had already linked.
+  `checkPhase` replaces crane's own phase for that reason: `cargoTest` writes `checkPhaseCargoCommand` after it merges its arguments, so a caller's value of that name never survives.
   `checks.package` builds the package with `doCheck = false`, because the fixup owns the rpath gate and a second `cargo test` would only repeat the suite.
+- The fast gates build in the `dev` profile, and only the package builds in `release`.
+  `devEnv` (`flake.nix`) sets `CARGO_PROFILE = "dev"` for the tests and clippy, because crane answers `release` when that variable stays unset, and `[profile.release]` inlines across the seven members.
+  A test binary gains nothing from that inlining: an incremental `nix flake check` after a one-line source change measured 294 s wall and about 90 min CPU with every check in release, and 74 s wall with the tests in dev.
+  `cargoArtifactsDev` is the second `buildDepsOnly`, because cargo keys every artifact on its profile and the dev gates cannot read the release cache.
+  The package keeps the release cache, because it ships the optimized binary, and `checks.package` (62 s, the one release build left) is the critical path of a warm `nix flake check`.
+  `CARGO_PROFILE_DEV_DEBUG` and `CARGO_PROFILE_TEST_DEBUG` stay `1`, so a failing test still names its line: full debuginfo cost 5.8 s more on that rebuild and buys no gate.
+  `RUSTFLAGS` in `env` names `mold` for every cargo invocation of the flake, so the package drv and the check drvs share one flag set and the linker stops being the tail of the build.
+  The devshell appends the same flag to `rpathFlags`, so `cargo build` there links as fast as a check does.
 - The value layer stays `const`: `dim`'s `as_f32`, `draw::Color::tint`, `region::Frame::plane`, the `region_sel` constructors and the cache-off value answer `const fn`, so a size table or a derived color lands at compile time.
   The workspace does not enable `clippy::missing_const_for_fn`, because it would force `const` on the accessors that read a runtime handle, a held key or a decoded texture, and a `const` body refuses a later `debug!` or `Vec` call.
   `rust-version` is therefore the toolchain the flake builds with (`1.99`), not the oldest compiler that reads the syntax.

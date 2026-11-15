@@ -53,12 +53,23 @@
 
           # The native tools of the build.
           # No CMake, no clang and no pkg-config: nothing here compiles C.
+          # mold links the viewer binary and the ten test binaries of the
+          # workspace.
+          # Every worker builds in parallel and the linker runs alone at the end
+          # of each crate, so the linker is the tail of the build and mold
+          # shortens it.
           nativeBuildInputs = [
             pkgs.makeWrapper
+            pkgs.mold
           ];
 
           # The environment the build reads.
-          env = { };
+          # `RUSTFLAGS` names the linker for every cargo invocation of the
+          # flake, so the package drv and the check drvs agree on one flag set
+          # and reuse one artifact set.
+          env = {
+            RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
+          };
 
           # rpath link arguments, so the binary finds the system libraries at
           # runtime.
@@ -75,6 +86,24 @@
           # carries it (`packages.versatile-viewer`).
           pname = "versatile-viewer";
           version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
+
+          # The profile of the fast gates: the tests, the headless paints and
+          # clippy.
+          # crane reads `CARGO_PROFILE` in `cargoWithProfile`, and it answers
+          # `release` when the variable stays unset, so every check of this flake
+          # built with `lto = "thin"` and `codegen-units = 2` before this table
+          # existed.
+          # A test binary gains nothing from link-time optimization: the suite
+          # runs about 280 tests in 5 s either way, and the release build of the
+          # ten binaries cost 56 minutes of CPU and 3 minutes of wall clock for
+          # that difference alone.
+          # `debug = 1` writes line tables only, so a failing test still names its
+          # line and the build skips the full debuginfo.
+          devEnv = {
+            CARGO_PROFILE = "dev";
+            CARGO_PROFILE_DEV_DEBUG = "1";
+            CARGO_PROFILE_TEST_DEBUG = "1";
+          };
 
           # The source as cargo sees it.
           # This is everything tracked by git.
@@ -95,6 +124,24 @@
               ;
             buildInputs = libInputs;
             inherit env;
+            cargoExtraArgs = "--workspace --locked";
+          };
+
+          # The same dependency cache in the profile of the fast gates.
+          # cargo keys every artifact on its profile, so a dev-profile check
+          # cannot read a release-profile cache and would compile the whole graph
+          # again on its own.
+          # The package keeps the release cache above, because it ships the
+          # optimized binary.
+          cargoArtifactsDev = craneLib.buildDepsOnly {
+            inherit
+              src
+              nativeBuildInputs
+              pname
+              version
+              ;
+            buildInputs = libInputs;
+            env = env // devEnv;
             cargoExtraArgs = "--workspace --locked";
           };
 
@@ -155,49 +202,6 @@
             meta.description = "Versatile-viewer API documentation";
           };
 
-          # The headless GPU paints, on Mesa's lavapipe.
-          #
-          # lavapipe is a software Vulkan driver: it needs no GPU, no device
-          # node and no display, so a build sandbox runs it.
-          # The loader reads the ICD manifest that VK_DRIVER_FILES names, and
-          # the manifest points at `libvulkan_lvp.so` beside it.
-          # VV_GPU_REQUIRED makes a missing adapter fail the run, so the gate
-          # proves that lavapipe answered instead of skipping every test.
-          gpu = craneLib.cargoTest {
-            inherit
-              src
-              cargoArtifacts
-              nativeBuildInputs
-              pname
-              version
-              ;
-            buildInputs = libInputs;
-            # wgpu opens `libvulkan.so.1` with `dlopen`, so the test binary
-            # needs the loader on its search path: the rpath of the devshell
-            # does not reach a check.
-            LD_LIBRARY_PATH = lib.makeLibraryPath libInputs;
-            VK_DRIVER_FILES = "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.x86_64.json";
-            VV_GPU_REQUIRED = "1";
-            # A host reads its own font set, and a converted SVG measures its
-            # text with one, so the gate pins one face instead of none.
-            FONTCONFIG_FILE = pkgs.makeFontsConf {
-              fontDirectories = [ pkgs.dejavu_fonts ];
-            };
-            # The paints live in the binary crate, so the member is named: the
-            # test gate reads that crate alone, and the deps drv above already
-            # holds every artifact it needs.
-            # A `nix build -L --rebuild .#checks.x86_64-linux.gpu` run measured
-            # that narrowing: the check recompiles the seven members and one
-            # dev dependency (`tempfile`), and no third-party crate
-            # re-fingerprints, so cargo sees the deps drv artifacts.
-            # `--workspace` here would add every member dev dependency
-            # (`proptest`, the image encoders, `x11rb`, `pollster`) and buy
-            # nothing.
-            cargoExtraArgs = "-p vv-cli --locked";
-            cargoTestExtraArgs = "--test gpu_offscreen -- --ignored";
-            meta.description = "Versatile-viewer headless GPU paints on lavapipe";
-          };
-
           # Lint gate: warnings are errors and every target is included.
           # This uses the same clippy and cargo from nixpkgs as the devshell.
           # `nix flake check` and a plain `cargo clippy` then agree.
@@ -208,12 +212,12 @@
           clippy = craneLib.cargoClippy {
             inherit
               src
-              cargoArtifacts
               nativeBuildInputs
-              env
               pname
               version
               ;
+            cargoArtifacts = cargoArtifactsDev;
+            env = env // devEnv;
             buildInputs = libInputs;
             # Every member is linted, not only the binary crate.
             cargoExtraArgs = "--workspace --locked";
@@ -224,19 +228,56 @@
           # `cargo test` runs the unit tests, the integration tests and the
           # doctests, so it is the one test gate: a separate `--doc` run would
           # compile and link the crates a second time for the same coverage.
+          #
+          # The headless GPU paints ride the same derivation, on Mesa's lavapipe.
+          # `cargo test --workspace` already links `gpu_offscreen`, so a second
+          # drv would rebuild the seven members and one dev dependency only to
+          # run sixteen `#[ignore]`d tests: 83 s in the release profile and 10 s
+          # in dev.
+          # lavapipe is a software Vulkan driver: it needs no GPU, no device node
+          # and no display, so a build sandbox runs it.
+          # The loader reads the ICD manifest that VK_DRIVER_FILES names, and the
+          # manifest points at `libvulkan_lvp.so` beside it.
+          # VV_GPU_REQUIRED makes a missing adapter fail the run, so the gate
+          # proves that lavapipe answered instead of skipping every test.
+          # The driver answers every test of the suite, and a paint that reads no
+          # adapter only ever reports it.
           tests = craneLib.cargoTest {
             inherit
               src
-              cargoArtifacts
               nativeBuildInputs
-              env
               pname
               version
               ;
+            cargoArtifacts = cargoArtifactsDev;
+            env = env // devEnv;
             buildInputs = libInputs;
+            # wgpu opens `libvulkan.so.1` with `dlopen`, so the test binary needs
+            # the loader on its search path: the rpath of the devshell does not
+            # reach a check.
+            LD_LIBRARY_PATH = lib.makeLibraryPath libInputs;
+            VK_DRIVER_FILES = "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.x86_64.json";
+            VV_GPU_REQUIRED = "1";
+            # A host reads its own font set, and a converted SVG measures its
+            # text with one, so the gate pins one face instead of none.
+            FONTCONFIG_FILE = pkgs.makeFontsConf {
+              fontDirectories = [ pkgs.dejavu_fonts ];
+            };
             # Every member, so a unit test of any layer gates the flake.
             cargoExtraArgs = "--workspace --locked";
-            meta.description = "Versatile-viewer test suite";
+            # The paints are `#[ignore]`d, because a plain `cargo test` of a host
+            # with no display has no adapter, so the second run names them.
+            # It builds nothing: the first command already linked that binary.
+            # `checkPhase` replaces crane's own phase, because `cargoTest` writes
+            # `checkPhaseCargoCommand` after it merges the arguments and a
+            # caller's value of that name never survives.
+            checkPhase = ''
+              runHook preCheck
+              cargoWithProfile test --workspace --locked
+              cargoWithProfile test -p vv-cli --locked --test gpu_offscreen -- --ignored
+              runHook postCheck
+            '';
+            meta.description = "Versatile-viewer test suite, with the headless GPU paints";
           };
         in
         {
@@ -251,7 +292,9 @@
           # The headless GPU paints, which no other gate runs: the driver is a
           # software Vulkan of its own, so the draw seam is proven and not only
           # compiled.
-          checks.gpu = gpu;
+          # The attribute names the same derivation as `checks.default`, because
+          # one build serves both runs, so `nix flake check` builds it once.
+          checks.gpu = tests;
 
           # The package itself, so `nix flake check` catches a broken rpath or a
           # missing runtime library and not only the test run.
@@ -281,9 +324,11 @@
             ]
             ++ nativeBuildInputs;
             buildInputs = libInputs;
-            inherit env;
             LD_LIBRARY_PATH = lib.makeLibraryPath libInputs;
-            RUSTFLAGS = rpathFlags;
+            # The devshell carries the rpath of the store libraries beside the
+            # linker, so `cargo run` finds the X11 libraries and `cargo build`
+            # links as fast as a check does.
+            RUSTFLAGS = "${rpathFlags} ${env.RUSTFLAGS}";
           };
         };
     };
