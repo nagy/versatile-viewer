@@ -71,13 +71,16 @@ usvg = { version = "0.50.0", default-features = false, features = [
 ] }
 # The rule table of the converters (`src/convert.rs`): TOML, pure Rust
 # (MIT OR Apache-2.0).
-# `parse` alone, so the writer half of the crate stays out.
-toml = { version = "0.8.23", default-features = false, features = ["parse"] }
+# `parse` and `serde` alone, so the writer half of the crate stays out.
+toml = { version = "1.2.1", default-features = false, features = [
+  "parse",
+  "serde",
+] }
 # The `Deserialize` of that config file. `deny_unknown_fields` on three small
 # structs replaces a hand walk over `toml::Value`, so an unknown key stays an
 # error and a rule inherits `[defaults]` through an `Option` per field.
 # No feature beyond the derive macro: the file has no allocator of its own.
-serde = { version = "1.0.228", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
 # The kill of a timed-out converter, which names its whole process group by the
 # negative pid. Only the one syscall wrapper.
 libc = "0.2.191"
@@ -87,7 +90,7 @@ libc = "0.2.191"
 sha2 = "0.11.1"
 # The diagnostics facade. This layer emits events and names no output layer:
 # the binary owns the subscriber and the `RUST_LOG` filter.
-tracing = "0.1"
+tracing = "0.1.44"
 derive_more = { version = "2.1.1", default-features = false, features = [
   "display",
   "error",

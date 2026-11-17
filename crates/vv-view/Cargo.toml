@@ -41,7 +41,7 @@ rayon = "1.12.0"
 anyhow = "1.0.104"
 # The diagnostics facade. This layer emits events and names no output layer:
 # the binary owns the subscriber and the `RUST_LOG` filter.
-tracing = "0.1"
+tracing = "0.1.44"
 derive_more = { version = "2.1.1", default-features = false, features = [
   "display",
   "error",

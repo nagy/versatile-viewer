@@ -17,7 +17,7 @@ jxl-oxide = "0.12.6"
 # It is a second JXL codebase beside jxl-oxide, which only decodes.
 # `extraslow` stays off: it pulls the perceptual metric crates, and a 512 px
 # thumbnail never needs them. The SIMD backends stay on.
-jixel = { version = "0.5.7", default-features = false, features = [
+jixel = { version = "0.5.10", default-features = false, features = [
   "avx",
   "sse",
 ] }
