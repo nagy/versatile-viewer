@@ -21,7 +21,8 @@
 //! pipeline, the views, the loaders and the clock, so a host owns the window
 //! and the viewer owns the picture.
 //! [`loader`] streams one plane of a source off the main thread, [`input`]
-//! holds the held keys, the frame edges and the pointer of one frame, and
+//! holds the held keys, the frame edges and the pointer of one frame,
+//! [`push`] is the seam a caller outside the process draws through, and
 //! [`pane`] names the X11 window a host hands over with `--wid`.
 //!
 //! The module `view` stays private to this crate: [`viewer`] drives it, and no
@@ -35,6 +36,7 @@ pub mod grid;
 pub mod input;
 pub mod loader;
 pub mod pane;
+pub mod push;
 pub(crate) mod view;
 pub mod viewer;
 pub mod zoomkeys;

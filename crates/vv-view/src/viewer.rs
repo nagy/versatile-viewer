@@ -42,7 +42,10 @@ use std::{
     borrow::Cow,
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, mpsc::channel},
+    sync::{
+        Arc,
+        mpsc::{Receiver, Sender, channel},
+    },
     time::Instant,
 };
 
@@ -62,10 +65,12 @@ use crate::{
     input::Input,
     keyrepeat::{self, RepeatState},
     loader::{DecodeMsg, Loader},
+    push::{self, Push, Shown},
     region_sel,
     render::Renderer,
     rotate,
-    surface::{Size, Surface, View, open_surface},
+    surface::{Crop, Size, Surface, View, open_book_surface, open_bytes, open_surface},
+    texture::Texture,
     view::{
         BACKGROUND, CropState, EASE_TIME, Mode, NavKeys, OpenAlign, PAN_RATE, Prefetch,
         ROTATE_DRAG_SPAN, ROTATE_DRAG_SPEED, Ramps, SPREAD_EASE_TIME, ViewState, ZOOM_ANCHOR_DRIFT,
@@ -186,9 +191,34 @@ pub struct Launch {
     win0: (u32, u32),
     /// The title that both views start from.
     title: String,
+    /// The label of what shows, for a status report: the path, or the memory
+    /// label of a blank launch.
+    label: String,
 }
 
 impl Launch {
+    /// A launch that opens no source at all.
+    ///
+    /// A caller that pushes its own content (`vv --mcp` with no path) starts
+    /// here: the window opens at the default size, the pane clears to
+    /// [`BACKGROUND`], and the first [`Push`](crate::push::Push) fills it.
+    /// Nothing of this launch touches the disk.
+    #[must_use]
+    pub fn blank(shows_grid: bool) -> Self {
+        Self {
+            shows_grid,
+            grid: None,
+            decoded: None,
+            source: None,
+            open_box: None,
+            blur: None,
+            single_plane: false,
+            win0: (1024, 768),
+            title: format!("{}{SEP}{APP}", crate::push::MEMORY_LABEL),
+            label: crate::push::MEMORY_LABEL.to_owned(),
+        }
+    }
+
     /// Open the path the command line names, or a path a host names.
     ///
     /// `shows_grid` is the pane policy: a window that draws the grid keeps it
@@ -281,6 +311,7 @@ impl Launch {
             single_plane,
             win0,
             title,
+            label: path.display().to_string(),
         })
     }
 
@@ -375,6 +406,62 @@ fn window_title(path: &Path, dir_grid: Option<&Grid>) -> String {
     }
 }
 
+/// A picture that arrived from outside the process, ready to show.
+///
+/// The worker that opened it rendered the box a fresh open frames, so the
+/// main thread only installs the texture and the framing.
+struct Pushed {
+    /// The first texture of the plane, painted at scale 1.0.
+    texture: Texture,
+    /// The surface, kept only when it can repaint a region.
+    source: Option<Arc<dyn Surface>>,
+    /// The extent of the whole plane, in surface units.
+    size: Size,
+    /// How many planes the source holds.
+    planes: usize,
+    /// The box a fresh open frames, or None for the whole plane.
+    open_box: Option<Size>,
+    /// The slot page 0 fills, for a source that shows pages.
+    cell_box: Option<Crop>,
+    /// The label a status report answers.
+    label: String,
+}
+
+/// What a worker opens for a push.
+///
+/// The frame loop never waits on the decode, so the request arrives here as
+/// plain data and the worker names the route.
+enum Opening {
+    /// A picture that exists only in memory.
+    Bytes(Vec<u8>),
+    /// A file the caller names.
+    Path(PathBuf),
+}
+
+impl Opening {
+    /// Open the surface of this request, as a book when it holds pages.
+    ///
+    /// # Errors
+    ///
+    /// The function errors when the sniff, the decode or the parse fails.
+    fn open(&self) -> Result<Arc<dyn Surface>, String> {
+        let surface: Box<dyn Surface> = match self {
+            Self::Bytes(data) => open_bytes(data),
+            Self::Path(path) => open_book_surface(path),
+        }
+        .map_err(|err| err.to_string())?;
+        Ok(surface.into())
+    }
+
+    /// The label a status report answers for this request.
+    fn label(&self) -> String {
+        match self {
+            Self::Bytes(_) => push::MEMORY_LABEL.to_owned(),
+            Self::Path(path) => path.display().to_string(),
+        }
+    }
+}
+
 /// The viewer: the pipeline, the two views and the latches of the frame loop.
 ///
 /// Everything here needs a device, and nothing here needs a window: the host
@@ -447,6 +534,19 @@ pub struct Viewer {
     /// back to.
     launch_title: String,
 
+    // --- pushed content ---
+    /// The plane count of what shows, for a status report (0 when nothing
+    /// shows).
+    planes: usize,
+    /// The label of what shows: the path of the launch, or `mcp` for pushed
+    /// bytes.
+    label: String,
+    /// The pictures a caller outside the process pushed, as its worker sends
+    /// them.
+    pushed_tx: Sender<Pushed>,
+    /// The same channel, as the frame loop drains it.
+    pushed_rx: Receiver<Pushed>,
+
     // --- clock ---
     /// The seconds since the viewer started, summed from the frame times the
     /// host reports.
@@ -470,6 +570,8 @@ impl Viewer {
         let renderer = Renderer::new(&device, &queue, format, max_texture_side);
         let (crop_tx, crop_rx) = channel();
         let launch_title = launch.title.clone();
+        let label = launch.label.clone();
+        let (pushed_tx, pushed_rx) = channel();
         let mut viewer = Self {
             device,
             queue,
@@ -536,6 +638,10 @@ impl Viewer {
             rep_nav_fwd: RepeatState::default(),
             rep_nav_back: RepeatState::default(),
             launch_title,
+            planes: 0,
+            label,
+            pushed_tx,
+            pushed_rx,
             elapsed: 0.0,
         };
         viewer.start_launch(launch, size);
@@ -554,8 +660,10 @@ impl Viewer {
             open_box,
             blur,
             single_plane,
+            label,
             ..
         } = launch;
+        self.label = label;
         if self.grid.is_none() {
             self.grid = grid;
         }
@@ -571,6 +679,7 @@ impl Viewer {
                 w: image.width().as_f32(),
                 h: image.height().as_f32(),
             };
+            self.planes = 1;
             // A book frames its first spread, a picture frames the whole plane.
             self.st.open_box = open_box;
             self.st.reset_view();
@@ -593,6 +702,7 @@ impl Viewer {
             // instead of easing from the launch's empty plane.
             self.st.open_box = open_box;
             self.st.img = book.bounds(0).unwrap_or(Size { w: 0.0, h: 0.0 });
+            self.planes = book.plane_count();
             self.st.cell_box = book.page_box(0);
             self.st.reset_view();
             self.st.view_loading = true;
@@ -715,6 +825,157 @@ impl Viewer {
         Ok(())
     }
 
+    /// Take one request from a caller outside the process.
+    ///
+    /// A [`Push::Status`] and a [`Push::Clear`] answer on this thread, because
+    /// they read or reset state the frame loop owns.
+    /// A picture opens on a worker, so the frame loop never waits on a decode:
+    /// the worker renders the box a fresh open frames, uploads its first
+    /// texture and answers the caller, and the frame loop installs it on the
+    /// next frame.
+    /// The worker owns the reply, so a caller reads the decode error of the
+    /// picture it pushed.
+    pub fn accept(&mut self, push: Push) {
+        match push {
+            Push::Status { reply } => {
+                let _ = reply.send(self.status());
+            }
+            Push::Clear { reply } => {
+                self.clear();
+                let _ = reply.send(self.status());
+            }
+            Push::Bytes { data, reply } => self.push_async(reply, Opening::Bytes(data)),
+            Push::Path { path, reply } => self.push_async(reply, Opening::Path(path)),
+        }
+    }
+
+    /// What the view holds now, for a status report.
+    #[must_use]
+    pub fn status(&self) -> push::Status {
+        push::Status {
+            grid: self.st.mode == Mode::Grid,
+            planes: self.planes,
+            source: self.label.clone(),
+            width: self.st.img.w,
+            height: self.st.img.h,
+            scale: self.st.view_scale,
+        }
+    }
+
+    /// Open a pushed picture on a worker.
+    ///
+    /// The worker renders the region a fresh open frames: the whole plane for
+    /// a picture, and the first spread for a document, because a whole book
+    /// costs one page render per page.
+    /// The upload also runs there, so the main thread only draws.
+    fn push_async(&mut self, reply: Sender<std::result::Result<Shown, String>>, opening: Opening) {
+        let uploader = self.renderer.uploader();
+        let tx = self.pushed_tx.clone();
+        let label = opening.label();
+        rayon::spawn(move || {
+            let surface = match opening.open() {
+                Ok(surface) => surface,
+                Err(err) => {
+                    let _ = reply.send(Err(err));
+                    return;
+                }
+            };
+            let planes = surface.plane_count();
+            let opened = surface.bounds(0).map_err(|err| err.to_string());
+            let size = match opened {
+                Ok(size) => size,
+                Err(err) => {
+                    let _ = reply.send(Err(err));
+                    return;
+                }
+            };
+            let open_box = surface.open_box(0);
+            let region = open_box.unwrap_or(size).whole();
+            let image = surface
+                .render(View::region(0, region, 1.0))
+                .map_err(|err| err.to_string());
+            let image = match image {
+                Ok(image) => image,
+                Err(err) => {
+                    let _ = reply.send(Err(err));
+                    return;
+                }
+            };
+            let texture = match uploader.image(&image) {
+                Ok(texture) => texture,
+                Err(err) => {
+                    let _ = reply.send(Err(err.to_string()));
+                    return;
+                }
+            };
+            let cell_box = surface.page_box(0);
+            let source = surface.can_refine().then_some(Arc::clone(&surface));
+            let _ = tx.send(Pushed {
+                texture,
+                source,
+                size,
+                planes,
+                open_box,
+                cell_box,
+                label,
+            });
+            let _ = reply.send(Ok(Shown {
+                planes,
+                width: size.w,
+                height: size.h,
+            }));
+        });
+    }
+
+    /// Install a pushed picture, dropping whatever the view held.
+    fn apply_pushed(&mut self, pushed: Pushed) {
+        let Pushed {
+            texture,
+            source,
+            size,
+            planes,
+            open_box,
+            cell_box,
+            label,
+        } = pushed;
+        self.st.mode = Mode::Image;
+        self.st.open_id = None;
+        self.st.view_from_grid = None;
+        self.st.loader = None;
+        self.st.view_loading = false;
+        self.st.view_tex = Some(texture);
+        self.st.img = size;
+        self.st.open_box = open_box;
+        self.st.cell_box = cell_box;
+        self.st.adopt_source(source);
+        self.st.reset_view();
+        self.planes = planes;
+        self.label = label;
+        self.title_open_id = None;
+    }
+
+    /// Return to the blank view, with no source and no content.
+    ///
+    /// The grid stays as it was, so a launch over a directory keeps its cells
+    /// behind `ESC`; a launch with no path holds no grid, so the pane clears to
+    /// the background and draws nothing.
+    fn clear(&mut self) {
+        self.st.mode = Mode::Grid;
+        self.st.open_id = None;
+        self.st.view_from_grid = None;
+        self.st.loader = None;
+        self.st.view_loading = false;
+        self.st.view_tex = None;
+        self.st.img = Size { w: 0.0, h: 0.0 };
+        self.st.open_box = None;
+        self.st.cell_box = None;
+        self.st.adopt_source(None);
+        self.st.reset_view();
+        self.planes = 0;
+        push::MEMORY_LABEL.clone_into(&mut self.label);
+        self.title_open_id = None;
+    }
+
     /// The size of the open picture, in physical pixels.
     ///
     /// A host that fits a window to the picture reads this.
@@ -747,6 +1008,12 @@ impl Viewer {
     /// Run the frame: read the input, advance every ease and fill the batch.
     #[allow(clippy::too_many_lines)]
     fn frame(&mut self, host: &mut dyn Host, size: (u32, u32), dt: f32) -> Result<()> {
+        // Pushed content lands before the frame reads the view, so the picture
+        // a caller pushed paints in the frame that follows its worker: the
+        // caller already read the reply, so the texture is ready.
+        while let Ok(pushed) = self.pushed_rx.try_recv() {
+            self.apply_pushed(pushed);
+        }
         let r = &mut self.renderer;
 
         // The debug level, read once per frame: the drawing below arms its
@@ -1038,24 +1305,31 @@ impl Viewer {
         let shift_speed = shift_mult as f32;
 
         if self.st.mode == Mode::Grid {
+            // A blank launch holds no grid, so the pane stays inert until a
+            // push lands a picture.
             // Grid navigation: h/j/k/l and the arrows move the selection,
             // Enter opens the selected image, q quits (ESC is inert here,
             // because the the grid is the home view).
-            match self.grid.as_mut().unwrap().handle_input(
-                &self.input,
-                (WinW::new(win_w), WinH::new(win_h)),
-                shift_mult,
-            ) {
+            let action = self.grid.as_mut().map(|grid| {
+                grid.handle_input(
+                    &self.input,
+                    (WinW::new(win_w), WinH::new(win_h)),
+                    shift_mult,
+                )
+            });
+            match action.flatten() {
                 Some(GridAction::Open(i)) => {
                     tracing::debug!(entry = i, "enter pressed");
-                    show_entry(
-                        &mut self.st,
-                        self.grid.as_mut().unwrap(),
-                        i,
-                        r,
-                        (WinW::new(win_w), WinH::new(win_h)),
-                        true,
-                    );
+                    if let Some(grid) = self.grid.as_mut() {
+                        show_entry(
+                            &mut self.st,
+                            grid,
+                            i,
+                            r,
+                            (WinW::new(win_w), WinH::new(win_h)),
+                            true,
+                        );
+                    }
                 }
                 Some(GridAction::Quit) => self.quit = true,
                 None => {}
@@ -2076,10 +2350,10 @@ impl Viewer {
             if let Some(bg) = &mut self.st.blur_bg {
                 bg.draw(r, WinW::new(win_w), WinH::new(win_h));
             }
-            self.grid
-                .as_ref()
-                .unwrap()
-                .draw(r, (WinW::new(win_w), WinH::new(win_h)));
+            // A blank launch holds no grid, so nothing draws over the clear.
+            if let Some(grid) = self.grid.as_ref() {
+                grid.draw(r, (WinW::new(win_w), WinH::new(win_h)));
+            }
         } else {
             // VV_BLUR_BG gimmick: blurred copy of the image, scaled to
             // cover the whole window (fit on the narrower side, with the other
