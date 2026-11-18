@@ -282,12 +282,18 @@ fn pixel_dimensions(region: Crop, scale: f32) -> (u16, u16, f32) {
     (pw, ph, scale as f32)
 }
 
+/// The five bytes that open every PDF file.
+///
+/// One constant serves the file route ([`is_pdf`]), the converter answer and
+/// the memory route, so no caller spells the magic twice.
+pub(crate) const MAGIC: &[u8] = b"%PDF-";
+
 /// Does the file start with the PDF magic (`%PDF-`)?
 /// The content decides, not the extension, so a misnamed file still routes
 /// here.
 #[must_use]
 pub fn is_pdf(path: &Path) -> bool {
-    file_magic_at_least(path, 5).as_deref() == Some(b"%PDF-".as_slice())
+    file_magic_at_least(path, MAGIC.len()).as_deref() == Some(MAGIC)
 }
 
 /// The first `n` bytes of the file, or None on a missing or short file.

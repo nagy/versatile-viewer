@@ -33,6 +33,20 @@ pub fn decode_jxl(path: &Path) -> Result<DecodedImage, DecodeError> {
     fb_to_rgba(&render.image_all_channels())
 }
 
+/// Decode a JPEG XL codestream that lives in memory.
+///
+/// # Errors
+///
+/// The function errors when jxl-oxide rejects the codestream, and when the
+/// frame buffer holds an unexpected channel count.
+#[must_use = "a decode that nobody reads only costs time"]
+pub fn decode_jxl_bytes(data: &[u8]) -> Result<DecodedImage, DecodeError> {
+    let image = jxl_oxide::JxlImage::builder().read(data)?;
+    let render = image.render_frame(0)?;
+
+    fb_to_rgba(&render.image_all_channels())
+}
+
 /// Convert a jxl-oxide framebuffer to RGBA8.
 ///
 /// The framebuffer holds f32 samples and 1 to 4 interleaved channels, and
@@ -75,12 +89,27 @@ pub fn decode_common(path: &Path) -> Result<DecodedImage, DecodeError> {
         .with_guessed_format()?
         .decode()?
         .into_rgba8();
+    Ok(capped_rgba(rgba))
+}
+
+/// Decode a common format that lives in memory.
+///
+/// # Errors
+///
+/// The function errors when the `image` decoder rejects the bytes.
+#[must_use = "a decode that nobody reads only costs time"]
+pub fn decode_common_bytes(data: &[u8]) -> Result<DecodedImage, DecodeError> {
+    Ok(capped_rgba(image::load_from_memory(data)?.into_rgba8()))
+}
+
+/// Wrap a decoded RGBA buffer, capped to the uploadable side.
+fn capped_rgba(rgba: image::RgbaImage) -> DecodedImage {
     let (width, height) = rgba.dimensions();
-    Ok(cap_texture_side(DecodedImage::from_exact(
+    cap_texture_side(DecodedImage::from_exact(
         ImgW::new(width),
         ImgH::new(height),
         rgba.into_raw(),
-    )))
+    ))
 }
 
 /// Decode a non-vector file with the decoder that [`sign::detect`] named.
@@ -96,6 +125,22 @@ pub fn decode_raster(path: &Path, format: sign::Format) -> Result<DecodedImage, 
     match format {
         crate::sign::Format::Jxl => decode_jxl(path),
         crate::sign::Format::Common => decode_common(path),
+    }
+}
+
+/// Decode raster bytes with the decoder that [`sign::detect_bytes`] named.
+///
+/// The function applies [`cap_texture_side`], so the result is uploadable as
+/// is.
+/// It runs on a decode worker, never on the main thread.
+///
+/// # Errors
+///
+/// The function errors when the decoder of the named format rejects the bytes.
+pub fn decode_raster_bytes(data: &[u8], format: sign::Format) -> Result<DecodedImage, DecodeError> {
+    match format {
+        crate::sign::Format::Jxl => decode_jxl_bytes(data),
+        crate::sign::Format::Common => decode_common_bytes(data),
     }
 }
 

@@ -143,7 +143,7 @@ const CONFIG_ENV: &str = "VV_CONVERTERS";
 const KEY_VERSION: &str = "vv-converted-2";
 
 /// The magic of a PDF answer.
-const PDF_MAGIC: &[u8] = b"%PDF-";
+const PDF_MAGIC: &[u8] = crate::pdf::MAGIC;
 
 /// Why a converter table did not load.
 ///

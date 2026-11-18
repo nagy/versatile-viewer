@@ -46,4 +46,7 @@ pub use vv_pixels::{
     downscale_rgba_ref, error, fitted, placeholder, resample_rgba,
 };
 
-pub use crate::decode::{decode_common, decode_jxl, decode_raster, fb_to_rgba, measure_vector};
+pub use crate::decode::{
+    decode_common, decode_common_bytes, decode_jxl, decode_jxl_bytes, decode_raster,
+    decode_raster_bytes, fb_to_rgba, measure_vector,
+};

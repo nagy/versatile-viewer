@@ -66,6 +66,14 @@ pub enum Format {
 /// The two-byte magic of a raw JPEG XL codestream.
 const JXL_MAGIC: [u8; 2] = [0xff, 0x0a];
 
+/// The twelve-byte signature that opens a JPEG XL container.
+///
+/// A container starts with a box header, not the codestream magic, so a memory
+/// source reads the box name instead of an extension.
+const JXL_CONTAINER: [u8; 12] = [
+    0x00, 0x00, 0x00, 0x0c, b'J', b'X', b'L', b' ', 0x0d, 0x0a, 0x87, 0x0a,
+];
+
 /// The two-byte magic of `path`.
 ///
 /// A file shorter than two bytes matches no format, so it answers
@@ -110,6 +118,40 @@ pub fn detect(path: &Path) -> Result<Kind, SignError> {
         .into_dimensions()
         .map_err(|_| SignError::Unknown)?;
     Ok(Kind::Raster(Format::Common))
+}
+
+/// Sniff a byte slice once and name what its content calls for.
+///
+/// The function is the in-memory twin of [`detect`], so a picture that never
+/// reaches a file routes through the same one decision.
+/// A JPEG XL codestream passes on its magic or on the container box that names
+/// `JXL `, because a memory source carries no extension to break the tie.
+/// Every other byte slice passes only when the `image` crate parses its
+/// header.
+///
+/// # Errors
+///
+/// The function errors when the content matches no decoder.
+pub fn detect_bytes(data: &[u8]) -> Result<Kind, SignError> {
+    if crate::svg::sniff_bytes(data) {
+        return Ok(Kind::Vector);
+    }
+    let Some(magic) = head_bytes(data) else {
+        return Err(SignError::Unknown);
+    };
+    if magic == JXL_MAGIC || data.starts_with(&JXL_CONTAINER) {
+        return Ok(Kind::Raster(Format::Jxl));
+    }
+    image::ImageReader::new(std::io::Cursor::new(data))
+        .with_guessed_format()?
+        .into_dimensions()
+        .map_err(|_| SignError::Unknown)?;
+    Ok(Kind::Raster(Format::Common))
+}
+
+/// The first two bytes of a byte slice, or `None` when it holds fewer.
+fn head_bytes(data: &[u8]) -> Option<[u8; 2]> {
+    data.get(..2).and_then(|head| head.try_into().ok())
 }
 
 /// Whether the name of `path` ends in `.jxl`, in any letter case.
@@ -225,6 +267,41 @@ mod tests {
         let path = tmp.path().join("x.png");
         std::fs::write(&path, b"garbage").unwrap();
         assert!(detect(&path).is_err());
+    }
+
+    #[test]
+    fn detect_bytes_names_the_raster_content() {
+        let png = {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let path = tmp.path().join("img.png");
+            image::DynamicImage::new_rgb8(2, 2)
+                .save_with_format(&path, image::ImageFormat::Png)
+                .unwrap();
+            std::fs::read(&path).unwrap()
+        };
+        assert_eq!(detect_bytes(&png).unwrap(), Kind::Raster(Format::Common));
+        // A raw codestream needs no extension.
+        assert_eq!(
+            detect_bytes(&[0xff, 0x0a, 0x01, 0x02]).unwrap(),
+            Kind::Raster(Format::Jxl)
+        );
+        // A container names its box instead.
+        let mut container = vec![0x00, 0x00, 0x00, 0x0c];
+        container.extend_from_slice(b"JXL ");
+        container.extend_from_slice(&[0x0d, 0x0a, 0x87, 0x0a]);
+        assert_eq!(detect_bytes(&container).unwrap(), Kind::Raster(Format::Jxl));
+    }
+
+    #[test]
+    fn detect_bytes_reads_a_document() {
+        let svg = br#"<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"/>"#;
+        assert_eq!(detect_bytes(svg).unwrap(), Kind::Vector);
+    }
+
+    #[test]
+    fn detect_bytes_rejects_garbage() {
+        assert!(detect_bytes(b"garbage").is_err());
+        assert!(matches!(detect_bytes(&[]), Err(SignError::Unknown)));
     }
 
     #[test]

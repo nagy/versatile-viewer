@@ -349,6 +349,35 @@ pub fn open_surface(path: &Path) -> Result<Box<dyn Surface>, SurfaceError> {
     }
 }
 
+/// Open a picture that lives in memory instead of on disk.
+///
+/// The route matches [`open_surface`]: the head names the backend, so a pushed
+/// PDF keeps its pages and a pushed SVG document keeps its tree and its region
+/// anchor, while every raster format becomes a [`MemorySurface`] over the
+/// pixels this call decodes.
+/// The bytes arrive from a caller that already holds them (an editor buffer, a
+/// network answer, an MCP tool), so no file and no converter rule sits in this
+/// path.
+///
+/// # Errors
+///
+/// The function errors when the content matches no backend, or when the
+/// decoder rejects it.
+pub fn open_bytes(data: &[u8]) -> Result<Box<dyn Surface>, SurfaceError> {
+    if data.starts_with(crate::pdf::MAGIC) {
+        return Ok(Box::new(crate::pdf::PdfSurface::from_bytes(data.to_vec())?));
+    }
+    match sign::detect_bytes(data)? {
+        sign::Kind::Vector => Ok(Box::new(VectorSurface::from_vector(
+            crate::svg::from_bytes(data)?,
+        ))),
+        sign::Kind::Raster(format) => {
+            let image = crate::decode_raster_bytes(data, format)?;
+            Ok(Box::new(MemorySurface::new(image)))
+        }
+    }
+}
+
 /// Open a file and, when its source holds more than one plane, show it as a
 /// book (see [`crate::book`]).
 ///
@@ -368,6 +397,72 @@ pub fn open_book_surface(path: &Path) -> Result<Box<dyn Surface>, SurfaceError> 
     }
     let inner: Arc<dyn Surface> = surface.into();
     Ok(Box::new(crate::book::BookSurface::new(inner)?))
+}
+
+/// A raster picture that lives only in memory, which always holds one plane.
+///
+/// A pushed byte stream decodes once at open, so [`Surface::bounds`] and a
+/// native render cost no second decode, and every other scale resamples the
+/// one buffer the surface holds.
+/// The pixels travel as they came back from the decoder, capped by
+/// [`crate::cap_texture_side`], so the plane here measures the capped size and
+/// an upload takes it as is.
+#[derive(Debug)]
+pub struct MemorySurface {
+    image: DecodedImage,
+}
+
+impl MemorySurface {
+    /// Wrap a decoded picture.
+    #[must_use]
+    pub const fn new(image: DecodedImage) -> Self {
+        MemorySurface { image }
+    }
+
+    /// The extent of the pixel buffer, in surface units.
+    #[must_use]
+    pub fn size(&self) -> Size {
+        Size {
+            w: self.image.width().as_f32(),
+            h: self.image.height().as_f32(),
+        }
+    }
+}
+
+impl Surface for MemorySurface {
+    fn plane_count(&self) -> usize {
+        1
+    }
+
+    fn bounds(&self, plane: usize) -> Result<Size, SurfaceError> {
+        if plane != 0 {
+            return Err(SurfaceError::Plane(plane));
+        }
+        Ok(self.size())
+    }
+
+    fn render_whole(&self, plane: usize, scale: f32) -> Result<DecodedImage, SurfaceError> {
+        if plane != 0 {
+            return Err(SurfaceError::Plane(plane));
+        }
+        if !valid_scale(scale) {
+            return Err(SurfaceError::Scale(scale));
+        }
+        if is_native(scale) {
+            return Ok(DecodedImage::from_exact(
+                self.image.width(),
+                self.image.height(),
+                self.image.as_rgba().to_vec(),
+            ));
+        }
+        let whole = self.size();
+        resample(&self.image, whole.whole(), scale)
+    }
+
+    fn progressive(&self) -> Result<Option<Box<dyn ChunkSource>>, SurfaceError> {
+        // The bytes arrived whole, so no stream improves the picture.
+        Ok(None)
+    }
 }
 
 /// A raster image file (JPEG XL, PNG, JPEG, WebP, ...) which always holds one
@@ -694,6 +789,47 @@ mod tests {
         let path = dir.join(name);
         std::fs::write(&path, body).unwrap();
         path
+    }
+
+    #[test]
+    fn open_bytes_reads_a_picture_from_memory() {
+        let dir = temp_dir();
+        let path = write_png(dir.path(), "img.png", 3, 2);
+        let bytes = std::fs::read(&path).unwrap();
+        let surface = open_bytes(&bytes).unwrap();
+        assert_eq!(surface.plane_count(), 1);
+        assert_eq!(surface.bounds(0).unwrap(), Size { w: 3.0, h: 2.0 });
+        assert!(!surface.can_refine());
+        // A native render answers the pixels the bytes held, and a half-scale
+        // render halves the plane.
+        let whole = surface.render(View::whole(0, 1.0)).unwrap();
+        assert_eq!((whole.width().raw(), whole.height().raw()), (3, 2));
+        let half = surface.render(View::whole(0, 0.5)).unwrap();
+        assert_eq!(half.width().raw(), 2);
+    }
+
+    #[test]
+    fn open_bytes_reads_a_document_from_memory() {
+        let surface = open_bytes(SQUARE.as_bytes()).unwrap();
+        assert_eq!(surface.plane_count(), 1);
+        assert!(surface.can_refine(), "a vector tree repaints a region");
+        // The base raster clamps the long side into 1024..=8192, so a 100 x 50
+        // document bakes 1024 x 512 and keeps its shape.
+        assert_eq!(
+            surface.bounds(0).unwrap(),
+            Size {
+                w: 1024.0,
+                h: 512.0
+            }
+        );
+    }
+
+    #[test]
+    fn open_bytes_rejects_garbage() {
+        let Err(err) = open_bytes(b"not a picture") else {
+            panic!("garbage opens no surface");
+        };
+        assert!(matches!(err, SurfaceError::Sign(_)), "{err}");
     }
 
     #[test]

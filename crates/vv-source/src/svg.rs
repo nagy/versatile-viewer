@@ -301,15 +301,24 @@ fn options() -> usvg::Options<'static> {
 /// The function errors when the read, the decompression or the size cap
 /// fails.
 fn read(path: &Path) -> Result<Vec<u8>, DecodeError> {
-    let raw = std::fs::read(path)?;
-    if !is_gzip(&raw) {
+    decompress(&std::fs::read(path)?)
+}
+
+/// Apply the gzip rule and the size cap to bytes that came from anywhere.
+///
+/// [`read`] hands it the bytes of a file, and [`from_bytes`] hands it the
+/// bytes of a memory source, so one cap and one gunzip serve both.
+///
+/// The function errors when the answer is too large or the gunzip fails.
+fn decompress(raw: &[u8]) -> Result<Vec<u8>, DecodeError> {
+    if !is_gzip(raw) {
         if raw.len() > MAX_INPUT {
             return Err(DecodeError::Input);
         }
-        return Ok(raw);
+        return Ok(raw.to_vec());
     }
     let mut out = Vec::new();
-    flate2::read::GzDecoder::new(raw.as_slice())
+    flate2::read::GzDecoder::new(raw)
         .take(MAX_INPUT as u64 + 1)
         .read_to_end(&mut out)?;
     if out.len() > MAX_INPUT {
@@ -345,7 +354,19 @@ pub(crate) fn from_str(text: &str) -> Result<Vector, DecodeError> {
 /// The function errors when the file cannot be read, or when usvg rejects
 /// the XML, the namespaces or the document structure.
 pub fn parse(path: &Path) -> Result<Vector, DecodeError> {
-    let bytes = read(path)?;
+    from_bytes(&read(path)?)
+}
+
+/// Parse an SVG or SVGZ document that lives in memory.
+///
+/// The function applies the same gzip rule and the same [`MAX_INPUT`] cap as a
+/// file read, so a memory source can never bypass the input bound.
+///
+/// # Errors
+///
+/// The function errors when the gunzip, the cap or usvg rejects the bytes.
+pub(crate) fn from_bytes(raw: &[u8]) -> Result<Vector, DecodeError> {
+    let bytes = decompress(raw)?;
     let tree =
         usvg::Tree::from_data(&bytes, &options()).map_err(|e| DecodeError::Svg(Box::new(e)))?;
     Ok(Vector { tree })
@@ -391,6 +412,31 @@ pub fn sniff(path: &Path) -> bool {
         return false;
     }
     head(path).is_some_and(|bytes| looks_like_svg(&bytes))
+}
+
+/// Whether a byte slice holds SVG content, decided the way [`sniff`] decides
+/// for a file.
+///
+/// The function is the in-memory twin of [`sniff`], so a pushed picture and a
+/// file route through one test.
+#[must_use]
+pub(crate) fn sniff_bytes(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(HEAD)];
+    if is_gzip(head) {
+        let mut out = Vec::new();
+        return flate2::read::GzDecoder::new(bytes)
+            .take(HEAD as u64)
+            .read_to_end(&mut out)
+            .is_ok()
+            && looks_like_svg(&out);
+    }
+    let Some(magic) = head.get(..2).and_then(|m| <[u8; 2]>::try_from(m).ok()) else {
+        return false;
+    };
+    if crate::sign::is_common_magic(magic) || magic == [0xff, 0x0a] {
+        return false;
+    }
+    looks_like_svg(head)
 }
 
 /// Sniff the decompressed head of a gzip payload.
