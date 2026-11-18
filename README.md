@@ -117,6 +117,7 @@ A converted document opens as the same book. See `docs/adr/0001-*.md` and
 ```sh
 nix run . -- <image-path-or-directory>   # single image or directory grid
 nix run . -- --mcp <image-path-or-directory>   # the same, plus MCP on stdio
+nix run . -- --mcp          # no path: the window waits for a pushed picture
 nix run . -- --wid 0x3a00007 <image-path-or-directory>   # inside a host window
 nix run . -- --version   # prints `vv 0.1.0`
 nix run . -- --help      # every flag and the path
@@ -130,8 +131,8 @@ decoder and the renderer are pure Rust. No C toolchain is necessary.
 
 ## MCP
 
-`vv --mcp <path>` also serves the [Model Context Protocol] on stdio, so an
-agent can drive the viewer. The window stays interactive.
+`vv --mcp` also serves the [Model Context Protocol] on stdio, so an agent can
+drive the viewer. The window stays interactive.
 
 [Model Context Protocol]: https://modelcontextprotocol.io/specification/2026-07-28
 
@@ -139,14 +140,28 @@ agent can drive the viewer. The window stays interactive.
 { "command": "vv", "args": ["--mcp", "/path/to/images"] }
 ```
 
+The path is optional for this run. `vv --mcp` alone opens a blank window that
+shows only what a tool pushes, so the viewer reads no file at all.
+
 The server pins spec revision `2026-07-28`, which is stateless. There is no
 `initialize` handshake and no session. Each request carries its protocol
 version and client capabilities in the `io.modelcontextprotocol/*` `_meta`
 fields, and `server/discover` replaces the handshake.
 
-At present the server is a husk. It advertises the tools capability with an
-empty tool list, and offers no resources or prompts. Every diagnostic goes to
-stderr, because stdout carries protocol frames only.
+| Tool | Arguments | Answer |
+| --- | --- | --- |
+| `vv_show_image_bytes` | `data_base64` | plane count and the size of plane 0 |
+| `vv_show_image` | `path` | plane count and the size of plane 0 |
+| `vv_clear` | none | the blank status |
+| `vv_get_status` | none | mode, plane count, source label, plane size, scale |
+
+`vv_show_image_bytes` decides the format from the bytes, so the call carries
+no file name or extension. A JPEG XL image, a PNG, an SVG document and a PDF
+all route on their own content, and the payload may hold up to 64 MiB. The call
+answers once the plane decodes, and a decode failure comes back as a tool error
+with the decoder's reason.
+
+Every diagnostic goes to stderr, because stdout carries protocol frames only.
 
 ## Embedding
 

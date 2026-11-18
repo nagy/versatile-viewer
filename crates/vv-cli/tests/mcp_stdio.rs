@@ -23,7 +23,43 @@ const PROTOCOL: &str = "2026-07-28";
 const CHILD_ENV: &str = "VV_MCP_STDIO_CHILD";
 
 /// The test that runs in the child process.
-const TEST_NAME: &str = "stdio_serves_discover_and_an_empty_tool_list";
+const TEST_NAME: &str = "stdio_serves_discover_and_the_tool_list";
+
+/// The sink of the child process.
+///
+/// No window exists in this test, so the sink reports a blank view and refuses
+/// every picture: the transport is what this test proves.
+struct NoView;
+
+impl vv_mcp::mcp::Sink for NoView {
+    fn show_bytes(&self, _data: Vec<u8>) -> Result<vv_mcp::mcp::Shown, String> {
+        Err("no window in this test".to_owned())
+    }
+
+    fn show_path(&self, _path: std::path::PathBuf) -> Result<vv_mcp::mcp::Shown, String> {
+        Err("no window in this test".to_owned())
+    }
+
+    fn clear(&self) -> vv_mcp::mcp::Status {
+        blank()
+    }
+
+    fn status(&self) -> vv_mcp::mcp::Status {
+        blank()
+    }
+}
+
+/// The status of a view that shows nothing.
+fn blank() -> vv_mcp::mcp::Status {
+    vv_mcp::mcp::Status {
+        grid: true,
+        planes: 0,
+        source: "mcp".to_owned(),
+        width: 0.0,
+        height: 0.0,
+        scale: None,
+    }
+}
 
 /// A request `_meta` block with the keys the revision requires.
 fn meta() -> serde_json::Value {
@@ -81,7 +117,7 @@ fn maybe_run_as_child() -> bool {
     if env::var_os(CHILD_ENV).is_none() {
         return false;
     }
-    vv_mcp::mcp::spawn().expect("spawn the MCP server");
+    vv_mcp::mcp::spawn(NoView).expect("spawn the MCP server");
     // The server thread owns stdin.
     // Parking keeps the process alive until the parent kills it.
     std::thread::sleep(Duration::from_secs(30));
@@ -89,7 +125,7 @@ fn maybe_run_as_child() -> bool {
 }
 
 #[test]
-fn stdio_serves_discover_and_an_empty_tool_list() {
+fn stdio_serves_discover_and_the_tool_list() {
     if maybe_run_as_child() {
         return;
     }
@@ -138,7 +174,21 @@ fn stdio_serves_discover_and_an_empty_tool_list() {
             "params": { "_meta": meta() },
         }),
     );
-    assert_eq!(list["result"]["tools"], serde_json::json!([]));
+    let names: Vec<&str> = list["result"]["tools"]
+        .as_array()
+        .expect("a list")
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "vv_show_image_bytes",
+            "vv_show_image",
+            "vv_clear",
+            "vv_get_status"
+        ]
+    );
 
     let call = round_trip(
         &mut writer,

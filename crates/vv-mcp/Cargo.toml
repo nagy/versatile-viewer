@@ -23,6 +23,9 @@ tokio = { version = "1.54.1", default-features = false, features = [
 ] }
 # The MCP tool schemas and the tool results.
 serde_json = "1.0.154"
+# The picture bytes of `vv_show_image_bytes` ride base64 in a JSON string, so
+# one dependency decodes them and the server never reads a file for that tool.
+base64 = "0.23.1"
 derive_more = { version = "2.1.1", default-features = false, features = [
   "display",
   "error",

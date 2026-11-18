@@ -1066,3 +1066,98 @@ fn a_viewer_paints_into_a_host_texture() {
     );
     assert!(!viewer.quit(), "nothing asked the viewer to exit");
 }
+
+/// A picture that arrives from outside the process paints in a blank viewer.
+///
+/// The launch names no path, so nothing this test shows ever reaches the disk:
+/// the bytes travel through `Viewer::accept`, decode on the viewer's worker and
+/// land in the host texture.
+#[test]
+#[ignore = "needs a Vulkan adapter"]
+fn a_pushed_picture_lands_in_a_blank_viewer() {
+    struct NullHost;
+
+    impl vv_view::viewer::Host for NullHost {
+        fn set_title(&mut self, _title: &str) {}
+
+        fn grab_pointer(&mut self) {}
+
+        fn release_pointer(&mut self) {}
+
+        fn place_pointer(&mut self, _at: Vec2) {}
+    }
+
+    let Some(canvas) = Canvas::new(32, 32) else {
+        skip_without_adapter();
+        return;
+    };
+    let launch = vv_view::viewer::Launch::blank(true);
+    // A blank launch keeps the default window size and names the protocol.
+    assert_eq!(launch.window_size(), (1024, 768));
+    assert!(launch.title().contains("mcp"), "{}", launch.title());
+    let mut viewer = vv_view::viewer::Viewer::new(
+        canvas.device.clone(),
+        canvas.queue.clone(),
+        FORMAT,
+        canvas.device.limits().max_texture_dimension_2d,
+        launch,
+        canvas.size,
+    );
+
+    let mut host = NullHost;
+    let mut frame = |viewer: &mut vv_view::viewer::Viewer| {
+        let view = canvas
+            .target
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        viewer
+            .render(&mut host, &view, canvas.size, 0.016)
+            .expect("the frame renders");
+        canvas.read()
+    };
+
+    // A blank launch clears to the background and shows nothing.
+    assert_eq!(frame(&mut viewer).at(16, 16), [6, 0x23, 0x29, 0xff]);
+    let status = viewer.status();
+    assert_eq!(
+        (status.grid, status.planes, status.source.as_str()),
+        (true, 0, "mcp")
+    );
+
+    // One push of an SVG document, named by its bytes alone: the sniff decides
+    // the backend, so the call carries no extension.
+    let square = r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="#ff0000"/></svg>"##;
+    let (reply, answers) = std::sync::mpsc::channel();
+    viewer.accept(vv_view::push::Push::Bytes {
+        data: square.as_bytes().to_vec(),
+        reply,
+    });
+    let shown = answers
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the worker answers")
+        .expect("the bytes decode");
+    assert_eq!(shown.planes, 1);
+    // The base raster of a vector file clamps its long side into 1024..=8192.
+    assert_eq!(shown.width, 1024.0);
+
+    let mut red = false;
+    for _ in 0..240 {
+        if frame(&mut viewer).at(16, 16) == [255, 0, 0, 255] {
+            red = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
+    assert!(red, "the pushed picture lands in the host texture");
+    let status = viewer.status();
+    assert_eq!((status.grid, status.planes), (false, 1));
+    assert_eq!(status.source, "mcp");
+
+    // A clear returns to the blank view, which clears to the background again.
+    let (reply, answers) = std::sync::mpsc::channel();
+    viewer.accept(vv_view::push::Push::Clear { reply });
+    let status = answers
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the clear answers");
+    assert_eq!((status.grid, status.planes), (true, 0));
+    assert_eq!(frame(&mut viewer).at(16, 16), [6, 0x23, 0x29, 0xff]);
+}

@@ -19,7 +19,7 @@ crates/vv-pixels/  DecodedImage, resample_rgba, cap_texture_side, rgba_from_samp
 crates/vv-cache/   Cache, CacheError, CachedThumb, WRITE_BUDGET (thumbnails and converted answers)
 crates/vv-gpu/     gpu render texture
 crates/vv-source/  sign surface svg pdf book convert decode
-crates/vv-view/    input zoomkeys pane blurbg loader grid view viewer
+crates/vv-view/    input zoomkeys push pane blurbg loader grid view viewer
 crates/vv-mcp/     mcp
 crates/vv-cli/     main.rs (bin vv), tests/, examples/
 ```
@@ -119,6 +119,7 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   `crates/vv-source/src/convert.rs` hashes that key itself with `sha2`, because the key format belongs to the converter seam and `vv-cache` sees an opaque string.
 - Every showable source is a `crates/vv-source/src/surface.rs` `Surface`: `plane_count`, `bounds`, `render_whole`, `render`, `progressive` and `previews`.
   `open_surface` sniffs the content with `crates/vv-source/src/sign.rs` and picks the backend: a raster file (`ImageSurface`), a vector file (`VectorSurface`), a PDF (`PdfSurface`) or a path a converter rule claims (`crates/vv-source/src/convert.rs`, which runs the rule and opens its answer).
+  `open_bytes` is the same route for content that never reaches a file (an MCP push), and it adds `MemorySurface`: the decode runs once at open, so `bounds` and a native render cost no second decode and every other scale resamples the one buffer the surface holds.
   A backend writes `render_whole`; `render` is a provided method that renders the whole plane and crops the region out of it.
   A backend with a region anchor (the vector tree, the PDF rasterizer) overrides `render` to pay only for the pixels the caller asked for, and returns `SurfaceError::Unsupported` rather than the whole plane for a region it cannot serve.
   A `View` names a plane, an optional `region::Crop` and a scale (output pixels per surface unit), so the grid asks for a thumbnail, the loader for the whole plane and the image view for the patch it shows.
@@ -432,6 +433,7 @@ The `pub use` line also carries what the public API names, so a caller reaches o
 ## Run
 
 Run `nix run . -- <image-path-or-directory>`.
+A `--mcp` run takes no path: `nix run . -- --mcp` opens the blank window and waits for a tool.
 ESC never quits.
 
 The window clears to `BACKGROUND` (`#062329`, `view.rs`).
@@ -509,6 +511,7 @@ A source that paints no paper carries it in its pixels, so no clear color ever h
 - `clap` (derive) owns the command line: one `Cli` struct in `main.rs` carries `--mcp`, `--wid <ID>` and the positional path.
   clap answers `-h`/`--help` and `-V`/`--version` before `main` runs, so neither opens a window.
   An unknown option, a second path, a missing path and a bad id all leave as clap errors that name the flag, so no usage string and no argv loop live in the tree.
+  The path stays optional for a `--mcp` run alone (`required_unless_present`), because that run pushes every picture through a tool.
 - `--version` prints `vv <Cargo.toml version>`, and `name = "vv"` in `#[command(..)]` names the program, so the package name never shows.
 - `Cli::try_parse_from` takes the program name first and is the test seam, so a test never reads `std::env::args`.
 - `pane::Wid` stays the one reader of the `--wid` value: `parse_wid` (`main.rs`) wraps `Wid::parse` as the clap value parser, so the decimal and `0x` forms and the `0` rejection live in `crates/vv-view/src/pane.rs` and nowhere else.
@@ -555,30 +558,48 @@ A source that paints no paper carries it in its pixels, so no clear color ever h
 
 ## MCP
 
-- `vv --mcp <path>` also serves the Model Context Protocol on stdio, from `crates/vv-mcp/src/mcp.rs`.
+- `vv --mcp` also serves the Model Context Protocol on stdio, from `crates/vv-mcp/src/mcp.rs`.
   The `--mcp` flag accepts either argument order.
   The viewer window stays interactive, and an embedded pane stays interactive the same way, so `--wid` and `--mcp` compose.
+- `Cli::path` is an `Option` with `required_unless_present = "mcp"`, so `vv --mcp` alone parses and `vv` alone fails clap with the flag named.
+  A run with no path opens `Launch::blank(shows_grid)` (`crates/vv-view/src/viewer.rs`): the default 1024x768 window, the `BACKGROUND` clear, no grid, no decode, and the title `<mcp>` + `SEP` + `versatile-viewer`.
+  That launch reads no file, so every picture it shows arrives through a tool.
 - The server pins revision `2026-07-28` and serves that revision only.
   The revision is stateless: no `initialize` handshake, no session, and the client context rides in the per-request `io.modelcontextprotocol/*` `_meta` fields.
   An older client fails fast on `UnsupportedProtocolVersion`.
-- The server is a husk: tools capability advertised, empty tool list, no resources, no prompts.
-  Deprecated `logging` is not advertised.
+- The server advertises four tools, and `tools()` plus one `call_tool` arm is the whole pair that lands one: `vv_show_image_bytes(data_base64)`, `vv_show_image(path)`, `vv_clear()` and `vv_get_status()`.
+  The four hints ride every tool (`read_only_hint` true only on `vv_get_status`), and the naming and hint rules live in the module docstring.
+  No resources, no prompts, and deprecated `logging` stays unadvertised.
+- A tool result carries the answer and a tool error carries the reason: `CallToolResult::structured` and `structured_error`, so a decode failure reaches the caller with the decoder's message.
+  A protocol error stays for a name this server cannot route.
+- `mcp::Sink` is the whole wall between the protocol layer and the picture: `show_bytes`, `show_path`, `clear` and `status`, over the plain `Shown` and `Status` values.
+  `crates/vv-mcp` names no texture, no device and no window, so a test drives every tool with a sink of its own, and the crate keeps its standalone place in the graph.
+- `crates/vv-cli/src/main.rs` implements that sink as `Bridge`, which owns a `std::sync::mpsc::Sender<vv_view::push::Push>` and waits on the reply channel the request carries.
+  `App::accept_pushes` drains the channel once per frame into `Viewer::accept`, so the frame loop stays the only owner of the view and a request that arrives before the window exists waits in the channel.
+  `PUSH_TIMEOUT` (60 s) bounds that wait, so a viewer that stopped drawing answers instead of hanging the caller.
+  `Push` lives in `vv-view` because it describes what a host may push, and the bridge converts `push::Shown` and `push::Status` into the `mcp` values.
+- `MAX_PUSH_BYTES` (64 MiB) caps one `vv_show_image_bytes` payload, and the cap reads the encoded text before the decode allocates, so a flood stops first.
+  `base64` is the one dependency this tool adds.
+- The picture route is `vv_source::surface::open_bytes`, which sniffs the head the way `open_surface` does: a PDF opens as `PdfSurface::from_bytes` (a book when it holds pages), an SVG or SVGZ document parses with `svg::from_bytes` into the same `VectorSurface`, and every raster format decodes once with `decode_raster_bytes` into a `MemorySurface`.
+  `sign::detect_bytes` is the in-memory twin of `sign::detect`, and a JPEG XL container passes on its `JXL ` box because a memory source carries no extension.
+  `svg::from_bytes` applies the same gzip rule and the same `MAX_INPUT` cap as a `.svgz` file read.
+- `Viewer::accept` answers `Push::Status` and `Push::Clear` on the main thread and opens a picture on a `rayon` worker, which renders the box a fresh open frames (the whole plane, or the first spread of a book), uploads the texture and answers the caller.
+  The frame loop installs the result, so the main thread never decodes and never uploads a pushed picture.
+  A push replaces what shows, `Push::Clear` returns to the blank view, and the grid the launch listed stays behind `ESC`.
 - stdout carries protocol frames only.
   Every diagnostic goes to stderr, and no library writes to stdout beside the transport.
   The module never writes to stdout outside the transport.
   The subscriber of the binary writes to stderr for the same reason, so the two `--mcp` and `RUST_LOG` compose.
 - The server runs a tokio current-thread runtime on a background thread.
   A start or run failure prints to stderr and never stops the viewer.
-- Client config: `{ "command": "vv", "args": ["--mcp", "/path/to/images"] }`.
-- Adding a tool means one `TOOLS` entry plus one `call_tool` arm.
-  The naming rule (`vv_<action>`), the four hint rules, and the planned tool set live in the `crates/vv-mcp/src/mcp.rs` module docstring.
-- Tests: unit tests in `crates/vv-mcp/src/mcp.rs` drive the server over an in-memory duplex stream.
-  `tests/mcp_stdio.rs` drives the real stdin and stdout of a child process.
+- Client config: `{ "command": "vv", "args": ["--mcp"] }` for pushed content, or `{ "command": "vv", "args": ["--mcp", "/path/to/images"] }` for a directory beside the tools.
+- Tests: unit tests in `crates/vv-mcp/src/mcp.rs` drive the server over an in-memory duplex stream against a fake sink.
+  `crates/vv-cli/tests/mcp_stdio.rs` drives the real stdin and stdout of a child process.
+  `crates/vv-cli/tests/gpu_offscreen.rs::a_pushed_picture_lands_in_a_blank_viewer` pushes bytes into a blank launch and reads the pixels back on lavapipe.
 
 ## Next
 
 - Add video playback (mpv inspiration).
   The backend is TBD.
-- Add the first MCP tool (`vv_show_image`), per the tool rules in `crates/vv-mcp/src/mcp.rs`.
 
 Module internals live in each module file `//!` docstring, and the layer a crate adds lives in its `crates/<crate>/src/lib.rs` `//!` docstring.
