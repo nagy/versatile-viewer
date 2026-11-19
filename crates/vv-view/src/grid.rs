@@ -501,27 +501,26 @@ pub enum GridAction {
     Quit,
 }
 
-/// One frame's decode dispatch: which entries to decode first, whether the
-/// wraparound scan runs, and what the keep set holds.
+/// One frame's decode policy: where the wraparound scan starts, whether it
+/// runs, and what the keep set holds.
 ///
-/// The four facts travel together because they answer one question, so a
+/// The three facts travel together because they answer one question, so a
 /// caller names them instead of passing a bool beside a bool that compiles
 /// just as well when swapped.
-#[derive(Debug, Clone, Default)]
-pub struct LoadPlan {
-    /// The indices to decode first: the selection, or the neighbors of the
-    /// open image.
-    pub priority: Vec<usize>,
+/// The indices to decode first stay outside the plan as a slice: that list is
+/// the one fact with a computed length, and a `Copy` value carries no buffer.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Plan {
     /// The index the wraparound scan starts at (the open image, or the
     /// selection).
     pub scan_start: usize,
     /// Whether the wraparound scan runs at all.
-    /// False dispatches only the `priority` entries and pauses the rest of the
+    /// False dispatches only the priority entries and pauses the rest of the
     /// queue: the image view sets it while the open image still decodes, so
     /// the visible image gets all the cores.
     pub scan: bool,
     /// Whether the keep set holds full-resolution textures: the entry at
-    /// `scan_start` plus the `priority` entries.
+    /// `scan_start` plus the priority entries.
     /// The grid view answers false, so a grid-only session uploads thumbnails
     /// and nothing else: a 50 MP neighbor would otherwise cost 200 MB of VRAM
     /// and a 30 ms main-thread upload.
@@ -815,16 +814,18 @@ impl Grid {
     }
 
     /// Drain finished background decodes, which upload textures on the main
-    /// thread, and hand out new jobs for one [`LoadPlan`].
+    /// thread, and hand out new jobs for one [`Plan`].
+    /// `priority` names the indices to decode first: the selection, or the
+    /// neighbors of the open image.
     /// The function runs every frame and never blocks.
     /// It skips entries whose texture the image view holds now.
-    pub fn load_pending(&mut self, plan: &LoadPlan) {
+    pub fn load_pending(&mut self, plan: Plan, priority: &[usize]) {
         // Ids that hold a full-resolution texture: the entry the
         // scan starts at (the open image) plus the prefetch priorities (its
         // neighbors).
         // Everything else stores only the thumbnail.
         let keep: HashSet<u64> = if plan.preload_full {
-            plan.priority
+            priority
                 .iter()
                 .filter_map(|&i| self.entries.get(i).map(|e| e.id))
                 .chain(
@@ -839,7 +840,7 @@ impl Grid {
 
         self.drain_placeholders();
         self.drain_results(&keep);
-        self.dispatch(plan, &keep);
+        self.dispatch(plan, priority, &keep);
     }
 
     /// Apply finished placeholder reads.
@@ -989,8 +990,8 @@ impl Grid {
     }
 
     /// Step 2 of [`Self::load_pending`]: dispatch new jobs.
-    /// The code dispatches the `priority` indices of the plan first (the
-    /// selection or the open image neighbors), then its wraparound scan.
+    /// The code dispatches the `priority` indices first (the selection or the
+    /// open image neighbors), then its wraparound scan.
     /// Jobs run on the shared rayon pool, so several decodes proceed in
     /// parallel.
     /// Each job sends its result back over the channel for `drain_results` to
@@ -998,10 +999,10 @@ impl Grid {
     /// The per-entry checks below (texture present, queued, viewing) make
     /// revisiting a priority index in the wraparound harmless.
     /// The code needs no extra dedup bookkeeping: O(1) per entry.
-    fn dispatch(&mut self, plan: &LoadPlan, keep: &HashSet<u64>) {
+    fn dispatch(&mut self, plan: Plan, priority: &[usize], keep: &HashSet<u64>) {
         let n = self.entries.len();
         let start = plan.scan_start.min(n);
-        let order = plan.priority.iter().copied().filter(|&i| i < n).chain(
+        let order = priority.iter().copied().filter(|&i| i < n).chain(
             plan.scan
                 .then(|| (start..n).chain(0..start))
                 .into_iter()

@@ -139,27 +139,27 @@ impl Bridge {
     }
 }
 
+// The status and the shown answer name one type in both crates
+// (`vv_core::push`), so the bridge moves the viewer's answer through without
+// rewriting a field.
 impl mcp::Sink for Bridge {
     fn show_bytes(&self, data: Vec<u8>) -> Result<mcp::Shown, String> {
         let (reply, answers) = mpsc::channel();
         self.send(Push::Bytes { data, reply })?;
-        let shown = await_show(&answers)?;
-        Ok(shown_answer(shown))
+        await_show(&answers)
     }
 
     fn show_path(&self, path: PathBuf) -> Result<mcp::Shown, String> {
         let (reply, answers) = mpsc::channel();
         self.send(Push::Path { path, reply })?;
-        let shown = await_show(&answers)?;
-        Ok(shown_answer(shown))
+        await_show(&answers)
     }
 
     fn clear(&self) -> mcp::Status {
         let (reply, answers) = mpsc::channel();
         let status = self
             .send(Push::Clear { reply })
-            .and_then(|()| await_status(&answers))
-            .map(status_answer);
+            .and_then(|()| await_status(&answers));
         status.unwrap_or_else(|reason| blank_status(&reason))
     }
 
@@ -167,8 +167,7 @@ impl mcp::Sink for Bridge {
         let (reply, answers) = mpsc::channel();
         let status = self
             .send(Push::Status { reply })
-            .and_then(|()| await_status(&answers))
-            .map(status_answer);
+            .and_then(|()| await_status(&answers));
         status.unwrap_or_else(|reason| blank_status(&reason))
     }
 }
@@ -213,27 +212,6 @@ fn await_status(answers: &mpsc::Receiver<push::Status>) -> Result<push::Status, 
         .map_err(|_| "the viewer did not answer".to_owned())
 }
 
-/// Carry the viewer's status into the tool result.
-fn status_answer(status: push::Status) -> mcp::Status {
-    mcp::Status {
-        grid: status.grid,
-        planes: status.planes,
-        source: status.source,
-        width: status.width,
-        height: status.height,
-        scale: status.scale,
-    }
-}
-
-/// Carry the viewer's answer into the tool result.
-const fn shown_answer(shown: push::Shown) -> mcp::Shown {
-    mcp::Shown {
-        planes: shown.planes,
-        width: shown.width,
-        height: shown.height,
-    }
-}
-
 /// Start the MCP stdio server once, in the background.
 ///
 /// The server owns stdin and stdout, and every diagnostic of the viewer goes to
@@ -248,6 +226,7 @@ fn start_mcp(bridge: Bridge) -> Result<()> {
 /// The viewer holds no window: it asks for four window actions through
 /// [`Host`], and this is this process's answer to them. An embedding host
 /// answers from its own toolkit.
+#[derive(Clone, Copy)]
 struct WinitHost<'a> {
     window: &'a Window,
 }

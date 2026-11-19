@@ -4,6 +4,10 @@ Status: accepted. Implemented on the tree that carries this record.
 Amended by ADR 0005: the thumbnail cache later left `vv-source` into
 `vv-cache`, so the chart below carries one more node between `vv-pixels` and
 `{vv-source, vv-view}`, and the tree holds seven libraries.
+Amended later: `vv-mcp` names `vv-core`, because the answer vocabulary of a
+pushed picture (`push::Shown`, `push::Status`) is one pair of types that the
+view layer builds and the protocol layer reports.
+The crate therefore stands alone over `vv-core` and not over nothing.
 
 ## Context
 
@@ -41,9 +45,16 @@ vv-pixels  -> vv-core
 vv-gpu     -> vv-core vv-pixels
 vv-source  -> vv-core vv-pixels
 vv-view    -> vv-core vv-pixels vv-gpu vv-source
-vv-mcp     (no dependency)
+vv-mcp     -> vv-core
 vv-cli     -> vv-core vv-gpu vv-mcp vv-view (+ vv-source in tests)
 ```
+
+The one edge of `vv-mcp` runs to `vv-core`, and it carries the answer
+vocabulary of a pushed picture.
+Duplicating `Shown` and `Status` in both crates cost a field-by-field copy in
+the binary, so the pair moved to `vv-core` with the rest of the plain data.
+`vv-core` still holds no decoder, no GPU handle and no window, so the edge adds
+no dependency to the protocol layer.
 
 ADR 0005 lifted the thumbnail cache out of `vv-source` afterwards, into
 `vv-cache` over `vv-core` and `vv-pixels`.

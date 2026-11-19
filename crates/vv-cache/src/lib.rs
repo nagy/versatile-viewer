@@ -679,6 +679,10 @@ impl Header {
 }
 
 /// The fixed header of an entry, parsed.
+///
+/// Every field is a plain number or a copy of one, so the parse result travels
+/// by value.
+#[derive(Debug, Clone, Copy)]
 struct Head {
     /// The thumbnail dimensions.
     thumb: (ImgW, ImgH),

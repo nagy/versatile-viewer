@@ -779,7 +779,7 @@ impl ViewState {
         if self
             .prefetch
             .on_screen_patch()
-            .is_some_and(|state| region::patch_covers_at_scale(&needed, &state.patch))
+            .is_some_and(|state| region::patch_covers_at_scale(needed, state.patch))
         {
             let ready = std::mem::replace(&mut self.prefetch, Prefetch::Idle);
             if let Prefetch::Ready(state) = ready {
@@ -813,14 +813,14 @@ impl ViewState {
         // duplicate it waits instead.
         // A worker that never answers stops the wait at [`PREFETCH_GIVE_UP`].
         if let Some(painting) = self.prefetch.painting()
-            && region::patch_covers_at_scale(&needed, &painting.patch)
+            && region::patch_covers_at_scale(needed, painting.patch)
         {
             if now.duration_since(painting.started) < PREFETCH_GIVE_UP {
                 return;
             }
             self.prefetch = Prefetch::Idle;
         }
-        if !region::worth_painting(&needed, self.crop.as_ref().map(|crop| &crop.patch)) {
+        if !region::worth_painting(needed, self.crop.as_ref().map(|crop| crop.patch)) {
             return;
         }
         let Some(source) = self.source.clone() else {
@@ -1357,7 +1357,7 @@ pub fn patch_covers(st: &ViewState, win_w: f32, win_h: f32) -> bool {
         return false;
     };
     let needed = region::Patch::new(frame.crop(0.0), scale);
-    region::patch_reaches_window(&needed, &crop.patch)
+    region::patch_reaches_window(needed, crop.patch)
 }
 
 /// Whether two sizes name the same plane, to within a pixel.

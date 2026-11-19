@@ -14,7 +14,7 @@ The root `Cargo.toml` holds no package: it declares `members = ["crates/*"]`, `r
 No `[workspace.dependencies]` table exists: a member declares its own dependencies beside their why-comments, so a comment never drifts from the crate that reads the dependency.
 
 ```
-crates/vv-core/    dim draw region region_sel rotate tween keyrepeat, the shared constants
+crates/vv-core/    dim draw region region_sel rotate tween keyrepeat push, the shared constants
 crates/vv-pixels/  DecodedImage, resample_rgba, cap_texture_side, rgba_from_samples, error, placeholder
 crates/vv-cache/   Cache, CacheError, CachedThumb, WRITE_BUDGET (thumbnails and converted answers)
 crates/vv-gpu/     gpu render texture
@@ -24,7 +24,7 @@ crates/vv-mcp/     mcp
 crates/vv-cli/     main.rs (bin vv), tests/, examples/
 ```
 
-The edges run one way: `vv-core` <- `vv-pixels` <- {`vv-gpu`, `vv-cache`, `vv-source`} <- `vv-view` <- `vv-cli`, and `vv-mcp` stands alone.
+The edges run one way: `vv-core` <- `vv-pixels` <- {`vv-gpu`, `vv-cache`, `vv-source`} <- `vv-view` <- `vv-cli`, and `vv-mcp` names `vv-core` alone.
 A module therefore never names a layer above it, and the compiled graph carries no cycle.
 `vv-source` holds no wgpu and no winit, so the whole `Surface` API runs headless.
 `vv-cache` holds the two derived entry kinds of the viewer (grid thumbnails and converted answers), so the decoder layer and the view layer store through one type and neither owns the other's disk format.
@@ -142,7 +142,8 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   `patch_reaches_window` reads the two rects alone and answers whether the painted rect reaches every source pixel the window shows; the draw asks it (`patch_covers` in `crates/vv-view/src/view.rs`) before it skips the whole-image texture, and so does `worth_painting`.
   `Frame` bundles one window mapping (`img`, `win`, `pan`, `scale`, `angle`), and `ViewState::frame` (`view.rs`) builds it, so a caller never re-derives the transform and never mixes window units with source units.
   The mapping and the crop are methods of `Frame`, so no free function takes the five numbers loose and no call site can swap the scale for the angle; `ViewState::frame_at` answers the same frame for a pan the view aims at (a glide target) rather than the one on screen.
-  A `Patch` is a `Crop` beside the scale its pixels were painted at, so `worth_painting` and `patch_covers_at_scale` compare two values instead of a rect and two loose scales; `CropState`, `LoadPlan`-driven prefetch state and the crop messages carry one.
+  A `Patch` is a `Crop` beside the scale its pixels were painted at, so `worth_painting` and `patch_covers_at_scale` compare two values instead of a rect and two loose scales; `CropState`, `Plan`-driven prefetch state and the crop messages carry one.
+  A `Patch` and a `Crop` are `Copy`, so the paint rules take them by value and no call site passes a reference to a pair of floats.
   A patch covers the window plus `MARGIN` (0.25 of each side), in source pixels, so the paint area follows the window and a deep zoom costs no more pixels than a shallow one.
   `Surface::render` paints that rect at the view scale, so the patch lands 1:1 on screen; a `VectorSurface` paints only those pixels, and a `PdfSurface` rasterizes only them.
   The region rect lives in surface units: base raster pixels for a vector file (`Vector::declared_per_base` converts to the tree's declared units), points for a PDF page.
@@ -273,8 +274,9 @@ The `pub use` line also carries what the public API names, so a caller reaches o
   A `FORMAT` bump rejects every old entry, so a payload change needs no migration.
   The decode worker reads the cache first and decodes only on a miss, then stores the new thumbnail.
   A cache hit carries no full-resolution image, so a keep-set job (an entry that needs the full texture) skips the cache and decodes the file on its own.
-  Only the image view keeps full textures: `load_pending` takes a `LoadPlan` whose `preload_full` field the grid view leaves false and the image view sets true.
-  `LoadPlan` carries `priority`, `scan_start`, `scan` and `preload_full` together, so a caller names each fact and never passes a bool beside a bool that compiles just as well when swapped.
+  Only the image view keeps full textures: `load_pending` takes a `Plan` beside a `priority` slice, and the `preload_full` field of that plan the grid view leaves false and the image view sets true.
+  The `Copy` plan carries `scan_start`, `scan` and `preload_full` together, so a caller names each fact and never passes a bool beside a bool that compiles just as well when swapped.
+  The index list stays a slice beside the plan, because it is the one fact with a length a caller computes and a `Copy` value carries no buffer.
   A grid-only session therefore uploads thumbnails only, never a 200 MB source texture.
   The header carries the source dimensions, so `GridEntry::width`/`height` measure the image and not the thumb, on a hit and on a miss.
   The header also carries the placeholder of the thumb: a ThumbHash payload of at most `placeholder::MAX_BYTES` (32) bytes, from the `thumbhash` crate (MIT, no dependencies, `crates/vv-pixels/src/placeholder.rs`).
@@ -573,11 +575,12 @@ A source that paints no paper carries it in its pixels, so no clear color ever h
 - A tool result carries the answer and a tool error carries the reason: `CallToolResult::structured` and `structured_error`, so a decode failure reaches the caller with the decoder's message.
   A protocol error stays for a name this server cannot route.
 - `mcp::Sink` is the whole wall between the protocol layer and the picture: `show_bytes`, `show_path`, `clear` and `status`, over the plain `Shown` and `Status` values.
-  `crates/vv-mcp` names no texture, no device and no window, so a test drives every tool with a sink of its own, and the crate keeps its standalone place in the graph.
+  `crates/vv-mcp` names no texture, no device and no window, so a test drives every tool with a sink of its own.
+  The crate names `vv-core` alone, for the `Shown` and `Status` answer types, which the view layer builds and this layer reports.
 - `crates/vv-cli/src/main.rs` implements that sink as `Bridge`, which owns a `std::sync::mpsc::Sender<vv_view::push::Push>` and waits on the reply channel the request carries.
   `App::accept_pushes` drains the channel once per frame into `Viewer::accept`, so the frame loop stays the only owner of the view and a request that arrives before the window exists waits in the channel.
   `PUSH_TIMEOUT` (60 s) bounds that wait, so a viewer that stopped drawing answers instead of hanging the caller.
-  `Push` lives in `vv-view` because it describes what a host may push, and the bridge converts `push::Shown` and `push::Status` into the `mcp` values.
+  `Push` lives in `vv-view` because it describes what a host may push, and the bridge hands `push::Shown` and `push::Status` to the `mcp` tools unchanged: the four types are one pair in `vv-core`, so no field-by-field conversion sits on that path.
 - `MAX_PUSH_BYTES` (64 MiB) caps one `vv_show_image_bytes` payload, and the cap reads the encoded text before the decode allocates, so a flood stops first.
   `base64` is the one dependency this tool adds.
 - The picture route is `vv_source::surface::open_bytes`, which sniffs the head the way `open_surface` does: a PDF opens as `PdfSurface::from_bytes` (a book when it holds pages), an SVG or SVGZ document parses with `svg::from_bytes` into the same `VectorSurface`, and every raster format decodes once with `decode_raster_bytes` into a `MemorySurface`.

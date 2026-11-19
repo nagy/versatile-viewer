@@ -14,42 +14,17 @@
 //!
 //! The view keeps no history here: a [`Push::Bytes`] replaces what shows, and
 //! [`Push::Clear`] returns to the blank state the launch started from.
+//!
+//! The two answers of this seam, [`Shown`] and [`Status`], live in `vv-core`, so
+//! this layer and the MCP server describe one shape and the binary moves an
+//! answer through without rewriting a field.
 
 use std::{path::PathBuf, sync::mpsc::Sender};
 
-/// A picture the viewer opened from pushed content.
-///
-/// The extent measures plane 0, in surface units (pixels for a raster or a
-/// vector base raster, points for a PDF page).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Shown {
-    /// How many planes the source holds (1 for a picture, one per page for a
-    /// document).
-    pub planes: usize,
-    /// The width of plane 0, in surface units.
-    pub width: f32,
-    /// The height of plane 0, in surface units.
-    pub height: f32,
-}
-
-/// What the view holds at the moment of the call.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Status {
-    /// True while the grid draws, which a blank view always does.
-    pub grid: bool,
-    /// The planes of the open source, or 0 when no source shows.
-    pub planes: usize,
-    /// The label of the open source: the path, or `mcp` for pushed bytes.
-    pub source: String,
-    /// The width of the open plane, in surface units, or 0 when nothing shows.
-    pub width: f32,
-    /// The height of the open plane, in surface units, or 0 when nothing
-    /// shows.
-    pub height: f32,
-    /// The output pixels per surface unit, or None before the first frame
-    /// computes the fit.
-    pub scale: Option<f32>,
-}
+// The answer vocabulary of a pushed picture, which this module shares with
+// `vv-mcp`: the pair lives in `vv-core`, so the view and the protocol layer
+// describe one shape.
+pub use vv_core::push::{Shown, Status};
 
 /// The label of content that came from memory instead of a path.
 pub const MEMORY_LABEL: &str = "mcp";

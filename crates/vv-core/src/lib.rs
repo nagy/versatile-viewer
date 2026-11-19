@@ -25,6 +25,8 @@
 //! [`rotate`] holds the rotation angle behind the `r` hold.
 //! [`keyrepeat`] repeats a held key at the X rate, and [`tween`] ramps one for
 //! a continuous motion.
+//! [`push`] holds the answer a caller outside the process reads after it hands
+//! a picture over.
 //!
 //! The constants below are the shared policy of both views, so no view tunes
 //! a speed or a dimness of its own.
@@ -32,6 +34,7 @@
 pub mod dim;
 pub mod draw;
 pub mod keyrepeat;
+pub mod push;
 pub mod region;
 pub mod region_sel;
 pub mod rotate;

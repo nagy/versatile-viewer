@@ -61,7 +61,7 @@ use crate::{
     book::BookSurface,
     dim::{self, PreviewPx, WinH, WinW},
     draw::{Color, Vec2},
-    grid::{DecodeFailure, Grid, GridAction, LoadPlan},
+    grid::{DecodeFailure, Grid, GridAction, Plan},
     input::Input,
     keyrepeat::{self, RepeatState},
     loader::{DecodeMsg, Loader},
@@ -1101,7 +1101,7 @@ impl Viewer {
         // the visible image gets all the cores.
         // load_pending drains finished decodes (each decode worker uploads its
         // own texture) and dispatches new ones to the rayon pool.
-        let plan = if self.st.mode == Mode::Image {
+        let (plan, priority) = if self.st.mode == Mode::Image {
             match self
                 .st
                 .open_id
@@ -1120,34 +1120,44 @@ impl Viewer {
                             priority.push(i + 1);
                         }
                     }
-                    LoadPlan {
+                    (
+                        Plan {
+                            scan_start: i,
+                            scan: !self.st.view_loading,
+                            preload_full: true,
+                        },
                         priority,
-                        scan_start: i,
-                        scan: !self.st.view_loading,
-                        preload_full: true,
-                    }
+                    )
                 }
-                None => LoadPlan {
-                    scan: true,
-                    preload_full: true,
-                    ..LoadPlan::default()
-                },
+                None => (
+                    Plan {
+                        scan: true,
+                        preload_full: true,
+                        ..Plan::default()
+                    },
+                    Vec::new(),
+                ),
             }
         } else if let Some(g) = self.grid.as_ref() {
-            LoadPlan {
-                priority: g.prefetch_neighbors(g.selected, WinW::new(win_w), WinH::new(win_h)),
-                scan_start: g.selected,
-                scan: true,
-                preload_full: false,
-            }
+            (
+                Plan {
+                    scan_start: g.selected,
+                    scan: true,
+                    preload_full: false,
+                },
+                g.prefetch_neighbors(g.selected, WinW::new(win_w), WinH::new(win_h)),
+            )
         } else {
-            LoadPlan {
-                scan: true,
-                ..LoadPlan::default()
-            }
+            (
+                Plan {
+                    scan: true,
+                    ..Plan::default()
+                },
+                Vec::new(),
+            )
         };
         if let Some(g) = self.grid.as_mut() {
-            g.load_pending(&plan);
+            g.load_pending(plan, &priority);
         }
 
         // Image mode: drain the streaming loader first.

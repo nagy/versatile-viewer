@@ -129,7 +129,7 @@ pub fn press(
     square: bool,
 ) -> Drag {
     let anchor = clamp(point, img);
-    match kept.filter(|rect| region::contains_point(rect, anchor)) {
+    match kept.filter(|rect| region::contains_point(*rect, anchor)) {
         Some(from) => Drag::moving(anchor, grab, from),
         None => Drag::new(anchor, grab, square),
     }

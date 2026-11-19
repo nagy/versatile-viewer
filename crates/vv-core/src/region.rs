@@ -96,8 +96,8 @@ pub const fn crop(x: f32, y: f32, w: f32, h: f32) -> Crop {
 /// The edges count as inside, so a press on the border grabs the rect, while
 /// `euclid` puts the far edge outside.
 #[must_use]
-pub fn contains_point(rect: &Crop, point: SurfacePoint) -> bool {
-    crate::dim::contains_point(rect, point.x, point.y)
+pub fn contains_point(rect: Crop, point: SurfacePoint) -> bool {
+    crate::dim::contains_point(&rect, point.x, point.y)
 }
 
 /// One window mapping of a plane: the numbers the draw uses, bundled.
@@ -243,7 +243,7 @@ impl Patch {
 /// The caller passes the rect without a margin, so a consumed margin alone
 /// never pays for a paint.
 #[must_use]
-pub fn worth_painting(needed: &Patch, painted: Option<&Patch>) -> bool {
+pub fn worth_painting(needed: Patch, painted: Option<Patch>) -> bool {
     if needed.rect.is_empty() {
         return false;
     }
@@ -261,7 +261,7 @@ pub fn worth_painting(needed: &Patch, painted: Option<&Patch>) -> bool {
 /// a patch that reaches the window alone may draw without the whole-image
 /// texture under it.
 #[must_use]
-pub fn patch_reaches_window(needed: &Patch, painted: &Patch) -> bool {
+pub fn patch_reaches_window(needed: Patch, painted: Patch) -> bool {
     if needed.rect.is_empty() {
         return false;
     }
@@ -275,12 +275,12 @@ pub fn patch_reaches_window(needed: &Patch, painted: &Patch) -> bool {
 /// A spread step paints its landing patch before the glide ends, and this test
 /// tells the view when that patch has become the one on screen.
 #[must_use]
-pub fn patch_covers_at_scale(needed: &Patch, painted: &Patch) -> bool {
+pub fn patch_covers_at_scale(needed: Patch, painted: Patch) -> bool {
     patch_reaches_window(needed, painted) && !mismatched_scale(needed, painted)
 }
 
 /// Whether two patches disagree about the scale beyond [`SCALE_SLACK`].
-fn mismatched_scale(needed: &Patch, painted: &Patch) -> bool {
+fn mismatched_scale(needed: Patch, painted: Patch) -> bool {
     needed.scale > painted.scale * SCALE_SLACK || needed.scale * SCALE_SLACK < painted.scale
 }
 
@@ -350,28 +350,28 @@ mod tests {
         let needed = Patch::new(frame(WindowVector::zero(), 4.0, 0.0).crop(0.0), 4.0);
         let painted = Patch::new(frame(WindowVector::zero(), 4.0, 0.0).crop(MARGIN), 4.0);
         // A fresh region and a covered one.
-        assert!(worth_painting(&needed, None));
-        assert!(!worth_painting(&needed, Some(&painted)));
+        assert!(worth_painting(needed, None));
+        assert!(!worth_painting(needed, Some(painted)));
         // A scale inside the float tolerance stays: the patch still lands one
         // pixel per pixel.
         assert!(!worth_painting(
-            &needed,
-            Some(&Patch {
+            needed,
+            Some(Patch {
                 scale: 4.004,
                 ..painted
             })
         ));
         // Any other scale stretch softens every pixel, so it pays.
         assert!(worth_painting(
-            &needed,
-            Some(&Patch {
+            needed,
+            Some(Patch {
                 scale: 4.1,
                 ..painted
             })
         ));
         assert!(worth_painting(
-            &needed,
-            Some(&Patch {
+            needed,
+            Some(Patch {
                 scale: 3.9,
                 ..painted
             })
@@ -380,10 +380,10 @@ mod tests {
             frame(WindowVector::new(300.0, 0.0), 4.0, 0.0).crop(0.0),
             4.0,
         );
-        assert!(worth_painting(&far, Some(&painted)));
+        assert!(worth_painting(far, Some(painted)));
         // An empty need never pays.
         let none = Patch::new(crop(0.0, 0.0, 0.0, 0.0), 4.0);
-        assert!(!worth_painting(&none, None));
+        assert!(!worth_painting(none, None));
     }
 
     #[test]
@@ -391,11 +391,11 @@ mod tests {
         let needed = Patch::new(frame(WindowVector::zero(), 4.0, 0.0).crop(0.0), 4.0);
         let painted = Patch::new(frame(WindowVector::zero(), 4.0, 0.0).crop(MARGIN), 4.0);
         // The margin holds the window at the same scale.
-        assert!(patch_covers_at_scale(&needed, &painted));
+        assert!(patch_covers_at_scale(needed, painted));
         // A scale past the slack, and a rect that misses the window, fail.
         assert!(!patch_covers_at_scale(
-            &needed,
-            &Patch {
+            needed,
+            Patch {
                 scale: 4.1,
                 ..painted
             }
@@ -404,11 +404,9 @@ mod tests {
             frame(WindowVector::new(300.0, 0.0), 4.0, 0.0).crop(MARGIN),
             4.0,
         );
-        assert!(!patch_covers_at_scale(&needed, &far));
+        assert!(!patch_covers_at_scale(needed, far));
         // The test and the paint rule never both fire.
-        assert!(
-            !(patch_covers_at_scale(&needed, &painted) && worth_painting(&needed, Some(&painted)))
-        );
+        assert!(!(patch_covers_at_scale(needed, painted) && worth_painting(needed, Some(painted))));
     }
 
     #[test]
@@ -416,31 +414,31 @@ mod tests {
         let wide = frame(WindowVector::zero(), 4.0, 0.0);
         let needed = Patch::new(wide.crop(0.0), 4.0);
         let covering = Patch::new(wide.crop(MARGIN), 4.0);
-        assert!(patch_reaches_window(&needed, &covering));
+        assert!(patch_reaches_window(needed, covering));
         // Zoomed out, the window shows more than the patch painted, so the
         // patch holds a part and the whole image must draw under it.
         let out = frame(WindowVector::zero(), 1.0, 0.0);
         let wide_need = Patch::new(out.crop(0.0), 1.0);
-        assert!(!patch_reaches_window(&wide_need, &covering));
+        assert!(!patch_reaches_window(wide_need, covering));
         // A patch at another scale still holds the rect it reaches, and the
         // scale is `patch_covers_at_scale`'s business alone.
         assert!(patch_reaches_window(
-            &needed,
-            &Patch {
+            needed,
+            Patch {
                 scale: 8.0,
                 ..covering
             }
         ));
         assert!(!patch_covers_at_scale(
-            &needed,
-            &Patch {
+            needed,
+            Patch {
                 scale: 8.0,
                 ..covering
             }
         ));
         // An empty need is never held.
         let none = Patch::new(crop(0.0, 0.0, 0.0, 0.0), 4.0);
-        assert!(!patch_reaches_window(&none, &covering));
+        assert!(!patch_reaches_window(none, covering));
     }
 }
 

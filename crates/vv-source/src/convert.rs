@@ -315,7 +315,7 @@ impl Converters {
     pub fn parse(text: &str) -> Result<Self, ConvertError> {
         let file: ConfigFile = toml::from_str(text)?;
         // `[defaults]` first, because every rule inherits its values.
-        let defaults = Defaults::new(&file.defaults)?;
+        let defaults = Defaults::new(file.defaults)?;
         let mut rules = Vec::with_capacity(file.convert.len());
         for rule in &file.convert {
             rules.push(Rule::new(rule, &defaults)?);
@@ -802,7 +802,7 @@ struct ConfigFile {
 ///
 /// A count that the table does not name keeps the built-in default, so an
 /// empty file and a missing file agree.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DefaultsFile {
     /// The conversions that run at one time.
@@ -840,7 +840,7 @@ impl Defaults {
     /// # Errors
     ///
     /// The function errors when a count is zero.
-    fn new(file: &DefaultsFile) -> Result<Self, ConvertError> {
+    fn new(file: DefaultsFile) -> Result<Self, ConvertError> {
         let plain = Self::default();
         Ok(Self {
             slots: positive(file.slots, "slots")?.unwrap_or(plain.slots),

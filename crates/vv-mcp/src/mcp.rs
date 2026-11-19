@@ -79,6 +79,9 @@ use rmcp::{
     service::RequestContext,
     transport::stdio,
 };
+// The answer vocabulary of a pushed picture, which this crate shares with the
+// view layer: one shape for the reply a tool returns.
+pub use vv_core::push::{Shown, Status};
 
 /// The only protocol revision this server implements.
 ///
@@ -103,35 +106,6 @@ pub enum SpawnError {
     /// The operating system refused the thread.
     #[display("failed to spawn the MCP server thread")]
     Thread(std::io::Error),
-}
-
-/// A picture the viewer opened from pushed content.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Shown {
-    /// How many planes the source holds (1 for a picture, one per page for a
-    /// document).
-    pub planes: usize,
-    /// The width of plane 0, in surface units.
-    pub width: f32,
-    /// The height of plane 0, in surface units.
-    pub height: f32,
-}
-
-/// What the view holds, as `vv_get_status` reports it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Status {
-    /// True while the grid draws.
-    pub grid: bool,
-    /// The planes of the open source, or 0 when nothing shows.
-    pub planes: usize,
-    /// The label of the open source: a path, or `mcp` for pushed bytes.
-    pub source: String,
-    /// The width of the open plane, in surface units.
-    pub width: f32,
-    /// The height of the open plane, in surface units.
-    pub height: f32,
-    /// The output pixels per surface unit, or None before the first fit.
-    pub scale: Option<f32>,
 }
 
 /// What the server asks of the viewer.
