@@ -75,11 +75,7 @@ pub const RAMP_TIME: Duration = Duration::from_millis(360);
 /// A grab drag reads the raw device deltas of `DeviceEvent::MouseMotion`, which
 /// are counts of the mouse, not window pixels, so this factor is a feel
 /// constant and not a geometry one.
-/// 1.0 moves the picture one window pixel per count: the spike at
-/// `~/agent/versatile-viewer-wgpu-spike` picked it by feel and the viewer's own
-/// author confirmed that feel, so it is the default here.
-/// The raylib path multiplied the same raw travel by 2.0, and `git bug show
-/// 94691ce` records that history.
+/// 1.0 moves the picture one window pixel per count, which is the default feel.
 /// `VV_PAN_DRAG_SPEED` overrides it, so a feel comparison needs no rebuild, and
 /// `RUST_LOG=vv=debug` prints the travel a drag accumulated (see the release
 /// event).

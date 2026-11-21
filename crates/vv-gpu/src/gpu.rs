@@ -2,7 +2,6 @@
 //!
 //! The module owns every `wgpu` object that outlives one frame, so no view code
 //! ever names an `Instance`, an `Adapter` or a `SurfaceConfiguration`.
-//! It replaces `raylib::init()` and the GL context that came with it.
 //!
 //! # Startup
 //!
@@ -10,15 +9,13 @@
 //! the `vulkan` and `wgsl` features of `wgpu`.
 //! That keeps a DX12, Metal or GL instance out of the process, so no library is
 //! opened for one.
-//! The measured run in `git bug show 94691ce` spends 28.9 ms of its 59.1 ms in
-//! the Vulkan loader's ICD scan, so the backend selection is the one startup
-//! knob that matters.
+//! The Vulkan loader's ICD scan dominates the first frame, so the backend
+//! selection is the one startup knob that matters.
 //!
 //! # Color
 //!
-//! The swapchain takes a non-sRGB format when the adapter offers one, because
-//! the raylib path did no color conversion either: the bytes a decoder wrote
-//! reach the screen as they are, so a ported view draws the same pixels.
+//! The swapchain takes a non-sRGB format when the adapter offers one, so the
+//! bytes a decoder writes reach the screen unchanged.
 //! [`Gpu::format`] answers the format the pipeline must target.
 
 use std::sync::{Arc, OnceLock};
@@ -29,7 +26,7 @@ use winit::window::Window;
 /// How the swapchain hands a frame to the compositor.
 ///
 /// The default is `Fifo`, which never tears and paces the frame loop to the
-/// monitor refresh rate: it replaces raylib's `.vsync()` build flag.
+/// monitor refresh rate.
 /// `VV_PRESENT` picks another mode for a latency experiment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Present {
@@ -342,7 +339,7 @@ impl Gpu {
 
 /// Pick a non-sRGB swapchain format that the surface offers.
 ///
-/// `Bgra8Unorm` is the byte order the raylib path received, and `Rgba8Unorm`
+/// `Bgra8Unorm` is the byte order of the usual X11 surface, and `Rgba8Unorm`
 /// is its portable fallback.
 /// An sRGB-only surface keeps its first format, and the draw then goes through
 /// an sRGB target, which the pixel comparison must know.
@@ -366,7 +363,7 @@ fn pick_format(formats: &[wgpu::TextureFormat]) -> wgpu::TextureFormat {
 mod tests {
     use super::*;
 
-    /// A surface that offers the raylib byte order gets it, not its sRGB twin.
+    /// A surface that offers the plain byte order gets it, not its sRGB twin.
     #[test]
     fn a_linear_format_wins() {
         let formats = [

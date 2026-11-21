@@ -1,13 +1,9 @@
 //! GPU textures: the pixels of a picture, ready to sample.
 //!
-//! The module replaces `raylib::Texture2D` and its `LoadTextureFromImage` and
-//! `SetTextureFilter` calls.
-//!
 //! # Two bind groups, one texture
 //!
-//! raylib kept the filter on the texture and changed it at runtime with `a`.
-//! wgpu makes the sampler a bind group member instead, so a texture carries one
-//! group per filter and a draw picks the group it wants.
+//! wgpu makes the sampler a bind group member, so a texture carries one group
+//! per filter and a draw picks the group it wants.
 //! The two samplers are shared, so a group costs one texture view and nothing
 //! else.
 //!
@@ -21,8 +17,7 @@
 //! # Format
 //!
 //! The texture format is a non-sRGB `Rgba8Unorm`, and the swapchain is a
-//! non-sRGB format too, so the decoder's bytes reach the screen unchanged: that
-//! is the pixel math the raylib path had.
+//! non-sRGB format too, so the decoder's bytes reach the screen unchanged.
 //! Alpha stays straight, because the decoders write straight bytes and
 //! the SVG backend un-premultiplies before it hands a picture over.
 

@@ -1,9 +1,5 @@
 //! The keyboard and the pointer, as one frame's worth of state.
 //!
-//! The module replaces the input calls of raylib: `IsKeyDown`,
-//! `IsKeyPressed`, `GetKeyPressed`, `GetCharPressed`, `GetMousePosition`,
-//! `GetMouseDelta`, `GetMouseWheelMove` and the three button states.
-//!
 //! # Held state, frame edges and repeats
 //!
 //! The view ramps advance on held state, so a hold must read `true` every frame
@@ -47,6 +43,14 @@
 //! a drag never stops at a screen edge.
 //! A free pointer reads the platform position alone, so the raw travel of the
 //! same movement never shifts the hover point by a few pixels.
+//!
+//! winit emits one `DeviceEvent::MouseMotion` per XI2 raw motion event, with the
+//! raw axis values of the device as the delta, so no per-event guard belongs
+//! here.
+//! A virtual X server (XTEST) reports the absolute pointer position as those raw
+//! values, sometimes twice, which looks like a double-speed drag.
+//! That is an injection artifact of a test harness and not a real event pair, so
+//! do not add a delta sanity clamp for it.
 //!
 //! # Typed text
 //!

@@ -11,8 +11,7 @@
 //! A release snaps the angle to the nearest quarter turn when it lands
 //! within [`SNAP_DEGREES`] of one, so a near right angle ends exactly.
 //! The snap runs on the release only, never during the drag.
-//! A positive angle turns clockwise on screen, which matches raylib
-//! (`DrawTexturePro` grows the angle clockwise with y down).
+//! A positive angle turns clockwise on screen, because the view space is y-down.
 //!
 //! A plain `r` hold turns the image around its own center.
 //! A Shift+R hold turns it around the mouse point that the press showed, and

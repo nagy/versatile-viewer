@@ -11,6 +11,10 @@
 //! The pane lives in the binary (see `Pane` in `src/main.rs`): this module
 //! only names the id and reads the host geometry, so no other module learns
 //! that a host exists.
+//!
+//! The viewer claims no `XEmbed` support: it sets no `_XEMBED_INFO` and sends no
+//! XEMBED message, so a host that speaks the protocol must focus the pane
+//! itself.
 
 use std::time::{Duration, Instant};
 

@@ -13,8 +13,8 @@
 //! The server advertises that single revision, so an older client fails fast
 //! on `UnsupportedProtocolVersion`.
 //!
-//! The server is no longer a husk: it advertises four tools, and every one of
-//! them reaches the picture through the [`Sink`] the binary installs.
+//! The server advertises four tools, and every one of them reaches the picture
+//! through the [`Sink`] the binary installs.
 //! `vv_show_image_bytes` shows a picture that never touches the disk, so
 //! `vv --mcp` with no path runs entirely on pushed content.
 //!

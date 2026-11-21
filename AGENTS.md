@@ -2,20 +2,13 @@
 
 ## Purpose
 
-Fast image viewer.
-Video support comes later.
-The design follows nsxiv and mpv.
-JPEG XL is a first-class format.
-The binary name is `vv`.
+Fast image viewer, after nsxiv and mpv.
+Video comes later.
+JPEG XL is a first-class format, and every decoder is pure Rust, so the build compiles no C.
+The tree is a Rust workspace of seven libraries and one binary named `vv`, on the Rust 1.99 toolchain the flake builds with.
+License: AGPL-3.0-or-later.
 
 ## Layout
-
-The tree is a cargo workspace of seven libraries and one binary.
-The root `Cargo.toml` holds no package: it declares `members = ["crates/*"]`, `resolver = "3"`, `[workspace.package]` and `[workspace.lints.clippy]`, and every member inherits both tables.
-`[workspace.lints.clippy]` carries `all = "deny"`, `pedantic = "warn"` and `wildcard_enum_match_arm`, so a `match` on an enum of this tree names every variant and the compiler says where a new one belongs.
-An arm on a foreign enum keeps `_` under one `#[allow(clippy::wildcard_enum_match_arm, reason = "…")]`, because the keycode, window-event and X-event lists belong to another crate and mean "every other value".
-`[workspace.package]` carries the version, the edition, `rust-version` (1.99, the toolchain the flake builds with), the license, the repository and `publish = false`, so a member repeats none of them.
-No `[workspace.dependencies]` table exists: a member declares its own dependencies beside their why-comments, so a comment never drifts from the crate that reads the dependency.
 
 ```
 crates/vv-core/    dim draw region region_sel rotate tween keyrepeat push, the shared constants
@@ -29,595 +22,135 @@ crates/vv-cli/     main.rs (bin vv), tests/, examples/
 ```
 
 The edges run one way: `vv-core` <- `vv-pixels` <- {`vv-gpu`, `vv-cache`, `vv-source`} <- `vv-view` <- `vv-cli`, and `vv-mcp` names `vv-core` alone.
-A module therefore never names a layer above it, and the compiled graph carries no cycle.
+A module never names a layer above it, so the compiled graph carries no cycle.
 `vv-source` holds no wgpu and no winit, so the whole `Surface` API runs headless.
-`vv-cache` holds the two derived entry kinds of the viewer (grid thumbnails and converted answers), so the decoder layer and the view layer store through one type and neither owns the other's disk format.
-ADR 0005 records the cache split, and ADR 0004 records the layers around it.
-`crates/vv-cli` holds no library target, so the binary, its two integration tests and its two examples import each layer by its own crate name (`vv_view::viewer`, `vv_gpu::gpu`), and no facade crate sits between them.
+`crates/vv-cli` holds no library target, so the binary, its integration tests and its examples import each layer by its own crate name and no facade crate sits between them.
+ADR 0004 records the layer split, and ADR 0005 the cache split.
 
-A crate root re-exports the lower modules it names in its own API (`pub use vv_core::{dim, draw}` and friends), so a module writes `crate::dim::ImgW` and the intra-crate path never spells the crate name.
-The `pub use` line also carries what the public API names, so a caller reaches one path per type.
-`DecodedImage` fields stay private across the whole workspace: a module in another crate reads `width()`, `height()` and `as_rgba()`.
+A member declares its own dependencies beside their why-comments, and the workspace holds no `[workspace.dependencies]` table, so a comment never drifts from the crate that reads the dependency.
+The root `Cargo.toml` carries the metadata and the lint table every member inherits.
 
 ## Build and test
 
 ### Build
 
-- `nix build .#versatile-viewer-doc` makes the rustdoc HTML of every member.
-- The root `Cargo.toml` carries `[profile.release]` with `lto = "thin"` and `codegen-units = 2`.
-  The layer split pays cross-crate inlining (ADR 0004), so every member builds under one profile that inlines across members.
-  The profile is the whole opt-level policy: no member overrides it.
-- Every cargo invocation of the flake passes `--workspace --locked`, so one derivation covers all seven members, cargo never re-fingerprints the dependency graph between the deps drv and the package drv, and a drifted lockfile fails the build instead of fetching.
-  The paint run inside the test drv narrows to `-p vv-cli --test gpu_offscreen` and builds nothing, because the workspace run of that drv already linked that binary.
-  `pname` stays `versatile-viewer`, so a store path matches the flake attribute that carries it.
-- `nix flake check` gates clippy (`--all-targets -- --deny warnings`), the test suite and treefmt.
-  One test gate only: `cargo test` in `checks.default` runs the unit tests, the integration tests and the doctests, so no separate `--doc` check exists.
-  The same drv runs the ignored headless paints on lavapipe as the second command of its `checkPhase`, and `checks.gpu` names that one derivation, so `nix flake check` builds it once.
-  A second drv cost 83 s in release and 10 s in dev, to run sixteen tests that the first drv had already linked.
-  `checkPhase` replaces crane's own phase for that reason: `cargoTest` writes `checkPhaseCargoCommand` after it merges its arguments, so a caller's value of that name never survives.
-- No check builds the package: `nix build .#default` is the package gate.
-  `checks.package` used to name `packages.default` again, and the two are one derivation (one store path), so the check bought no second gate and repeated the build that the packages output already holds.
-  The gates differ in what they prove. `nix flake check` builds `checks.*` alone and builds no part of `packages.*`, so the release link, `shrink-rpath`, `autoPatchelfHook` and `appendRunpaths` of the fixup belong to `nix build .#default`: a missing runtime library or a broken `DT_RUNPATH` fails there and nowhere else.
-  Run both when a change touches the build: `nix flake check` proves the tests, clippy and the formatting, and `nix build .#default` proves the shipped binary.
-- The fast gates build in the `dev` profile, and only the package builds in `release`.
-  `devEnv` (`flake.nix`) sets `CARGO_PROFILE = "dev"` for the tests and clippy, because crane answers `release` when that variable stays unset, and `[profile.release]` inlines across the seven members.
-  A test binary gains nothing from that inlining: an incremental `nix flake check` after a one-line source change measured 294 s wall and about 90 min CPU with every check in release, and about 30 s wall with the tests in dev.
-  `cargoArtifactsDev` is the second `buildDepsOnly`, because cargo keys every artifact on its profile and the dev gates cannot read the release cache.
-  The package keeps the release cache, because it ships the optimized binary, and it is the one release build left in the tree.
-  `CARGO_PROFILE_DEV_DEBUG` and `CARGO_PROFILE_TEST_DEBUG` stay `1`, so a failing test still names its line: full debuginfo cost 5.8 s more on that rebuild and buys no gate.
-  `RUSTFLAGS` in `env` names `mold` for every cargo invocation of the flake, so the package drv and the check drvs share one flag set and the linker stops being the tail of the build.
-  The devshell appends the same flag to `rpathFlags`, so `cargo build` there links as fast as a check does.
-- The value layer stays `const`: `dim`'s `as_f32`, `draw::Color::tint`, `region::Frame::plane`, the `region_sel` constructors and the cache-off value answer `const fn`, so a size table or a derived color lands at compile time.
-  The workspace does not enable `clippy::missing_const_for_fn`, because it would force `const` on the accessors that read a runtime handle, a held key or a decoded texture, and a `const` body refuses a later `debug!` or `Vec` call.
-  `rust-version` is therefore the toolchain the flake builds with (`1.99`), not the oldest compiler that reads the syntax.
+- Run both gates when a change touches the build. `nix flake check` proves clippy, the test suite, the headless GPU paints and treefmt. `nix build .#default` proves the shipped binary, because the release link and the rpath fixup run there and nowhere else.
+- Run `nix build .#checks.default` for a fast loop over the test gate alone, and `nix fmt` to format (rustfmt, taplo, nixfmt).
+- Run `nix build .#versatile-viewer-doc` to build the rustdoc HTML of every member.
+- The fast gates build in the `dev` profile and only the package builds in `release`.
+  `devEnv` in `flake.nix` sets `CARGO_PROFILE = "dev"`, because crane answers `release` when that variable stays unset, and a test binary gains nothing from the cross-crate inlining that `[profile.release]` buys.
+  Keep `CARGO_PROFILE_DEV_DEBUG` and `CARGO_PROFILE_TEST_DEBUG` at `1`, so a failing test names its line.
+- Every cargo invocation of the flake passes `--workspace --locked`, so one derivation covers every member and a drifted lockfile fails the build instead of fetching.
+  `RUSTFLAGS` names `mold` for the package derivation and the check derivations alike, so they share one flag set.
+- `flake.nix` carries a why-comment for every knob it sets. Read that comment before you change a derivation.
 
 ### Run
 
-Run `nix run . -- <image-path-or-directory>`.
-A `--mcp` run takes no path: `nix run . -- --mcp` opens the blank window and waits for a tool.
-ESC never quits.
-
-The window clears to `BACKGROUND` (`#062329`, `view.rs`).
-Both views share it, so the letterbox bars and the grid gaps match.
-A source that paints no paper carries it in its pixels, so no clear color ever has to follow a picture.
-
-- Keys: see the README table.
-  `Space` steps forward and `Shift+Space` steps back, both as held states, so one key serves both ways.
-  Shift at the press edge picks the direction, and the held state follows the same rule, so a hold repeats the way it stepped.
-- `Shift+F` hold turns vertical mouse travel into the free zoom (`ZOOM_DRAG_SPAN` in `view.rs`).
-  Up zooms in, down zooms out.
-  The hold captures the pointer like the `f` pan drag, so the travel is unbounded and the motion never stops at a screen edge.
-  The zoom anchor starts at the grab point and then drifts toward the window center by the wheel rule (`ZOOM_ANCHOR_DRIFT`), so the image point being zoomed into recenters.
-  The capture holds the pointer still, so the anchor slides on screen and the image follows it.
-  `ZOOM_DRAG_SPEED` scales the rate (now 8x).
-  Shift going down or up mid-hold switches the `f` pan drag over to the zoom and back.
-  The switch anchors at the window center, which is the image point the window shows at its middle.
-  The pointer is hidden, and a pan just pushed its last screen spot away from the middle, so that spot cannot name what the user looks at.
-  A center anchor skips the drift, because the drift can only move it away from the middle.
-  Plain `f` hold keeps the pan drag.
-- The `r` hold turns the image, and the release keeps the angle (`crates/vv-core/src/rotate.rs`).
-  Down travel turns clockwise and up turns counter-clockwise, one full turn per `ROTATE_DRAG_SPAN` of window long side of travel.
-  Each frame adds its travel to the current angle (`rotate::apply_turn`), so a new hold continues from the angle the image shows and never resets the turn.
-  The hold captures the pointer like the `f` pan drag, and it never pans.
-  A newly opened image starts upright, so a turn never carries over to the next image.
-  The release snaps the angle with `snap_deg` when it lands within `SNAP_DEGREES` (2) of a quarter turn, and that release is the only place that snaps.
-  A drag therefore turns freely and never jumps mid-drag.
-  The scale and the pan stay as they are, so a turned image shows its corners past the window edge.
-  The draw passes the image center as the dest position and `dim::center_origin(dest)` as the origin, because `Renderer::texture_pro` turns the quad around the dest position.
-  A dest corner plus a half-size origin throws the image into the top-left corner.
-  `f` hit-tests a turned image through `unrotate_point`.
-  Do not rotate pixels on the main thread: the turn is a draw transform.
-- The image view selects a region with a held `v`, `crates/vv-core/src/region_sel.rs`.
-  The press either spans a fresh rect or carries the kept one, and `region_sel::press` picks: a press outside the region anchors one corner in source units (the units of `crates/vv-core/src/region.rs`), the free pointer drags the opposite corner, and the release keeps the rect.
-  A press inside the region starts a move (`Kind::Move`) instead: `Drag::rect` shifts the grabbed rect by the pointer travel, the rect keeps its size, and `shift` stops each edge at the plane border, so a move never shrinks the region.
-  Shift only shapes a span, so a press inside the region moves with or without it.
-  A press that releases within `TAP_SLACK` (4 window pixels) commits nothing: outside the region it drops the rect, like the grid's `v` toggle, and inside it keeps the rect (`Drag::tap_rect`).
-  `TAP_SLACK` lives in `crates/vv-core/src/lib.rs` beside `DIM_LEVEL`, and the `f` tap test reads the same constant, because both keys measure travel in window pixels and never in source units.
-  The cursor stays free, so no capture: the region stops at the window edge, and the pan, the zoom and the turn keep working while the drag runs.
-  Shift at the press edge keeps both sides equal (`Kind::Span`), and the side shrinks to the room the plane leaves past the anchor.
-  ESC drops a region first and stays in the image view, and only an ESC with nothing to drop returns to the grid.
-  A fresh open, a step to another image and a return to the grid all drop the region.
-  The rect lives in source units, so `region::Frame::to_screen` maps its corners through the same transform the picture uses, and a pan, a zoom and a turn all keep it on the picture.
-  The free pointer converts back through `region::Frame::to_image`, and `selection_rect` (`view.rs`) owns that conversion for the frame draw and for the release, so the border, the veil and the committed rect never read the pointer in different units.
-  `region_sel::around` answers the four bands of the plane outside the rect, `draw_selection` (`view.rs`) paints them with one `DIM_VEIL` and draws the bright `SELECTION_BORDER` around the rect.
-  The pipeline culls nothing (`cull_mode: None`), so a band draws in either winding and `draw_selection` fills the four quads of `region_sel::around` directly: the raylib triangle reversal is gone, and no helper splits a band.
-  `DIM_VEIL` keeps the share of brightness that the grid's `DIM_TINT` keeps, because both read `DIM_LEVEL`, so the two views dim alike.
-  The bands draw after the whole-image texture and the region patches, so the dim holds over whatever the view paints below it.
-- Shift at the `r` press edge turns the image around the mouse point (`ViewState::pivot`) instead of the image center.
-  The hold keeps the image point under that pivot on its window spot, so `rotate::pivot` shifts the pan and its target every frame, and again through the release snap (`keep_pivot` in `view.rs`).
-  The pivot is a pan shift and not a second draw origin: the draw and the `f` hit test keep one center, the window middle plus the pan.
-  A plain `r` press resets the pivot to the center, and a newly opened image resets it too.
-  The hold captures and hides the pointer like a plain `r`, so the travel stays unbounded and the pivot sits under the hidden pointer at the grab point.
-  A Shift+R hold therefore also doubles the pan and zoom speed, like every other Shift chord.
-- Mouse side buttons step next / previous in image view, like `n` / `p` (`read_nav_mouse` in `view.rs`).
-  A book holds every spread in one plane, so a step always moves to another file.
-- Env vars `RUST_LOG`, `VV_DEBUG`, `VV_TIMING`, `VV_SLOW_STREAM`, `VV_BLUR_BG`, `VV_BG_DIM`, `VV_BLUR_PX`, `VV_CACHE`, `VV_PRESENT`: see the README table.
-  `VV_DEBUG` and `VV_TIMING` only pick the filter `RUST_LOG` would set, so the two never compete.
-- Window title uses en-dash separators: `<file> – <dir> – versatile-viewer`.
-  The grid title is `(<n> image(s)) – <dir> – versatile-viewer`.
-  Canonicalize the paths.
-  Abbreviate `$HOME` to `~`.
-  The image view title follows the open image.
-  The grid keeps the launch title.
-  A one-image directory skips the grid at launch.
-  A converted source opens as one vector picture, never as a book, because it holds one plane.
-  A document launched directly (two planes or more) paints its first spread at once and its whole book as it follows, over a one-cell grid that waits behind ESC, and its title stays the image title.
-  A book keeps the default window size, because its canvas can stand wider than a screen and taller than a texture.
-  ESC returns to the grid.
-- X11 WM_CLASS is `vv` (res_name and res_class), which the window name sets (`.with_name("vv", "vv")`).
-  The build carries the `x11` feature of winit only, so one display path ships.
+- `nix run . -- <image-path-or-directory>` opens a file or a directory. `nix run . -- --mcp` opens a window that waits for a tool. `nix run . -- --wid <id> <path>` draws inside a host window.
+- Keys, the region selection, the book step, the converter rules, the embed contract and the environment variables live in the README. Read the README table before you change a key or a variable.
+- Both views clear to `BACKGROUND` (`crates/vv-view/src/view.rs`), so the letterbox bars and the grid gaps match.
+  A source that paints no paper fills it into its own pixels, so no clear color ever follows a picture.
 
 ## Architecture
 
+A path becomes a `Surface`, a `Surface` renders a `View` (plane, optional crop, scale) into an RGBA buffer, a decode worker uploads that buffer as a texture, and the frame draws the textures as quads.
+
 ### Render
 
-- The renderer is `wgpu`, the window is `winit`, and one instanced-quad pipeline draws everything.
-  `crates/vv-gpu/src/gpu.rs` owns the instance, adapter, device, queue and swapchain.
-  `crates/vv-gpu/src/render.rs` owns the pipeline, the batch and the draw calls.
-  `crates/vv-gpu/src/texture.rs` owns one uploaded picture and its two filter groups.
-  `crates/vv-core/src/draw.rs` owns `Vec2` (a re-export of `glam::Vec2`), `turned` (the one degree-to-radian helper of a y-down space), `Color` and `Quad`, the CPU-side geometry.
-  `crates/vv-view/src/input.rs` owns the held keys, the frame edges and the pointer.
-  `crates/vv-view/src/view.rs` owns the image view itself: `ViewState` (what it shows and how it frames it), the region patch, the spread column and the `v` selection drawing.
-  It is `pub(crate)`, holds no window and no device, and `crates/vv-view/src/viewer.rs` drives it.
-  `crates/vv-view/src/viewer.rs` owns one `Viewer`: the pipeline on the host's device, the two views, the loaders, the input and the clock.
-  `main.rs` keeps the window, the surface, the event mapping and the CLI, so no view code reads a raw `winit` event.
-  The decisions behind one pipeline are `docs/adr/0002-wgpu-renders-the-view.md`.
-- The backend is Vulkan only (`Backends::VULKAN`, features `vulkan` and `wgsl`), and the instance flags stay empty, so no DX12, Metal or GL instance exists and no library opens for one.
-  Issue 94691ce measured the Vulkan loader alone at 28.9 ms of a 59.1 ms first frame, so the backend set is the one startup knob that matters.
-- The swapchain takes a non-sRGB format (`Bgra8Unorm` when the adapter offers it) and every texture is `Rgba8Unorm`, so the decoder's bytes reach the screen unchanged: the pixel math the raylib path had.
-  Alpha stays straight (`SRC_ALPHA` over `ONE_MINUS_SRC_ALPHA`), so the decoders write what they decode and `svg.rs` keeps its un-premultiply pass.
-  Do not mix: one color space, one alpha convention, from the decoder to the swapchain.
-- `Gpu::new` registers `Device::set_device_lost_callback`, and `Gpu::lost_reason` hands the driver's message to the frame loop, which stops with a readable error.
-  A lost device takes every resource with it, so drawing on would fail silently; a recovery path means a new `Gpu`, a new `Renderer` and every texture again, which is the same work as a fresh open and is not written yet.
-  The device's own `destroy` is not a loss, because the process is on its way out.
-- The present mode defaults to `Fifo`, which never tears and paces the loop to the refresh rate; `VV_PRESENT=fifo|relaxed|mailbox|immediate` picks another one.
-  `desired_maximum_frame_latency` stays 1 (`gpu::DEFAULT_LATENCY`), the classic double buffer.
-- An instance is four window-space corners, a source rect and a tint (`render::QuadInstance`).
-  The corners arrive already turned, so the shader carries no trigonometry and a turned quad costs one `sin_cos` on the CPU.
-  A triangle is a quad whose last corner repeats the first, so the second triangle has no area and the call needs no second primitive.
-  A solid fill samples the one-by-one white texture, so a rectangle, a veil band, a border and a picture are the same draw.
-  `cull_mode: None` retires the veil-triangle reversal.
-- The batch merges consecutive instances that share a bind group, so a frame costs one draw call per texture run and one buffer upload.
-  The instance buffer starts at `START_INSTANCES` (1024) and grows by a power of two.
-- A texture carries one bind group per filter, and the two samplers are shared.
-  The filter is a draw-time choice (`Renderer::texture_pro` draws linear, `Renderer::texture` takes one), so `a` flips one flag instead of walking every texture.
-- Every decode worker uploads its own texture through `texture::Uploader`, because `wgpu::Queue` is `Send + Sync`.
-  The grid, the streaming loader and the region painter upload on their worker and send a handle.
-  `texture::Ready` is the one frame type: `Texture` in production, `Pixels` for a caller with no device, which is what a test builds.
-  Never move a pixel copy back to the main thread: that is the funnel this port deleted.
-- `MAX_TEXTURE_SIDE` (8192) stays the decode policy, and `Uploader` clamps every upload to `Gpu::max_texture_side()`, so a smaller adapter takes a smaller texture and the decoded size never depends on the host.
-- `Renderer::render_into` paints the batch into any texture view, and `Renderer::flush` passes the swapchain image of the window.
-  A host with no window passes a texture of its own, which is how `tests/gpu_offscreen.rs` reads the pixels back with no display.
-  Those paints are `#[ignore]`d, because a plain `cargo test` has no adapter: `checks.gpu` runs them on Mesa's lavapipe, and a host with Vulkan runs them by hand (`MESA` store path, `VK_DRIVER_FILES`, `cargo test --test gpu_offscreen -- --ignored`).
-  lavapipe renders on the CPU with no GPU, no device node and no display, so the check runs in the build sandbox.
-  The check sets `VK_DRIVER_FILES` to the lavapipe ICD, `LD_LIBRARY_PATH` to the system libraries (wgpu opens `libvulkan.so.1` with `dlopen`), one font set for the label metrics, and `VV_GPU_REQUIRED`, which turns a missing adapter into a failure instead of a skip.
-  They cover the clear, a fill, a source rect, straight alpha, a turn, the texel grid of a 1:1 patch, and the SVG, PDF, converted-source and book planes end to end.
-  The default gate still compiles them, so the seam never rots.
-- A captured drag grabs the pointer (`CursorGrabMode::Locked`, falling back to `Confined`, which is all X11 allows) and reads the raw device deltas of `DeviceEvent::MouseMotion`.
-  `Input::capture` owns the swap: while a drag holds the pointer, the raw travel moves the logical pointer and `WindowEvent::CursorMoved` is ignored, because the grab keeps the real pointer in place.
-  A free pointer is the opposite: the platform position is the truth and the raw travel only accumulates for a drag that starts inside the same frame.
-  That rule lives in `crates/vv-view/src/input.rs`, so a hover point never drifts by the travel since the last `CursorMoved`.
-  The pan multiplies the travel by `PAN_DRAG_SPEED` (`view.rs`, 1.0), and `VV_PAN_DRAG_SPEED` overrides it for one run.
-  The factor is a feel constant and not a geometry one: raw counts are units of the mouse, so their ratio to window pixels depends on the hardware DPI and on the desktop's pointer speed.
-  1.0 moves the picture one window pixel per count, which is the feel the spike at `~/agent/versatile-viewer-wgpu-spike` picked; the raylib path multiplied the same raw travel by 2.0 (see `git bug show 94691ce`), and issue 94691ce carries the history of that number.
-  `RUST_LOG=vv=debug` prints the window scale factor at startup and, at every drag release, the `speed` in use and the `travel` the drag accumulated, so a feel report carries numbers and the input source can be checked without a rebuild.
-  The release warps the pointer back to the grab point, and the warp sets the logical pointer too, so the next frame reads the spot it sent the pointer to.
-- winit 0.30.13 emits one `DeviceEvent::MouseMotion` per XI2 raw motion event, with the device's raw axis values as the delta (see `xinput2_raw_mouse_motion` in its X11 backend), so no per-event guard belongs here.
-  A virtual X server (XTEST) reports the absolute pointer position as those raw values instead, sometimes twice, which looks like a double-speed drag; that is an injection artifact of the test harness and not a real event pair, so do not add a delta sanity clamp for it.
+- The renderer is `wgpu`, the window is `winit`, and one instanced-quad pipeline draws everything. A picture, a veil band, a selection border and a solid fill are the same draw.
+- The backend is Vulkan only (`Backends::VULKAN`, features `vulkan` and `wgsl`), so no DX12, Metal or GL instance exists and no library opens for one. Keep that set fixed: it is the one startup knob that matters.
+- One color space and one alpha convention run from the decoder to the swapchain: a non-sRGB swapchain, every texture `Rgba8Unorm`, and straight alpha. Do not mix them.
+- `Gpu::new` registers a device-lost callback and the frame loop stops with the driver's reason. A recovery path is not written.
+- `MAX_TEXTURE_SIDE` is the decode policy, and `texture::Uploader` clamps every upload to the adapter, so a decoded size never depends on the host.
+- Every decode worker uploads its own texture through `texture::Uploader`, because `wgpu::Queue` is `Send + Sync`. Never move a pixel copy back to the main thread.
+- `Renderer::render_into` paints the batch into any texture view and `Renderer::flush` presents the swapchain. A host with no window passes a texture of its own, which is how the `#[ignore]`d offscreen paints read pixels back.
+- A captured drag grabs the pointer and reads raw device deltas. A free pointer reads the platform position. `Input::capture` (`crates/vv-view/src/input.rs`) owns that swap, so a hover point never drifts.
 - A lost focus forgets every held key and button and drops the grab, because the releases never arrive.
-- A motion starts only at a press this window saw go down.
-  X replays every key that is down as a synthetic press when the window gains the focus (`is_synthetic` in winit's X11 backend, see `handle_pressed_keys`), so a window manager that binds `l` for a workspace switch still holds that key as `vv` arrives.
-  The first auto-repeat of such a key carries no repeat flag, so `crates/vv-view/src/input.rs` marks the synthetic press as stale (`Input::key`): the key never enters the held set, neither the replay nor its repeats, and a release clears the mark so the next press counts.
-  A `viewer::Event::Key` carries the flag (`synthetic`), and a host that has no such event reports `false`.
-- A frame is one method (`Viewer::frame` in `crates/vv-view/src/viewer.rs`), and the host wraps it: `App::frame` takes the swapchain image, hands the texture view to `Viewer::render` and presents.
-  The launch lists the directory and decodes a single file before a window exists, because the title carries the image count and a picture sizes its own window.
-  `App::resumed` creates the window, the GPU stack and the `Viewer`.
-  A stale or lost swapchain reconfigures and skips the frame; it never kills the window.
-  A lost device stops the loop with the driver's reason, and the acquire, the present and `OCCLUDED_PAUSE` stay in `main.rs` because they belong to the surface the host owns.
-  A frame whose acquire answers no image (the window is hidden or occluded) is the one frame the loop cannot pace itself with, because Fifo has nothing to present, so `main.rs` sleeps `OCCLUDED_PAUSE` (50 ms) before it asks for the next one: twenty wakeups a second, and no core burned on a picture nobody sees.
-- The viewer carries no text layer.
-  The grid draws nothing for an empty directory, because the title carries the count, and a failed cell shows an exclamation of two rectangles.
+- X replays every held key as a synthetic press when the window gains focus, so `Input::key` marks a synthetic press stale and it never enters the held set. A `viewer::Event::Key` carries the flag.
+- A frame is one method, `Viewer::frame`. `main.rs` keeps the window, the surface, the acquire, the present and the CLI, so no view code reads a raw `winit` event.
+- The viewer carries no text layer. A failed grid cell shows an exclamation of two rectangles, and an empty directory draws nothing because the title carries the count.
 
 ### Diagnostics
 
-- Every layer emits events through `tracing`, and the binary owns the subscriber.
-  `vv-source`, `vv-view` and `vv-gpu` name the facade only (`tracing = "0.1"`), so no library decides a level, a format or a destination.
-  `vv-cli` names `tracing-subscriber` with `fmt` and `env-filter`, and `init_logging` (`main.rs`) builds the one subscriber: `RUST_LOG`, the stderr writer, and the target column.
-  The subscriber starts before `Launch::open`, because a decode and a converter run before the window exists.
-  The writer stays on stderr, because an MCP transport owns stdout.
-- `RUST_LOG` is the whole filter, so one variable serves the tree: `RUST_LOG=vv=debug`, `RUST_LOG=vv_source=debug`, `RUST_LOG=vv=warn`.
-  `EnvFilter::try_from_default_env` keeps the default, so an unparsable `RUST_LOG` falls through to `default_filter`.
-  `VV_DEBUG=1` answers `vv=trace` and `VV_TIMING=1` answers `vv=debug`, and a set `RUST_LOG` wins over both.
-  `vv_core::timing_enabled` is gone: its `OnceLock` bool became a `tracing::enabled!` call, so the filter is the one switch.
-- The level says who reads the event:
-  `error!` a failure the viewer absorbed (an upload, the converter table),
-  `warn!` a failure the user sees (a decode, an open, a present-mode fallback, the pane geometry),
-  `info!` the one startup fact worth a support report (the GPU stack),
-  `debug!` the input and drag geometry and the slow frames,
-  `trace!` the per-frame key press, which is the finest event of the loop.
-- A hot path reads `tracing::enabled!` once when the work beside the event costs real time.
-  `Viewer::frame` reads `Level::DEBUG` into one local `debug`, which arms the frame clock and the debug crosshair, and the events themselves stay macro calls.
-  Do not hold a level in a struct field, and do not re-read the environment once the subscriber exists.
-- Values ride the fields and never the message, so a filter and a report read them: `err = %err`, `path = source.log_label()`, `ms = ms`, `dt_ms = dt * 1000.0`.
-  The message stays a short constant name of the event (`"upload"`, `"decode failed"`, `"gpu stack"`), so one event reads the same in every filter.
-- A span wraps the work that a slow report names: `convert::run` carries `#[instrument(skip_all, fields(program, extensions, source_bytes))]`, so its `debug!` answer event inherits the conversion it belongs to.
-  A synchronous worker enters a span with a guard in a named binding (`let _e = span.enter()`), because `.instrument()` serves an async future and releases nothing on a plain call.
-- A test and an example init nothing: no test reads a subscriber, and an example owns its own output.
-  `tracing-subscriber` never enters a library, so a dev dependency needs no seam.
+- Every layer emits through `tracing`, and the binary owns the subscriber. `vv-source`, `vv-view` and `vv-gpu` name the facade only, so no library decides a level, a format or a destination.
+- `RUST_LOG` is the whole filter, and a set `RUST_LOG` wins over the `VV_DEBUG` and `VV_TIMING` aliases.
+- The level says who reads the event. `error!` marks a failure the viewer absorbed, `warn!` one the user sees, `info!` the startup fact a support report needs, `debug!` the input geometry and the slow frames, `trace!` the per-frame key press.
+- Values ride the fields and the message stays a short constant event name, so one event reads the same in every filter.
+- A hot path reads `tracing::enabled!` once when the work beside the event costs real time. No struct field holds a level.
+- A span wraps the work that a slow report names. A synchronous worker enters it with a named guard (`let _e = span.enter()`), because `.instrument()` serves an async future.
+- Neither a test nor an example inits a subscriber.
 
 ### Command line
 
-- `clap` (derive) owns the command line: one `Cli` struct in `main.rs` carries `--mcp`, `--wid <ID>` and the positional path.
-  clap answers `-h`/`--help` and `-V`/`--version` before `main` runs, so neither opens a window.
-  An unknown option, a second path, a missing path and a bad id all leave as clap errors that name the flag, so no usage string and no argv loop live in the tree.
-  The path stays optional for a `--mcp` run alone (`required_unless_present`), because that run pushes every picture through a tool.
-- `--version` prints `vv <Cargo.toml version>`, and `name = "vv"` in `#[command(..)]` names the program, so the package name never shows.
-- `Cli::try_parse_from` takes the program name first and is the test seam, so a test never reads `std::env::args`.
-- `pane::Wid` stays the one reader of the `--wid` value: `parse_wid` (`main.rs`) wraps `Wid::parse` as the clap value parser, so the decimal and `0x` forms and the `0` rejection live in `crates/vv-view/src/pane.rs` and nowhere else.
+- `clap` (derive) owns the command line. One `Cli` struct in `main.rs` carries `--mcp`, `--wid <ID>` and the positional path, and clap answers `-h` and `-V` before `main` runs.
+- The path stays optional for a `--mcp` run alone (`required_unless_present`), because that run pushes every picture through a tool.
+- `pane::Wid` is the one reader of the `--wid` value, so the accepted forms and the `0` rejection live in `crates/vv-view/src/pane.rs`.
+- `Cli::try_parse_from` is the test seam, so no test reads `std::env::args`.
 
 ### Embed
 
-- `vv --wid <id> <path>` shows the picture inside a host window, the way `mpv --wid` does.
-  The id reads as decimal or `0x` hex, before or after the path, and `--wid` composes with `--mcp`.
-  A second path, an unknown option, an id that is not a number and the id `0` are usage errors that name the flag.
-- `pane::Wid` (`crates/vv-view/src/pane.rs`) is the parsed id: it is the one place a bare window number becomes a value with a meaning, and `raw()` is the only way back.
-- One `Pane` (`main.rs`) carries the policy: `Window` or `Embedded(Wid)`.
-  Every site reads it once, and no view code carries an `if embedded` test.
-  `Pane::shows_grid` answers the whole difference: an embedded pane draws the image view only, so `ESC` and `Enter` never leave the picture, the title stays untouched, `open_initial` opens entry 0 of a directory, and a failed open bails with the reason instead of falling back to a grid that nothing draws.
-  The grid stays alive as data: `n`/`p` step it, the prefetch reads it, and a book's spread count comes from the surface.
-- The child window is created with `WindowAttributesExtX11::with_embed_parent_window`, so `XCreateWindow` runs with the host window as parent.
-  The child never becomes a top-level window: no window manager frames it and no `WM_CLASS` or title is set on it.
-  `Gpu` needs no change, because winit's window carries the X11 handle.
-- The pane follows the host size itself (`pane::PaneGeometry`, `PANE_POLL` 50 ms), because a host resizes the container it created and X sends that `ConfigureNotify` to the container alone.
-  The poll reads the parent geometry with `x11rb` (pure Rust, the default feature set is empty) and asks for that size through `request_inner_size`, so the swapchain reconfigures and the picture refits on the `Resized` that comes back, exactly like `mpv --wid`.
-  A zero side (a collapsed pane) answers nothing, so no 0x0 swapchain is configured.
-  A display that cannot be reached leaves the pane at its launch size and prints one line.
-- The host owns focus. vv sends no `XSetInputFocus`, so the pane receives keys only while the host focuses it.
-  A host calls `XSetInputFocus` on the child of the container it handed over: keys go to the focus window, and vv's window is a child of the container, not the container.
-  A lost focus already drops every held key, the pointer grab and every drag latch.
-- vv claims no XEmbed support: winit sets an atom it names `_XEMBED` to `[0, 1]`, not the spec's `_XEMBED_INFO`, and it speaks no XEMBED message.
-  A host that expects the protocol focuses the pane itself.
-- `examples/embed_host.rs` is the demo host: a frame window, a container child inset under a bar, `vv --wid <container> <path>`, a frame resize that the container follows, a click on the bar that toggles focus onto the pane's own window, and a reap of the child on exit.
-  It shows the two duties a host owes, and it uses only `x11rb`.
-- `examples/viewer_host.rs` is the stage-2 demo host: it owns the window, the surface, the swapchain and the event loop, builds a `Viewer` on its own device, gives it a texture, and copies that texture into the swapchain image each frame.
-  A host with a scene of its own samples the same texture with its own pipeline instead, and the example shows the minimum: one `copy_texture_to_texture`.
-  `Gpu` keeps `COPY_DST` on its swapchain configuration for exactly that.
-  Run it with `cargo run --example viewer_host -- <path>`.
-- Stage 2 is the library value: `viewer::Viewer` in `crates/vv-view/src/viewer.rs`.
-  A host builds one on its own `wgpu::Device` and `Queue`, so vv needs no window, no surface and no swapchain: `Viewer::new(device, queue, format, max_texture_side, launch, size)` builds the pipeline and uploads the launch frame.
-  `Viewer::render(host, target, size, dt)` fills one frame's batch and paints it into the host's `wgpu::TextureView` through `Renderer::render_into`, so `render_into` stays the only encoder and the host presents.
-  `Viewer::handle_event(event, host)` takes `viewer::Event` (key, pointer, travel, button, wheel, focus), which a host maps from its own toolkit, and `viewer::Input` below it keeps the held state.
-  A repeat stays a flag and not an edge, a lost focus drops every held key, the capture and every drag, and a synthetic press starts no hold, so the host needs no rule of its own.
-  `Host` is the whole platform wall: four window actions (`set_title`, `grab_pointer`, `release_pointer`, `place_pointer`), and the binary answers them from `winit`.
-  `viewer::Launch` is the work that runs before a window exists: it lists a directory, decodes a single file, and names the size and the title a host then creates its window with.
-  A host therefore opens a `Launch`, creates its window from `Launch::window_size`, and then builds the `Viewer`.
-  The `Viewer` owns no clock: the host passes `dt`, and the viewer sums it.
-  `image_size` and `title` answer what a host captions or fits a window to, and `open(path, size)` swaps the open source.
-  `tests/gpu_offscreen.rs::a_viewer_paints_into_a_host_texture` is the end-to-end check: a headless device, a `Launch`, a frame loop and a readback, with no surface in the path.
+- `vv --wid <id> <path>` shows the picture inside a host window, the way `mpv --wid` does, and it composes with `--mcp`.
+- One `Pane` (`main.rs`) carries the policy: `Window` or `Embedded(Wid)`. Every site reads it once, and no view code carries an `if embedded` test. `Pane::shows_grid` answers the whole difference, so an embedded pane draws the image view only while the grid stays alive as data.
+- The child window is created with `WindowAttributesExtX11::with_embed_parent_window`, so it never becomes a top-level window and no window manager frames it.
+- The pane follows the host size itself, because X sends the `ConfigureNotify` of a container to the container alone.
+- The host owns focus. vv sends no `XSetInputFocus`, so the pane receives keys only while the host focuses the pane's own window.
+- vv claims no XEmbed support, so a host that expects the protocol focuses the pane itself.
+- `examples/embed_host.rs` and `examples/viewer_host.rs` are two working hosts, one for the X11 pane and one for the library path. Read one before you change a `Host` action.
+- `viewer::Viewer` is the library seam. A host builds it on its own device, maps its own toolkit into `viewer::Event`, passes `dt` and presents the texture itself, so the viewer holds no window, no surface and no clock.
 
 ### MCP
 
-- `vv --mcp` also serves the Model Context Protocol on stdio, from `crates/vv-mcp/src/mcp.rs`.
-  The `--mcp` flag accepts either argument order.
-  The viewer window stays interactive, and an embedded pane stays interactive the same way, so `--wid` and `--mcp` compose.
-- `Cli::path` is an `Option` with `required_unless_present = "mcp"`, so `vv --mcp` alone parses and `vv` alone fails clap with the flag named.
-  A run with no path opens `Launch::blank(shows_grid)` (`crates/vv-view/src/viewer.rs`): the default 1024x768 window, the `BACKGROUND` clear, no grid, no decode, and the title `<mcp>` + `SEP` + `versatile-viewer`.
-  That launch reads no file, so every picture it shows arrives through a tool.
-- The server pins revision `2026-07-28` and serves that revision only.
-  The revision is stateless: no `initialize` handshake, no session, and the client context rides in the per-request `io.modelcontextprotocol/*` `_meta` fields.
-  An older client fails fast on `UnsupportedProtocolVersion`.
-- The server advertises four tools, and `tools()` plus one `call_tool` arm is the whole pair that lands one: `vv_show_image_bytes(data_base64)`, `vv_show_image(path)`, `vv_clear()` and `vv_get_status()`.
-  The four hints ride every tool (`read_only_hint` true only on `vv_get_status`), and the naming and hint rules live in the module docstring.
-  No resources, no prompts, and deprecated `logging` stays unadvertised.
-- A tool result carries the answer and a tool error carries the reason: `CallToolResult::structured` and `structured_error`, so a decode failure reaches the caller with the decoder's message.
-  A protocol error stays for a name this server cannot route.
-- `mcp::Sink` is the whole wall between the protocol layer and the picture: `show_bytes`, `show_path`, `clear` and `status`, over the plain `Shown` and `Status` values.
-  `crates/vv-mcp` names no texture, no device and no window, so a test drives every tool with a sink of its own.
-  The crate names `vv-core` alone, for the `Shown` and `Status` answer types, which the view layer builds and this layer reports.
-- `crates/vv-cli/src/main.rs` implements that sink as `Bridge`, which owns a `std::sync::mpsc::Sender<vv_view::push::Push>` and waits on the reply channel the request carries.
-  `App::accept_pushes` drains the channel once per frame into `Viewer::accept`, so the frame loop stays the only owner of the view and a request that arrives before the window exists waits in the channel.
-  `PUSH_TIMEOUT` (60 s) bounds that wait, so a viewer that stopped drawing answers instead of hanging the caller.
-  `Push` lives in `vv-view` because it describes what a host may push, and the bridge hands `push::Shown` and `push::Status` to the `mcp` tools unchanged: the four types are one pair in `vv-core`, so no field-by-field conversion sits on that path.
-- `MAX_PUSH_BYTES` (64 MiB) caps one `vv_show_image_bytes` payload, and the cap reads the encoded text before the decode allocates, so a flood stops first.
-  `base64` is the one dependency this tool adds.
-- The picture route is `vv_source::surface::open_bytes`, which sniffs the head the way `open_surface` does: a PDF opens as `PdfSurface::from_bytes` (a book when it holds pages), an SVG or SVGZ document parses with `svg::from_bytes` into the same `VectorSurface`, and every raster format decodes once with `decode_raster_bytes` into a `MemorySurface`.
-  `sign::detect_bytes` is the in-memory twin of `sign::detect`, and a JPEG XL container passes on its `JXL ` box because a memory source carries no extension.
-  `svg::from_bytes` applies the same gzip rule and the same `MAX_INPUT` cap as a `.svgz` file read.
-- `Viewer::accept` answers `Push::Status` and `Push::Clear` on the main thread and opens a picture on a `rayon` worker, which renders the box a fresh open frames (the whole plane, or the first spread of a book), uploads the texture and answers the caller.
-  The frame loop installs the result, so the main thread never decodes and never uploads a pushed picture.
-  A push replaces what shows, `Push::Clear` returns to the blank view, and the grid the launch listed stays behind `ESC`.
-- stdout carries protocol frames only.
-  Every diagnostic goes to stderr, and no library writes to stdout beside the transport.
-  The module never writes to stdout outside the transport.
-  The subscriber of the binary writes to stderr for the same reason, so the two `--mcp` and `RUST_LOG` compose.
-- The server runs a tokio current-thread runtime on a background thread.
-  A start or run failure prints to stderr and never stops the viewer.
-- Client config: `{ "command": "vv", "args": ["--mcp"] }` for pushed content, or `{ "command": "vv", "args": ["--mcp", "/path/to/images"] }` for a directory beside the tools.
-- Tests: unit tests in `crates/vv-mcp/src/mcp.rs` drive the server over an in-memory duplex stream against a fake sink.
-  `crates/vv-cli/tests/mcp_stdio.rs` drives the real stdin and stdout of a child process.
-  `crates/vv-cli/tests/gpu_offscreen.rs::a_pushed_picture_lands_in_a_blank_viewer` pushes bytes into a blank launch and reads the pixels back on lavapipe.
+- `vv --mcp` serves the protocol on stdio from `crates/vv-mcp/src/mcp.rs`, on a tokio current-thread runtime on a background thread, and the viewer window stays interactive.
+- A run with no path opens `Launch::blank`, which reads no file, so every picture it shows arrives through a tool.
+- The server pins revision `2026-07-28` and serves that revision only. That revision is stateless, so no `initialize` handshake and no session exist.
+- The server advertises four tools: `vv_show_image_bytes`, `vv_show_image`, `vv_clear` and `vv_get_status`. `tools()` plus one `call_tool` arm is the whole pair that lands one, and the naming and hint rules live in the module docstring.
+- `mcp::Sink` is the whole wall between the protocol layer and the picture, so `vv-mcp` names no texture, no device and no window, and a test drives every tool with a sink of its own.
+- `main.rs` implements that sink as `Bridge` over a channel that `App::accept_pushes` drains once per frame, so the frame loop stays the only owner of the view. The main thread never decodes and never uploads a pushed picture.
+- stdout carries protocol frames only. Every diagnostic goes to stderr, and no library writes to stdout beside the transport.
+- `MAX_PUSH_BYTES` (64 MiB) caps one payload, and the cap reads the encoded text before the decode allocates, so a flood stops first.
 
 ## Rules
 
-- License: AGPL-3.0-or-later.
-- Render with `wgpu` through a `winit` window (see "Render" below).
-  Every decoder stays pure Rust, so nothing compiles C any more: the flake carries no CMake, no clang and no bindgen.
-- Decode JPEG XL with `jxl-oxide` (pure Rust, no libjxl).
-- Decode common formats with the `image` crate.
-- Rasterize SVG and SVGZ with `resvg` (pure Rust, no cairo).
-  The module is `crates/vv-source/src/svg.rs`, and the `resvg`, `usvg`, `tiny-skia`, `flate2` and `fontdb` dependencies stay plain ones, so the backend always compiles.
-  A vector file has no pixel size, so it bakes one: `svg::base_side` clamps the declared long side into `BASE_MIN_SIDE` (1024) ..= `MAX_TEXTURE_SIDE` (8192).
-  The aspect stays exact, so the base raster and the thumbnail share one shape.
-  The base size is the source size: the grid entry, the cache header and the image fit all measure that pair, never the thumbnail.
-  `svg::Vector` paints the base raster and any region of it, so one parsed tree serves the thumbnail, the base raster and the window patch.
-  A [`surface::VectorSurface`] is that tree behind the `Surface` trait.
-  Sniffing reads content: magic, then a BOM, comments, a prolog and a doctype, then an `<svg` root. A gzip head sniffs its decompressed head.
-  `MAX_INPUT` (32 MiB) caps the read and the decompression, so a gzip bomb fails.
-  External references never resolve (`resources_dir` stays `None`), so no file makes the viewer read another path.
-  The host font database loads once per process (`fontdb`, `OnceLock`), so `<text>` renders with real fonts and a whole directory pays one scan.
-  `resvg` covers the static subset only: no script, no animation, and `raster-images` stays off, so an embedded JPEG/WebP/GIF draws nothing while an embedded PNG does.
-  A retained `usvg::Tree` (`svg::Vector`) paints the view again, so the seam for a deeper zoom stays.
-- Rasterize PDF with `hayro` (pure Rust, no C dependency, vello_cpu).
-  The module is `crates/vv-source/src/pdf.rs` (`PdfSurface`, `PdfError`), and it owns the hayro dependency, so a renderer swap touches one file.
-  One PDF page is one plane, and the natural unit is the PostScript point (1 pt = 1 px at scale 1.0), so `bounds` answers from a page-size table captured once at open time.
-  `open_surface` routes on the `%PDF-` magic, so a misnamed file still opens.
-  hayro 0.9 renders through an arbitrary `kurbo::Affine` (`render_into`), so the backend overrides `render` as a region anchor: it translates the requested rect to the origin and rasterizes only those pixels.
-  A single render caps at `MAX_RENDER_PIXELS` (about 25 MP) and `MAX_RENDER_SIDE` (65535), and the returned scale is the clamped one.
-  `previews` and `can_refine` answer true, so a coarse preview lands first and the image view repaints the window patch over a rested zoom.
-  A document opens as a book, so the loader paints its first spread first (see the book section below).
-  Every render runs in `catch_unwind`, because a young rasterizer can panic on a malformed page and the job runs on a pool thread: a panic becomes `SurfaceError::Render`, never a crash.
-  Each render builds a fresh `RenderCache`, because hayro's cache is not `Send`.
-- A document shows as a book, `crates/vv-source/src/book.rs` (`BookSurface`, `COVER_SLOTS`, `COVER_ON_RIGHT`, `GUTTER`, `ROW_GAP`, `SLOTS`, `MAX_RENDER_PIXELS`).
-  The whole book is one `Surface` plane, so the loader, the fit, the pan, the turn and the region patch treat it as one tall picture.
-  The cover page sits alone in the right slot of row 0, then the pages pair up: `1|2`, `3|4`, one spread under the next.
-  `ROW_GAP` is 0, so the spreads stack edge to edge; `GUTTER` (0.5 pt, about half a screen pixel at a fit view of an A4 page) separates the two pages of a spread, and both gaps stay transparent, so `BACKGROUND` shows through.
-  Every spread measures the widest and tallest page of the document, so the pages line up in two columns down the whole book, and a page narrower than the widest one centers in its slot.
-  The book keeps **base units**, not points: `BookSurface::units_per_point` bakes the scale that lands the whole book inside `MAX_TEXTURE_SIDE` and `MAX_RENDER_PIXELS` at scale 1.0, because `bounds` must match a scale-1.0 render and the main thread never resizes a buffer.
-  `render` converts the request back to points, walks only the spreads the rect touches, and asks each page for its own part at one shared scale.
-  `Surface::open_box` names the box a fresh open frames: a book answers its first spread, every other source answers `None`.
-  The fit measures that box, so whichever side binds decides and the cover page shows whole.
-  A fit centers the whole plane, so `ViewState::align_open_box` holds the pan on `ViewState::top_pan` (`crates/vv-view/src/view.rs`) until the user moves the view: the align repeats every frame, because a window manager often resizes the window right after it maps and a resize re-fits the scale.
-  `ViewState::open_align` (an `OpenAlign::Holding`) records the pan the align wrote, so a pan or a target that moved away from it marks a user move and the align stops.
-  `ViewState::refit_open` arms the same framing again when the loader header or the first frame brings the real plane size.
-  `open_book_surface` wraps when the source holds two planes or more; the grid thumbnail keeps the plain `open_surface`, so a cell shows page 0 and never a second page.
-  A book holds every page in one plane, so a whole-plane render interprets every page and its cost grows with the page count: a 20-page A4 document costs about 250 ms at scale 1.0, and still about 177 ms at a coarse preview scale, because the interpreter dominates the rasterizer.
-  `loader::stream_book` therefore never renders a book's whole plane at scale 1.0.
-  It paints `spread_box(0)` first and sends it as a `DecodeMsg::Preview` that carries `Some(region::Patch)`, so the spread the fit frames lands sharp after one spread render (about 22 ms) and the view adopts it as `ViewState::crop`.
-  The coarse whole book follows as the `Done` frame at `min(preview_px / long, 1.0)`, and that texture is the fallback the patch draws over.
-  A document launch renders nothing before the window either, because a book keeps the default window size: `Viewer::start_launch` starts a `Loader` for it, so the window maps at once.
-  `Surface::page_box` names the slot page `N` fills in the plane, and a book answers it (`BookSurface::page_slot`), so a caller that holds a page-sized picture can land it where the page will paint.
-  The image view draws the picture a grid cell holds while the decode catches up (`view::draw_cell`), and `view::cell_place` decides where: over the whole plane when the cell measures it (`view::same_plane`), and into `ViewState::cell_box`, page 0's slot, for a document.
-  A book's cell holds page 0 and never the whole book, so the view never stretches one page over the plane: a white page across the whole book reads as a white flash.
-  `show_entry` opens the plane, the opening box and the slot beside the loader, so the first frame frames the spread instead of easing from the cell's page fit.
-  The plane the view holds is a guess until its surface measures it, so `ViewState::tick_crop` paints only while `Surface::bounds` agrees with `ViewState::img`, and a page-sized cell never paints a patch of the page rect onto the book.
-- Compile Typst through the converter seam.
-  A converter rule claims `typ` and runs the `typst` CLI with `compile --format pdf - /dev/stdout`, and the PDF answer opens in the hayro backend, so a document keeps one plane per page, its preview and its refine.
-  The `typst`, `typst-layout`, `typst-pdf` and `typst-assets` crates leave the tree: no document engine links into the binary, and a Typst source stays one rule of the config file.
-  `spawn` sets the working directory to the directory of the source (`current_dir`), so a relative `#include`, `#image` or `#read` resolves beside the file, as the Typst CLI roots the project there.
-  The CLI answers a compile error on stderr with a non-zero exit, which becomes `SurfaceError::Render` with the first lines of that message, never a crash.
-- A format this viewer does not parse reaches a backend through a converter, `crates/vv-source/src/convert.rs` (`Converters`, `Rule`, `Converters::open`, `surface`).
-  The module always compiles, because the SVG backend paints its answer, and `toml` stays a plain dependency beside it.
-  A converter reads the source bytes on stdin and writes an SVG document or a PDF on stdout, so no format engine links into the binary and a new format needs no rebuild.
-  `surface` decides by the head of the answer: `PDF_MAGIC` (`%PDF-`) opens a `PdfSurface`, which keeps one plane per page so `open_book_surface` shows the document as the same book a PDF file shows, and any other answer must parse with `svg::from_str` into one `VectorSurface`.
-  A PDF answer ignores the rule's `background`, because a page paints its own paper.
-  The rule table comes from `$XDG_CONFIG_HOME/vv/converters.toml`, which `VV_CONVERTERS` can point elsewhere, and `[defaults]` names `slots`, `timeout_ms` and `max_output`.
-  The viewer ships no rule of its own, so a format converts only after the user writes a rule: the README carries a `merman-cli` rule for a Mermaid diagram and a `typst` rule for a Typst document.
-  A `.typ` source is plain UTF-8 text with no magic, so that rule is the only route to its pages, and `grid::is_image_extension` names no `typ`, so the file lists only while a rule claims it.
-  `Converters::parse` reads `[defaults]` before the rules, because a TOML table iterates in key order and every rule inherits those values, and the table appends nothing after them.
-  A rule names `ext`, `command`, and optionally `timeout_ms`, `max_output` and `background` (`#rrggbb` or `#rrggbbaa`).
-  The command runs without a shell (`Command::new(program).args(args)`), so a config file never reaches an interpolation.
-  `Converters::parse` reads the file through three small `serde` structs (`ConfigFile`, `DefaultsFile`, `RuleFile`) whose `deny_unknown_fields` rejects an unknown key at every level, and it then rejects a rule without an extension and a rule without a command, so the file is the whole table.
-  A rule names each inherited value as an `Option`, so `[defaults]` fills only what the rule leaves out and the file order never matters.
-  `Converters::empty()` is a table with no rule, over the real cache: `load` answers it when the file is missing, and the process-wide `CONVERTERS` (`LazyLock`) prints one line and keeps it when the file does not parse, so a typo runs no program and every other file keeps its own decoder.
-  The table lives in a `LazyLock` because the open runs deep inside a surface open on a decode worker, and no owner passes a table down that path; a test builds a `Converters` of its own and `with_cache_dir`, so no test reads the table or the cache of the user.
-  Dispatch reads the extension (`Converters::claims`), which is the one honest signal for a format with no magic; `open_surface` sniffs the content first and asks `convert::claims` only when the sniff names no known format, so a config rule for `png` never takes a PNG from the raster decoder, and `grid::is_image_path` asks the table too (`is_image_path_in`), so a configured format lists in the grid.
-  `Converters::open` sizes the file before it reads it and stops the read at `MAX_SOURCE` (8 MiB), so the cap costs no allocation, runs the program under one `Slots` permit (`DEFAULT_SLOTS` 2, because a browser costs a second and hundreds of megabytes), and opens the answer through `surface`: `%PDF-` bytes become a `PdfSurface`, so a converted document keeps one plane per page, its preview and its refine and `open_book_surface` shows the same book a PDF file shows, and any other answer parses with `svg::from_str` into `VectorSurface`, so a converted picture keeps the region anchor, the settled-zoom refine and the 512 px thumb of a vector file.
-  A rule's `background` becomes `VectorSurface::with_background`, so the paper rides the pixels of the cell, the thumb, the placeholder and the window patch, and the viewer window keeps its `BACKGROUND`.
-  `run` bounds the call four ways: `wait` polls `try_wait` against `timeout`, kills the whole process group of the child when the clock runs out (`kill_group`, which sends `libc::kill` to the negative pid of the group that `CommandExt::process_group(0)` created at spawn) and reaps it, so a browser the converter started dies with it, `drain_capped` refuses an answer past `max_output` (64 MiB default) and closes the pipe on the flood, `drain_head` drains stderr to its end and keeps 4 KiB for the error message, so a chatty converter never meets `SIGPIPE`, and the three pipes run on detached threads, so a grandchild that holds one open can never stall the worker.
-  One `GRACE` (2 s) deadline covers both reader pipes together and never one period apiece, so a lingering helper costs the worker 2 s and not 4 s.
-  The reader threads share their buffer (`PipeBytes`) with the worker, so `bytes_until` takes the bytes that arrived when that deadline passes: a pipe a grandchild keeps open costs no picture.
-  A failure of any kind becomes `SurfaceError::Render` with the program name and the exit code or the stderr head, and a program that cannot start becomes `SurfaceError::Unsupported`.
-  The converted answer caches at `$XDG_CACHE_HOME/vv/converted/<key>.conv`, keyed by `KEY_VERSION` + the argv + the source bytes (`Cache::load_converted`, `Cache::store_converted`, from `vv-cache`), because a grid decode and an image view open of one file run the conversion twice; the entry carries no kind, because `surface` sniffs the head, the payload counts against `vv_cache::WRITE_BUDGET`, a failed store stays silent like `grid::store_thumb`, and a key change invalidates an entry, so no `FORMAT` bump is necessary.
-  `crates/vv-source/src/convert.rs` hashes that key itself with `sha2`, because the key format belongs to the converter seam and `vv-cache` sees an opaque string.
-- Every showable source is a `crates/vv-source/src/surface.rs` `Surface`: `plane_count`, `bounds`, `render_whole`, `render`, `progressive` and `previews`.
-  `open_surface` sniffs the content with `crates/vv-source/src/sign.rs` and picks the backend: a raster file (`ImageSurface`), a vector file (`VectorSurface`), a PDF (`PdfSurface`) or a path a converter rule claims (`crates/vv-source/src/convert.rs`, which runs the rule and opens its answer).
-  `open_bytes` is the same route for content that never reaches a file (an MCP push), and it adds `MemorySurface`: the decode runs once at open, so `bounds` and a native render cost no second decode and every other scale resamples the one buffer the surface holds.
-  A backend writes `render_whole`; `render` is a provided method that renders the whole plane and crops the region out of it.
-  A backend with a region anchor (the vector tree, the PDF rasterizer) overrides `render` to pay only for the pixels the caller asked for, and returns `SurfaceError::Unsupported` rather than the whole plane for a region it cannot serve.
-  A `View` names a plane, an optional `region::Crop` and a scale (output pixels per surface unit), so the grid asks for a thumbnail, the loader for the whole plane and the image view for the patch it shows.
-  `region::Crop` is the one rectangle type of a source and of the view, and `surface::Crop` re-exports it, so no call site converts one rect shape into another.
-  The type is `euclid::Rect<f32, dim::SurfaceSpace>`, so a crop and a window rect never pass for one another.
-  `crates/vv-source/src/sign.rs` owns the content sniffing (`detect`, `Kind`, `Format`, `file_magic`, `is_common_magic`, `dimensions`), and both the surface layer and `svg.rs` use it.
-  `detect` reads the magic once and answers a `Kind`: `Kind::Vector` for an SVG document, or `Kind::Raster(Format)` with the decoder that reads the file.
-  The raster backend keeps that `Format`, so its header read and its progressive open never sniff the same bytes again.
-  A `bool` never selects a decoder.
-  `Surface::progressive` returns a `Box<dyn ChunkSource>` and not a path, so an in-memory or network source can stream, and the default `Ok(None)` means one step.
-  `Surface::can_refine` says whether a settled zoom can yield a sharper picture of the same plane: a vector tree or a document page answers true, a raster image false.
-  `Surface::spread_count` and `Surface::spread_box` name the spread column of a book (0 and `None` for every other source), so the image view steps a spread with the book's own geometry.
-  `Surface::page_box` names the slot one page of the plane fills (`None` for a source that shows one picture), so the view can land a page-sized picture where that page will paint.
-  A source that paints no paper fills it into its own renders (`convert` through `VectorSurface::with_background`), never into the window clear: a window color that waits on the async source handle would flip after the picture lands, so a picture never picks the window color for itself.
-  A raster plane measures the capped size it renders, so `bounds` and the pixels of a scale-1.0 render agree.
-  The trait decisions live in `docs/adr/0001-surface-one-region-based-render-trait.md`.
-- The image view repaints the region its window shows, from the open surface, when `Surface::can_refine` says a sharper picture is possible.
-  `crates/vv-core/src/region.rs` holds the pure geometry and policy: `Frame` (`to_screen`, `to_image`, `crop`, `plane`), `Crop`, `Patch`, `worth_painting`, `patch_reaches_window`, `patch_covers_at_scale`, `MARGIN`, `SCALE_SLACK`, `QUIET`.
-  `Frame` keeps `img: SurfaceSize`, `win: WindowSize` and `pan: WindowVector`, `to_screen` takes a `SurfacePoint` and answers a `WindowPoint`, and `to_image` inverts that, so the one conversion pair of the view carries the space of each side.
-  `patch_reaches_window` reads the two rects alone and answers whether the painted rect reaches every source pixel the window shows; the draw asks it (`patch_covers` in `crates/vv-view/src/view.rs`) before it skips the whole-image texture, and so does `worth_painting`.
-  `Frame` bundles one window mapping (`img`, `win`, `pan`, `scale`, `angle`), and `ViewState::frame` (`view.rs`) builds it, so a caller never re-derives the transform and never mixes window units with source units.
-  The mapping and the crop are methods of `Frame`, so no free function takes the five numbers loose and no call site can swap the scale for the angle; `ViewState::frame_at` answers the same frame for a pan the view aims at (a glide target) rather than the one on screen.
-  A `Patch` is a `Crop` beside the scale its pixels were painted at, so `worth_painting` and `patch_covers_at_scale` compare two values instead of a rect and two loose scales; `CropState`, `Plan`-driven prefetch state and the crop messages carry one.
-  A `Patch` and a `Crop` are `Copy`, so the paint rules take them by value and no call site passes a reference to a pair of floats.
-  A patch covers the window plus `MARGIN` (0.25 of each side), in source pixels, so the paint area follows the window and a deep zoom costs no more pixels than a shallow one.
-  `Surface::render` paints that rect at the view scale, so the patch lands 1:1 on screen; a `VectorSurface` paints only those pixels, and a `PdfSurface` rasterizes only them.
-  The region rect lives in surface units: base raster pixels for a vector file (`Vector::declared_per_base` converts to the tree's declared units), points for a PDF page.
-  The view repaints when it held still for `QUIET` (150 ms) and `worth_painting` pays: a scale step past `SCALE_SLACK` (1.002) or a consumed margin.
-  The rule stays tight because a patch stretched by even a few percent resamples every pixel through the GPU filter, and that softening reads as blurry text.
-  A patch that still matches the view scale draws on whole window pixels and takes its painted pixel size (`patch_dest` in `view.rs`), so the bilinear sample sits on texel centers and the pixels land 1:1 on the screen.
-  A turned patch, and one a zoom stretched since its paint, keep the true rect through `draw_turned`.
-  One paint in flight, because resvg cannot cancel mid-paint.
-  A load in flight never holds the paint back: `ViewState::tick_crop` reads `source` alone and not `view_loading`, because a book's whole-plane fallback costs one page render per page and waiting for it would hold the sharp picture back for seconds.
-  The paint still waits for the plane: `tick_crop` asks `Surface::bounds` and paints only while that pair agrees with `ViewState::img` (`view::same_plane`), because a grid cell measures one page of a document and a patch of that guess would land in the wrong place.
-  The paint waits for its source instead, which `request_source` opens on its own worker.
-  `ViewState` keeps `Arc<dyn Surface>`, the `CropState` (texture, source rect, raster scale), the pending flag and one generation counter.
-  Every open, every n/p step and every return to the grid bumps that counter, so the result of a worker for an earlier image drops.
-  An image opened from the grid opens its own surface on a worker (`request_source`), because the grid keeps none, and keeps it only when `can_refine` is true.
-  A single-file launch keeps the surface it already opened, under the same rule.
-  `ViewState::img` (a `Size`) keeps measuring the source plane, never the patch, so a bigger texture never disturbs fit, pan or zoom, and no site can set or read the two axes apart.
-  The spread math reads only the y axis, so it takes a `Column` (`Column::new(Size, scale, win_h)`), which names the plane height, the scale and the window height instead of passing three loose floats.
-  The whole-image texture (`view_tex`) stays as the fallback and draws only where the patch cannot reach (`patch_covers`), so a resize, a pan or a zoom out that outruns the repaint never shows background.
-  Drawing both over the same pixels would double the alpha of an antialiased edge, so the patch hides the whole image where it covers.
-  A spread step paints the region it lands on before the glide ends: `ViewState::prefetch_spread` (`view.rs`) renders the target rect on a `rayon` worker at the press edge, so the glide never waits on it.
-  The result rides `CropMsg::Prefetch` with a `prefetch_id` token into `ViewState::prefetch`, a `Prefetch` that drops when the aim moved; its `Prefetch::Painting` holds the aim still in flight, so `tick_crop` waits for it instead of starting a duplicate paint, and `PREFETCH_GIVE_UP` (3 s) bounds that wait for a worker that never answers.
-  The patch draws in place while it arrives, and `region::patch_covers_at_scale` adopts it into `crop` on the first frame that holds the window, so the landing frame skips `QUIET` and shows the sharp spread at once.
-  A resize or a pan away drops it, because a patch of an aim the view left would only linger as a stretched texture.
-- Grid extension filter: `crates/vv-view/src/grid.rs` `is_image_path`, which asks `convert::rules` (`is_image_path_in`) and then the static list `is_image_extension` (also `pdf`).
-  The static list holds only the formats this build routes, so a converted format lists through its rule alone, and a format with no rule stays out: a `.typ` source therefore lists only while a rule claims it.
-  The list covers the formats this build routes by content, and the table adds every extension a rule claims.
-  A test calls `is_image_path_in` with a table of its own, so no test reads the table of the user.
-  Keep the crate features in sync (`pdf` is not an image crate feature).
-- A grid cell holds an `EntrySource`, which is a path opened (and sniffed) lazily at decode time.
-  What the cell draws is one `grid::Cell`: `Pending { placeholder }`, `Thumb(texture)` or `Failed(reason)`.
-  One value says whether the cell shows a thumb or an error square, so no cell holds both; `Cell::texture` answers the draw, `thumb` and `placeholder` answer one kind alone, and `awaits_first_decode` names a cell that waits for its first decode.
-  One file is one cell, so a document cell shows page 0 and never a second page.
-  `Grid::from_paths` builds a grid from a path list, and `Grid::from_dir` hands it the sorted directory listing.
-  A single-file launch of a document hands it one path, so ESC still has a grid to return to.
-  `EntrySource::open` opens the plain surface (the cell thumbnail); `EntrySource::open_book` opens the book surface (the image view), where plane 0 holds every spread.
-  `run_job` answers `no_full` for a multi-plane source, because a spread is not the page its cell holds, so the entry never keeps a full-res texture and `dispatch` never re-decodes it for one.
-  `Loader::start_plane` renders one plane, and `Loader::start` is the plane-0 shorthand.
-- Dispatch decode on sniffed content.
-  Do not dispatch decode on the file name.
-- Decode and every pixel resize stay off the main thread.
-  The raster backend caps its buffer with `cap_texture_side` (`crates/vv-pixels/src/lib.rs`), and `ImageSurface::bounds` reports that capped pair, so the upload on the decode worker takes a buffer that already fits `MAX_TEXTURE_SIDE`.
-  Never add a main-thread resize: a large image then freezes the window for seconds.
-  Downscale a borrowed buffer with `downscale_rgba_ref`, not `downscale_rgba` on a clone.
-  `BlurBg::attach` and `upload` take `&DecodedImage`, so a caller never clones the blur buffer.
-  `blurbg::Config` holds the `VV_BLUR_BG` settings (`long_side`, `dim`) and `Config::from_env_if_enabled` answers `Option<Config>`, so `None` is the gimmick being off.
-  The grid, the decode job and the loader carry that one `Option`, never a `blur_enabled` flag beside a size, and the environment is read once at the boundary instead of once per call.
-  All pixel resize goes through `resample_rgba` (`crates/vv-pixels/src/lib.rs`), the `fast_image_resize` SIMD path with Lanczos3.
-  Do not call `image::imageops::resize` for a downscale: it is several times slower.
-  Keep the `rayon` feature of `fast_image_resize` off, so a resize never spawns nested workers inside a decode job.
-  Diagnostics emit through `tracing` (see "Diagnostics"): the upload failure is an `error!` event, and no layer prints to stderr of its own.
-- The streaming JXL loader reads fixed-size chunks from the surface's `ChunkSource` (`crates/vv-source/src/surface.rs`) and feeds them to jxl-oxide.
-  The file-backed stream memory-maps the file (`memmap2`), so a chunk copy costs no read syscall.
-  A file rewritten under the map faults with SIGBUS instead of reading short data.
-- Sort grid entries in natural order with `natord`, so `img2` comes before `img10`.
-- Tests: `proptest` covers the pure helpers (layout, visual selection, selection step, the resize fit, the ramp).
-  Property tests are dev-only and never gate a release build.
-  The `region` proptests keep `failure_persistence` off, so no `proptest-regressions/` entry exists: a saved case becomes a plain `#[test]` beside the strategies, with its shrunk values written out.
-- Public error types derive `derive_more::{Display, Error, From}` (feature `from` on).
-  Each module owns its error enum: `crates/vv-pixels/src/error.rs` (`DecodeError`), `crates/vv-source/src/sign.rs` (`SignError`), `crates/vv-source/src/surface.rs` (`SurfaceError`), `crates/vv-source/src/pdf.rs` (`PdfError`), `crates/vv-view/src/grid.rs` (`GridError`), `crates/vv-view/src/loader.rs` (`LoadError`), `crates/vv-mcp/src/mcp.rs` (`SpawnError`), `crates/vv-cache/src/lib.rs` (`CacheError`), `crates/vv-source/src/convert.rs` (`ConvertError`, the rule table of the config file).
-  `crates/vv-source/src/convert.rs` keeps the same split for the conversion: a failed or timed-out program, a flood past its output cap and an answer that is neither a PDF nor an SVG document become `SurfaceError::Render`, and a source past its cap or a program that cannot start becomes `SurfaceError::Unsupported`. Its own `ConvertError` covers the rule table alone, and that never reaches a surface.
-  `main.rs` keeps `anyhow`.
-- Two motion styles, and a key picks one:
-  - Auto-repeat steps a discrete move.
-    `crates/vv-core/src/keyrepeat.rs` reimplements the X rate for image next/previous and the mouse side buttons, one schedule per key, because the X server repeats only the key that went down last and repeats no mouse button.
-    The grid selection steps on winit's repeat flag (`Input::repeated_keys`) instead, because its step is a one-shot move that reads one key alone.
-  - A velocity ramp eases a continuous move.
-    `crates/vv-core/src/tween.rs` ramps the speed in, holds it, and ramps it out for the image pan and the image free zoom.
-    The ramp is linear, and it reads only the held state.
-    Never step a continuous motion on the auto-repeat rate.
-- Shift + h/j/k/l moves at double speed in both views.
-  `SHIFT_SPEED_MULTIPLIER` (`crates/vv-core/src/lib.rs`) is the one constant.
-  The grid takes it as the `step` argument of `handle_input` (`step_selection` clamps the move).
-  The image view passes it as the `speed` argument of `Ramps::tick`, which scales the pan and the zoom rate but not the ramp, so the ease keeps its length at any speed.
-- A book view takes `Shift+J` / `Shift+K` as a spread step instead of a pan.
-  `Page-down` / `Page-up` do the same step, so a reader who never learned the Shift pair still turns the page.
-  `ViewState::step_spread` (`view.rs`) reads the row from `Surface::spread_count` and `Surface::spread_box`, eases one spread to the top of the window with `spread_pan`, and stops there: a press past the first or the last spread does nothing.
-  The image view drops `Shift+J`/`Shift+K` from the pan while the open surface names a spread column, so those two keys step and never pan on a book.
-  The press queue fires once per press, and the `spread_armed` latch in `main` needs a release of `j`, `k`, `Page-down` or `Page-up` before the next step, so a hold never chains steps.
-  The row comes from the aimed pan (`Column::spread_at_top`), not the pixels on screen, so a step pressed while an earlier step still glides continues from the spread that step aimed at.
-  The step glides at `SPREAD_EASE_TIME` (now the same as `EASE_TIME`) while `ViewState::spread_glide` holds the goal, and any other pan motion clears that field.
-  The step also prefetches the patch of the spread it lands on (`ViewState::prefetch_spread`), so the sharp spread arrives with the glide.
-  A book answers both methods from `BookSurface`, and every other source keeps the defaults (0 and `None`), so its `Shift+J`/`Shift+K` still pans at double speed.
-- Read the held state of a key that no `KeyCode` constant names by learning its keycode.
-  `crates/vv-view/src/zoomkeys.rs` pairs a typed `+`/`-` with the key that went down in the same frame, then the code polls that keycode.
-  The X server repeats only the key that went down last, so a time window cannot stand in for the held state.
-- The image view zooms with `+`/`-` and with `Ctrl+j`/`Ctrl+k` (in, out), all as held states.
-  A held Ctrl turns the pan keys into zoom keys, so it guards the pan flags of `NavKeys`.
-  The grid keeps `Ctrl+j`/`Ctrl+k` as plain selection moves.
-- The grid caches its thumbnails on disk through `crates/vv-cache/src/lib.rs` (`Cache`) under `$XDG_CACHE_HOME/vv/thumbnails`.
-  The cache is not optional: `xdg`, `sha2` and `jixel` stay plain dependencies of `vv-cache`, and no feature guards the crate.
-  `vv-source` and `vv-view` each name the crate (`pub use vv_cache as cache;`), so `crate::cache::Cache` reads the same in both.
-  `VV_CACHE=0` turns the cache off for one run, so every launch decodes every file.
-  One constant sizes the runtime thumb and the entry: `THUMB_LONG_SIDE` (512).
-  A warm cell and a cold one therefore match, because a decode resizes once to the entry size and a cache write copies no pixels.
-  A thumb always draws with `Filter::Linear` (`crates/vv-view/src/grid.rs`), and the `a` key never reaches it: the cell fills with the thumb, and the image view stretches it over the image rect while the full-res decode catches up, so both draw it far larger than the texture and nearest aliases badly there.
-  The flag reaches the whole-image texture and the region patches only.
-  An entry holds a fixed header and a JPEG XL codestream, so a 512 px thumb costs tens of kilobytes instead of one megabyte of RGBA8.
-  The header is one `#[repr(C, packed)]` `bytemuck::Pod` struct of 81 bytes (`vv-cache` `Header`), so the file carries the bytes the toolchain lays out, one call writes it (`bytes_of`) and one call reads it (`pod_read_unaligned`), and the write side and the read side name the same fields.
-  Every number in it is little-endian, so a cache directory shared between hosts reads the same.
-  A test pins the size, so a new field trips a failure instead of silently changing the layout.
-  The encode is `jixel`, pure Rust (BSD-3-Clause OR Apache-2.0), lossy at `QUALITY` (95) with `ALPHA_DISTANCE` 0, so only the alpha channel stays exact.
-  The decode is the same `jxl-oxide` the viewer uses for a file, and both entry decode and file decode share `rgba_from_samples` (`crates/vv-pixels/src/lib.rs`), so one conversion serves the framebuffer of each.
-  Both run on a decode worker.
-  A `FORMAT` bump rejects every old entry, so a payload change needs no migration.
-  The decode worker reads the cache first and decodes only on a miss, then stores the new thumbnail.
-  A cache hit carries no full-resolution image, so a keep-set job (an entry that needs the full texture) skips the cache and decodes the file on its own.
-  Only the image view keeps full textures: `load_pending` takes a `Plan` beside a `priority` slice, and the `preload_full` field of that plan the grid view leaves false and the image view sets true.
-  The `Copy` plan carries `scan_start`, `scan` and `preload_full` together, so a caller names each fact and never passes a bool beside a bool that compiles just as well when swapped.
-  The index list stays a slice beside the plan, because it is the one fact with a length a caller computes and a `Copy` value carries no buffer.
-  A grid-only session therefore uploads thumbnails only, never a 200 MB source texture.
-  The header carries the source dimensions, so `GridEntry::width`/`height` measure the image and not the thumb, on a hit and on a miss.
-  The header also carries the placeholder of the thumb: a ThumbHash payload of at most `placeholder::MAX_BYTES` (32) bytes, from the `thumbhash` crate (MIT, no dependencies, `crates/vv-pixels/src/placeholder.rs`).
-  A launch runs a placeholder pass beside the decodes: one cheap rayon job per entry reads the header only (`Cache::load_placeholder`, about 200 bytes, no codestream) and renders the DCT at 32 px on the worker.
-  The worker uploads the placeholder texture itself, so the main thread copies no pixels and needs no per-frame upload budget, and a cell draws its placeholder until the decoded thumb lands.
-  The image view falls back to the placeholder, and the same header lands the source dimensions, so it fits the picture before the first decode.
-  `FORMAT` 3 adds the placeholder payload, so a version 2 entry stays unread and re-decodes.
-  A cold launch has no entry, so it keeps the grey cell: the placeholder never invents pixels.
-  A cold vector entry still measures its base size (`measure_vector`), because the placeholder job parses the root size with an empty font database when the header misses.
-  The cell and the image-view fit therefore know the shape of an SVG before its decode, and the pass invents no pixels.
-  A write beyond the `WRITE_BUDGET` stops the cache for the rest of the run.
-  An entry stays past the exit of the viewer, so the next launch starts warm.
-  No sweep runs on exit: a stale entry answers `CacheError::Stale` and re-decodes, and an entry whose source is gone stays unread.
-  The only cleanup is `sweep_dead_tmp`, which a store runs to drop the half-written temporary files of killed workers.
-  `VV_CACHE=0` turns the cache off.
-  A test builds the cache with `Cache::in_dir` over a temporary directory. Never point a test at `Cache::new()`, because then it fills the cache of the user.
-  A round-trip test bounds the color drift and holds the alpha channel exact.
-- The grid has a Vim-style visual selection, `Visual` in `crates/vv-view/src/grid.rs`.
-  It stores one mode (`Char`, `Line`, `Block`) and one anchor index.
-  The selected set derives from the anchor, the cursor, and the current column count, so a resize or zoom reflows it.
-  `v`, `V`, and `Ctrl+v` toggle the mode, `o` swaps the anchor and the cursor, ESC clears it.
-  A mode switch keeps the anchor, so `v` on row 1 then `V` on row 3 selects rows 1..=3.
-  Do not store a selected bit per entry.
-  An active visual selection dims every cell outside it with `DIM_TINT`.
-  `DIM_TINT` lives in `crates/vv-core/src/lib.rs` beside `DIM_LEVEL` and `DIM_VEIL`, and the image view's region veil shares that level, so both views darken by one amount.
-  The cursor without a visual selection dims nothing.
-  A left-button drag over the grid starts a `Block` visual selection from the press cell, so a drag matches `Ctrl+v`.
-  `Drag` holds the press anchor for the length of the hold.
-  A hold that releases on its anchor cell stays a plain click.
-
+- Every decoder stays pure Rust: jxl-oxide for JPEG XL, the `image` crate for the common formats, resvg for SVG and SVGZ, and hayro for PDF. The flake carries no CMake, no clang and no bindgen.
+- Decode and every pixel resize stay off the main thread. Never add a main-thread resize, because a large image then freezes the window for seconds.
+- All pixel resize goes through `resample_rgba` (`crates/vv-pixels/src/lib.rs`), the `fast_image_resize` SIMD path with Lanczos3. Do not call `image::imageops::resize` for a downscale, and keep the `rayon` feature of `fast_image_resize` off, so a resize never spawns nested workers inside a decode job.
+- Dispatch decode on sniffed content, never on the file name.
+- `DecodedImage` fields stay private. `new` and `from_exact` are the entrances, and `width`, `height`, `as_rgba` and `into_rgba` the ways out, so a wrong buffer never exists to check.
+- A source is a `Surface`. A backend writes `render_whole`, and a backend with a region anchor (the vector tree, the PDF rasterizer) overrides `render` to pay only for the pixels the caller asked for. A region it cannot serve answers `SurfaceError::Unsupported` and never the whole plane.
+- A raster plane measures the capped size it renders, so `bounds` and the pixels of a scale-1.0 render agree.
+- A document of two planes or more opens through `open_book_surface`, so the whole book is one plane and the loader, the fit, the pan, the turn and the region patch treat it as one tall picture. The grid keeps `open_surface`, so a cell shows page 0 and never a second page.
+- A format this viewer does not parse reaches a backend through a converter rule only. The converter module always compiles, because the SVG backend paints its answer, so no format engine links into the binary and a new format needs no rebuild.
+- Two motion styles, and a key picks one. Auto-repeat (`crates/vv-core/src/keyrepeat.rs`) steps a discrete move, and a velocity ramp (`crates/vv-core/src/tween.rs`) eases a continuous one. Never step a continuous motion on the auto-repeat rate.
+- Read the held state of a key that no `KeyCode` constant names by learning its keycode (`crates/vv-view/src/zoomkeys.rs`). A time window cannot stand in for it, because the X server repeats only the key that went down last.
+- Public error types derive `derive_more::{Display, Error, From}` (feature `from` on), each module owns its own error enum, and `main.rs` keeps `anyhow`.
+- The thumbnail cache is not optional, because no feature guards the crate. A test builds its cache with `Cache::in_dir` over a temporary directory and never with `Cache::new()`, because that one fills the cache of the user.
+- A payload change of a cache entry bumps `FORMAT`, which rejects every old entry and needs no migration.
 
 ## Conventions
 
-- Wrap raw pixel and window primitives in the `crates/vv-core/src/dim.rs` newtypes (`ImgW`, `ImgH`, `WinW`, `WinH`, `LongSide`, `PreviewPx`, `Rate`).
-  A span of time is `std::time::Duration` and never a float newtype, so the auto-repeat delay (`keyrepeat::settings`) and the ramp length (`tween::Ramp::tick`, `RAMP_TIME`) read a `Duration` beside `QUIET` and `PREFETCH_GIVE_UP`.
-  `Rate` stays a newtype, because a repeat rate is a frequency and not a span.
-  The newtype accessor is `raw()`, never `get()`: `ImgW::new(4).raw() == 4`.
-  `raw()` names a wgpu texture extent and `as_f32()` crosses into the window mapping, so the draw and upload code never casts a dimension by hand.
-  Public API boundaries take the newtype, not the bare primitive.
-  A rectangle is `euclid`'s, not a local type: `dim::Rect` is `euclid::Rect<f32, WindowSpace>` and `region::Crop` is `euclid::Rect<f32, SurfaceSpace>`, so the two space tags refuse a mix at compile time and the edges, the size and the containment come from that crate.
-  `dim::rect(x, y, w, h)` is the four-number constructor, `dim::whole(w, h)` the rect of a whole texture at the origin, and `region::crop(x, y, w, h)` the same for surface units.
-  `dim::center_square`, `dim::center_origin` and `dim::contains_point` are the three readings the viewer adds: a square crop of a cell, the origin that keeps a turned draw in place, and the containment where the far edge counts as inside, which `euclid::Rect::contains` excludes.
-  A point, a size and an offset carry the same tags (`dim::WindowPoint`, `WindowSize`, `WindowVector`, `SurfacePoint`, `SurfaceSize`, `SurfaceVector`), and `dim::window_point`/`surface_point`/`draw_window` are the crossings to `draw::Vec2`, so the region geometry names its space and only the draw boundary reads a bare pair.
-  `draw::Quad` is the only thing that turns a rect into corners.
+- Wrap raw pixel and window primitives in the `crates/vv-core/src/dim.rs` newtypes (`ImgW`, `ImgH`, `WinW`, `WinH`, `LongSide`, `PreviewPx`, `Rate`), and name a span of time with `std::time::Duration` instead of a float newtype. `Rate` stays, because a repeat rate is a frequency and not a span.
+  The accessor is `raw()` and never `get()`, and `as_f32()` is the crossing into the window mapping, so draw and upload code never casts a dimension by hand. A public boundary takes the newtype and not the bare primitive.
+- A rectangle is `euclid`'s, not a local type. `dim::Rect` carries `WindowSpace` and `region::Crop` carries `SurfaceSpace`, so the two tags refuse a mix at compile time. `dim::rect`, `dim::whole` and `region::crop` are the constructors, `dim::center_square`, `dim::center_origin` and `dim::contains_point` the three readings the viewer adds, and `draw::Quad` the one thing that turns a rect into corners.
+- A point, a size and an offset carry the same tags (`dim::WindowPoint`, `WindowSize`, `WindowVector`, `SurfacePoint`, `SurfaceSize`, `SurfaceVector`). `dim::window_point`, `dim::surface_point` and `dim::draw_window` are the crossings to `draw::Vec2`, so only the draw boundary reads a bare pair.
+- Every `clone` names what it buys, and "the borrow checker complained" is not an answer. A borrow conflict is fixed in the structure the error describes, never in a clone that silences it.
+  A value that outlives a borrow and has more than one holder is an `Arc`. A handle that moves into a `rayon` closure, an mpsc `Sender` clone and the font database handle are the same kind of thing.
+- A function that only reads takes `&Path`, `&str` or `&[T]`, and takes ownership only when it stores the value. No code clones a pixel buffer, because `downscale_rgba_ref` borrows.
+- A process-wide table is a `LazyLock` or an `OnceLock`, and each static docstring names why no owner can pass it down. The one `RefCell` (`Grid::layout_cache`) is a memo of a pure function of its key.
+- Keep the value layer `const` where it costs nothing. `dim::as_f32`, `draw::Color::tint`, `region::Frame::plane` and the `region_sel` constructors are `const fn`, so a size table or a derived color lands at compile time.
+  The workspace does not enable `clippy::missing_const_for_fn`, because it would force `const` on the accessors that read a runtime handle, and a `const` body refuses a later `debug!` or `Vec` call.
+- A crate root re-exports the lower modules it names (`pub use vv_core::{dim, draw}` and friends), so a module writes `crate::dim::ImgW` and never spells the crate name. The same line carries what the public API names, so a caller reaches one path per type.
+- An arm on an enum of this tree names every variant, because `wildcard_enum_match_arm` is on. An arm on a foreign enum keeps `_` under one `#[allow(clippy::wildcard_enum_match_arm, reason = "…")]`.
+- Module internals live in the module `//!` docstring, and the layer a crate adds lives in its `crates/<crate>/src/lib.rs` docstring. Write a note that one file needs there, and write a rule that spans layers here.
 
-- `DecodedImage` (`crates/vv-pixels/src/lib.rs`) keeps its fields private: `DecodedImage::new(width, height, data)` is the only checked entrance, and it answers `DecodeError::Buffer` unless `data` holds exactly `width * height * 4` bytes.
-  Read the pixels with `as_rgba`, the extents with `width` and `height`, and consume it with `into_rgba` or `into_parts`.
-  A crate path that just computed both the buffer and its size uses `DecodedImage::from_exact`, which debug-asserts the pair, so a wrong buffer still trips a test build.
-  The type therefore retires the hand-written length checks: a wrong buffer never exists to check.
+## Testing
 
-- Ownership follows one rule: every `clone` names what it buys, and "the borrow checker complained" is not an answer.
-  A borrow conflict (`E0502`, `E0499`) is fixed in the structure that the error describes, never in a clone that silences it.
-  A value that must outlive a borrow and has more than one holder is an `Arc`, and its `.clone()` is the honest answer: a handle moves into a `rayon` closure, because `rayon::spawn` needs `'static`.
-  `EntrySource` therefore holds an `Arc<PathBuf>` and `Job` copies it with one refcount bump, and `ViewState::source` is an `Arc<dyn Surface>` that a paint moves into a worker.
-  An mpsc `Sender` clone and the font database handle (`svg::fontdb`, an `Arc<fontdb::Database>`) are the same kind of thing: a shared handle, not a copy of the data.
-  `mem::replace` swaps the visual anchor, and no code clones a pixel buffer: `downscale_rgba_ref` borrows.
-  A function that only reads takes `&Path`, `&str` or `&[T]`, and takes ownership only when it stores the value.
-  A process-wide table is a `LazyLock` or an `OnceLock` (the embedded font list and its book, the converter rule table, the host font database, the X auto-repeat rate, the core count), because a third-party API reads it with no seam for an owner, and each static docstring names that reason.
-  The one `RefCell` (`Grid::layout_cache`) is a memo of a pure function of its key, and the grid is its only owner.
+- `proptest` covers the pure helpers of `region`, the grid layout, the visual selection and the selection step, the resize fit and the ramp. Property tests are dev-only and never gate a release build.
+  The `region` proptests keep `failure_persistence` off, so no `proptest-regressions/` entry exists, and a saved case becomes a plain `#[test]` beside the strategies with its shrunk values written out.
+- The GPU paints are `#[ignore]`d, because a plain `cargo test` has no adapter. `checks.gpu` runs them on Mesa's lavapipe, which needs no GPU, no device node and no display.
+  They cover the clear, a fill, a source rect, straight alpha, a turn, the texel grid of a 1:1 patch, the SVG, PDF, converted-source and book planes end to end, and a pushed picture into a blank viewer.
+- The MCP tests run in two layers: unit tests in `crates/vv-mcp/src/mcp.rs` over an in-memory duplex against a fake sink, and `crates/vv-cli/tests/mcp_stdio.rs` over the real stdin and stdout of a child process.
+- A behavior change ships a test beside the code it changes.
 
 ## Open work
 
-- Add video playback (mpv inspiration).
-  The backend is TBD.
-
-Module internals live in each module file `//!` docstring, and the layer a crate adds lives in its `crates/<crate>/src/lib.rs` `//!` docstring.
+- Add video playback (mpv inspiration). The backend stays open.

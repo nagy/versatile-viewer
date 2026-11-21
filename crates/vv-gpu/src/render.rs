@@ -1,8 +1,7 @@
 //! One instanced-quad pipeline: the whole draw surface of the viewer.
 //!
-//! raylib drew through nine primitives and a per-call texture bind. This module
-//! replaces all of them with one pipeline, one vertex shader and one instance
-//! per quad, so the grid, the region veil and the selection border are the same
+//! One pipeline, one vertex shader and one instance per quad draw the whole
+//! surface, so a picture, the region veil and the selection border are the same
 //! draw.
 //!
 //! # One instance is four corners
@@ -19,9 +18,9 @@
 //! a selection border all name four points around their perimeter, and none of
 //! them needs a different pipeline.
 //!
-//! # The three raylib facts that become explicit
+//! # Three blend and cull facts
 //!
-//! - straight alpha, `SRC_ALPHA` over `ONE_MINUS_SRC_ALPHA`, like raylib;
+//! - straight alpha, `SRC_ALPHA` over `ONE_MINUS_SRC_ALPHA`;
 //! - `cull_mode: None`, so a quad never depends on its winding;
 //! - a non-sRGB target, so the pixel values stay what the decoder wrote.
 //!
@@ -334,15 +333,13 @@ impl Renderer {
 
     /// Draw the outline of a rectangle, `thickness` pixels wide, inside it.
     ///
-    /// The ring covers the outer band of the rect, which is where raylib drew
-    /// its rectangle outline, so a cell ring never spills into the gap between
-    /// two cells.
+    /// The ring covers the outer band of the rect, so a cell ring never spills
+    /// into the gap between two cells.
     /// The four edges meet at the corners, so the ring closes with no notch.
     pub fn stroke_rect(&mut self, rect: Rect, thickness: f32, color: Color) {
         // A line of `thickness` sits centered on its segment. The top and the
         // bottom run the whole width so they close both corners, and the two
-        // sides span only the gap between them, exactly like raylib's own
-        // outline.
+        // sides span only the gap between them.
         let half = thickness / 2.0;
         let (left, right) = (rect.min_x() + half, rect.max_x() - half);
         let (top, bottom) = (rect.min_y() + half, rect.max_y() - half);
@@ -404,9 +401,8 @@ impl Renderer {
     /// Draw a texture over a rect, turned by `angle` degrees around the point
     /// `origin` inside it.
     ///
-    /// This is raylib's `DrawTexturePro` mapping, so a call site keeps the
-    /// geometry it had: `dest` names the rect, `origin` names the pivot inside
-    /// it, and a zero angle draws the plain rect.
+    /// `dest` names the rect, `origin` names the pivot inside it, and a zero
+    /// angle draws the plain rect.
     pub fn texture_pro(
         &mut self,
         texture: &Texture,
@@ -618,7 +614,7 @@ fn pipeline_layout(
     })
 }
 
-/// Straight alpha, like raylib.
+/// Straight alpha.
 ///
 /// The decoder writes non-premultiplied bytes, so the color source factor stays
 /// `SRC_ALPHA` and the alpha channel keeps one source of one, which is what a

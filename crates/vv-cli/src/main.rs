@@ -455,8 +455,8 @@ impl ApplicationHandler for App {
         attributes = match self.pane {
             Pane::Window => attributes
                 .with_title(self.launch_title.clone())
-                // WM_CLASS on X11, which replaces `src/wmclass.rs`: the class
-                // and the instance name are both `vv`.
+                // WM_CLASS on X11: the class and the instance name are both
+                // `vv`.
                 .with_name("vv", "vv"),
             Pane::Embedded(wid) => attributes.with_embed_parent_window(wid.raw()),
         };

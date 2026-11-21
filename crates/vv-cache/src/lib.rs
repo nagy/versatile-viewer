@@ -93,9 +93,6 @@ const MAGIC: [u8; 4] = *b"VVTH";
 /// load.
 /// A file of another format never matches the magic, so a change of the
 /// payload needs a version bump only for a build that reads the same magic.
-/// Version 2 holds a lossy JPEG XL codestream where version 1 held RGBA8
-/// pixels, so every version 1 entry stays unread and the source re-decodes.
-/// Version 3 adds the [`Placeholder`] payload after the source stamp.
 const FORMAT: u32 = 3;
 /// The JPEG XL quality of an entry, on the `jixel` 0..100 scale
 /// (`distance_from_quality`).
