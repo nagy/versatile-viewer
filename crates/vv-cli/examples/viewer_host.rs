@@ -248,6 +248,10 @@ impl ApplicationHandler for HostApp {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        #[allow(
+            clippy::wildcard_enum_match_arm,
+            reason = "WindowEvent names every winit event; this host maps a few"
+        )]
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => match self.frame() {

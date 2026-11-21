@@ -10,6 +10,8 @@ The binary name is `vv`.
 
 The tree is a cargo workspace of seven libraries and one binary.
 The root `Cargo.toml` holds no package: it declares `members = ["crates/*"]`, `resolver = "3"`, `[workspace.package]` and `[workspace.lints.clippy]`, and every member inherits both tables.
+`[workspace.lints.clippy]` carries `all = "deny"`, `pedantic = "warn"` and `wildcard_enum_match_arm`, so a `match` on an enum of this tree names every variant and the compiler says where a new one belongs.
+An arm on a foreign enum keeps `_` under one `#[allow(clippy::wildcard_enum_match_arm, reason = "…")]`, because the keycode, window-event and X-event lists belong to another crate and mean "every other value".
 `[workspace.package]` carries the version, the edition, `rust-version` (1.99, the toolchain the flake builds with), the license, the repository and `publish = false`, so a member repeats none of them.
 No `[workspace.dependencies]` table exists: a member declares its own dependencies beside their why-comments, so a comment never drifts from the crate that reads the dependency.
 

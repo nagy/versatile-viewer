@@ -258,6 +258,10 @@ fn handle_event(
     container: Window,
     atoms: &Atoms,
 ) -> Result<bool> {
+    #[allow(
+        clippy::wildcard_enum_match_arm,
+        reason = "the x11rb Event list names every core protocol event"
+    )]
     match event {
         x11rb::protocol::Event::ConfigureNotify(event) if event.window == frame => {
             let height = event.height.saturating_sub(BAR_HEIGHT);

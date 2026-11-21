@@ -210,7 +210,7 @@ impl ZoomMode {
     pub fn free_or(self, fit: f32) -> f32 {
         match self {
             Self::Free(scale) => scale,
-            _ => fit,
+            Self::FitDown | Self::FitAll | Self::FitWidth | Self::FitHeight | Self::Fill => fit,
         }
     }
 }

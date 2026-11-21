@@ -1396,6 +1396,10 @@ impl Viewer {
             // A typed `+`/`-` pairs with it to learn which physical key holds
             // that character (see zoomkeys::TypedKeys).
             for k in self.input.pressed_keys() {
+                #[allow(
+                    clippy::wildcard_enum_match_arm,
+                    reason = "KeyCode lists 170+ foreign keys and winit adds more"
+                )]
                 match k {
                     // ESC drops a region selection first and keeps the image
                     // view, so a second ESC returns to the the grid.

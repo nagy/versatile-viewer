@@ -32,8 +32,16 @@ publish = false
 # flake gate read one table.
 # `all = "deny"` only applies under clippy.
 [workspace.lints.clippy]
-all = "deny"
-pedantic = "warn"
+# A group entry takes `priority = -1`, because a single lint entry uses
+# priority 0 and cargo refuses two levels of the same priority.
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# A `_ =>` arm on an enum of this tree swallows the next variant someone adds:
+# the match still compiles and the new value falls into the old arm.
+# An arm on a foreign enum keeps the wildcard under one `#[allow]` whose
+# `reason` names why, because a keycode list of 170 variants and a window
+# event list that changes between winit releases mean "every other value".
+wildcard_enum_match_arm = "warn"
 
 # The profile of the binary and of every member.
 # The split into layers paid one price: a small function that crosses a crate

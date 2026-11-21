@@ -1190,6 +1190,10 @@ impl Grid {
         let mut start_visual: Option<VisualMode> = None;
         let mut swap_ends = false;
         for k in input.pressed_keys() {
+            #[allow(
+                clippy::wildcard_enum_match_arm,
+                reason = "KeyCode lists 170+ foreign keys and winit adds more"
+            )]
             match k {
                 KeyCode::Enter | KeyCode::NumpadEnter => enter = true,
                 KeyCode::KeyQ => quit = true,
@@ -1235,6 +1239,10 @@ impl Grid {
         // server sends. The input layer separates it from the press edge, so a
         // one-shot key above never fires twice.
         for k in input.repeated_keys() {
+            #[allow(
+                clippy::wildcard_enum_match_arm,
+                reason = "the repeat reads the same foreign key list as the press"
+            )]
             match k {
                 KeyCode::KeyH | KeyCode::ArrowLeft => left = true,
                 KeyCode::KeyL | KeyCode::ArrowRight => right = true,
