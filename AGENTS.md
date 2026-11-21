@@ -34,8 +34,9 @@ The root `Cargo.toml` carries the metadata and the lint table every member inher
 
 ### Build
 
-- Run both gates when a change touches the build. `nix flake check` proves clippy, the test suite, the headless GPU paints and treefmt. `nix build .#default` proves the shipped binary, because the release link and the rpath fixup run there and nowhere else.
-- Run `nix build .#checks.default` for a fast loop over the test gate alone, and `nix fmt` to format (rustfmt, taplo, nixfmt).
+- Run both gates when a change touches the build. `nix flake check` covers the tree, and `nix build .#default` proves the shipped binary, because the release link and the rpath fixup run there and nowhere else.
+- Run `nix build .#checks.default` for a fast loop over the test gate alone.
+- Run `nix fmt` to format the tree.
 - Run `nix build .#versatile-viewer-doc` to build the rustdoc HTML of every member.
 - The fast gates build in the `dev` profile and only the package builds in `release`.
   `devEnv` in `flake.nix` sets `CARGO_PROFILE = "dev"`, because crane answers `release` when that variable stays unset, and a test binary gains nothing from the cross-crate inlining that `[profile.release]` buys.
