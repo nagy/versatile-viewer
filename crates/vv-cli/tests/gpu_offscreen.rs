@@ -533,6 +533,159 @@ fn a_display_list_paints_its_rects_and_its_pictures() {
     );
 }
 
+/// A list draws at every scale it is placed at.
+///
+/// The pass encodes the list once in surface units and places the whole of it
+/// with one append per frame (see `SceneView::draw`), so a zoom has to move the
+/// geometry exactly as the frame says and has to keep the curves sharp. The rect
+/// here names surface units, and the two scales put its edges on different
+/// window pixels.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_zoomed_list_follows_its_frame() {
+    use std::sync::Arc;
+
+    use vv_core::{
+        dim::{SurfaceSize, WindowSize, WindowVector},
+        region,
+        scene::{self, Paint, Primitive},
+    };
+
+    // The rect covers surface units 25..75 of a plane of 200, and the plane's
+    // middle sits on the window's middle at every scale.
+    let frame = |scale: f32| region::Frame {
+        img: SurfaceSize::new(200.0, 200.0),
+        win: WindowSize::new(200.0, 200.0),
+        pan: WindowVector::zero(),
+        scale,
+        angle: 0.0,
+    };
+    let list: Arc<[Primitive]> = Arc::from(vec![Primitive::Rect {
+        rect: scene::rect_of(region::crop(25.0, 25.0, 50.0, 50.0)),
+        paint: Paint::Solid(Color::new(255, 0, 0, 255)),
+    }]);
+
+    let mut canvas = canvas!(200, 200);
+    let mut pass = canvas
+        .renderer
+        .display_pass(&canvas.device)
+        .expect("a display-list pass");
+    let at_one = pass
+        .draw(
+            &canvas.device,
+            &canvas.queue,
+            &list,
+            &frame(1.0),
+            canvas.size,
+        )
+        .expect("the list draws");
+    canvas.begin(CLEAR);
+    canvas.renderer.texture(
+        at_one.texture,
+        at_one.src,
+        at_one.quad,
+        Color::WHITE,
+        Filter::Linear,
+    );
+    let one = canvas.print();
+    assert_eq!(one.at(60, 60), [255, 0, 0, 255], "the rect at scale 1");
+
+    // At scale 2 the rect spans window -50..50, so the pixel inside it at scale
+    // 1 is background now.
+    let at_two = pass
+        .draw(
+            &canvas.device,
+            &canvas.queue,
+            &list,
+            &frame(2.0),
+            canvas.size,
+        )
+        .expect("the list draws");
+    canvas.begin(CLEAR);
+    canvas.renderer.texture(
+        at_two.texture,
+        at_two.src,
+        at_two.quad,
+        Color::WHITE,
+        Filter::Linear,
+    );
+    let two = canvas.print();
+    assert_eq!(two.at(20, 20), [255, 0, 0, 255], "the rect at scale 2");
+    assert_eq!(
+        two.at(60, 60),
+        [CLEAR.r, CLEAR.g, CLEAR.b, CLEAR.a],
+        "the scale moved the rect's edge past this pixel"
+    );
+}
+
+/// An opacity layer of a list blends its content at the alpha it names.
+///
+/// A layer is a buffer, and the list is encoded without a window, so the pass
+/// bounds it by the plane and the frame's append carries that clip into the
+/// window. A layer that lost its clip would draw nothing, and one that kept the
+/// plane's corners in surface units would draw them in the wrong place.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_listed_opacity_layer_blends_its_content() {
+    use std::sync::Arc;
+
+    use vv_core::{
+        dim::{SurfaceSize, WindowSize, WindowVector},
+        region,
+        scene::{self, Paint, Primitive},
+    };
+
+    let frame = |scale: f32| region::Frame {
+        img: SurfaceSize::new(200.0, 200.0),
+        win: WindowSize::new(200.0, 200.0),
+        pan: WindowVector::zero(),
+        scale,
+        angle: 0.0,
+    };
+    let list: Arc<[Primitive]> = Arc::from(vec![
+        Primitive::PushLayer { alpha: 0.5 },
+        Primitive::Rect {
+            rect: scene::rect_of(region::crop(0.0, 0.0, 200.0, 200.0)),
+            paint: Paint::Solid(Color::new(255, 0, 0, 255)),
+        },
+        Primitive::PopLayer,
+    ]);
+
+    let mut canvas = canvas!(200, 200);
+    let mut pass = canvas
+        .renderer
+        .display_pass(&canvas.device)
+        .expect("a display-list pass");
+    // A zoom, so the layer is a plane the frame magnifies.
+    let painted = pass
+        .draw(
+            &canvas.device,
+            &canvas.queue,
+            &list,
+            &frame(2.0),
+            canvas.size,
+        )
+        .expect("the list draws");
+    canvas.begin(Color::BLACK);
+    canvas.renderer.texture(
+        painted.texture,
+        painted.src,
+        painted.quad,
+        Color::WHITE,
+        Filter::Linear,
+    );
+    let out = canvas.print();
+    let [r, g, b, a] = out.at(100, 100);
+    // A red cover at half alpha over black reads about 128 of red and no green
+    // or blue, which is what a layer that lost its content would not read.
+    assert!(
+        r.abs_diff(128) <= 2,
+        "a half-alpha layer reads about 128 of red, got {r}"
+    );
+    assert_eq!((g, b), (0, 0), "the cover carries no green or blue");
+    assert_eq!(a, 255, "the window target stays opaque");
+}
+
 /// A window that resizes between two frames shows the picture where the new
 /// window puts it, from the paint the pass already has.
 ///

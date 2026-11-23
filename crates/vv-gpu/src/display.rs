@@ -18,6 +18,16 @@
 //! onto window pixels, so a zoom or a pan re-renders *cheap* primitives rather
 //! than re-rasterizing a patch: the list itself never changes.
 //!
+//! # Encoding once
+//!
+//! A list carries no scale and no region, so the pass encodes it once in surface
+//! units and places the whole scene per frame with one [`Vello::append`], which
+//! multiplies the transform of every draw. A zoom or a pan therefore costs a copy
+//! of the encoded stream (about a fiftieth of the encode) and never another walk
+//! of the paths. `vello` reads the encoded curves and flattens them on the
+//! device during the render, so the placed list is exactly the picture a list
+//! encoded for that zoom would have drawn — not a magnified polyline.
+//!
 //! # Image leaves
 //!
 //! A [`Primitive::Image`] carries pixels and not a texture, so this pass uploads
@@ -74,9 +84,19 @@ pub enum SceneError {
 /// pictures of the list it draws.
 pub struct SceneView {
     renderer: VelloRenderer,
-    /// The primitives of the frame being drawn, reused so a frame allocates no
-    /// scene.
-    list: Vello,
+    /// The list of the plane being drawn, encoded once in surface units.
+    ///
+    /// A list carries no scale and no region, so its geometry never changes: it
+    /// encodes once and every frame places it with one [`Vello::append`], which
+    /// multiplies the transform of every draw and leaves the paths, the ramps
+    /// and the pictures alone. `vello` flattens a curve on the device during the
+    /// render, so a placed list is as sharp at a 10x zoom as one encoded for it.
+    base: Vello,
+    /// What `base` holds: the list and the plane its layers are clipped to.
+    encoded: Option<Base>,
+    /// The scene of this frame: `base` placed by the frame's transform, reused
+    /// so a frame allocates no scene.
+    framed: Vello,
     target: wgpu::Texture,
     view: wgpu::TextureView,
     /// The composite side of `view`, which a quad draw samples.
@@ -108,6 +128,29 @@ pub struct SceneView {
     /// the texture it has (see [`Self::place_stale`]) and the paint lands once
     /// the size holds still.
     asked: Option<(u32, u32)>,
+}
+
+/// The list and the plane a [`SceneView::base`] holds.
+#[derive(Clone)]
+struct Base {
+    /// The list it encoded.
+    list: Arc<[Primitive]>,
+    /// The plane, in surface units, which bounds an opacity layer.
+    ///
+    /// A layer is a buffer of the shape vello is handed, and the list is
+    /// encoded without a window, so the plane is the one shape that bounds it
+    /// for every frame the list draws in.
+    plane: (f32, f32),
+}
+
+impl Base {
+    /// Whether this base is the answer for `list` on `plane`.
+    ///
+    /// The handle and not the contents: a list is immutable and lives for as
+    /// long as the plane does, so the same handle is the same geometry.
+    fn holds(&self, list: &Arc<[Primitive]>, plane: (f32, f32)) -> bool {
+        self.plane == plane && Arc::ptr_eq(&self.list, list)
+    }
 }
 
 /// The frame the target holds.
@@ -165,7 +208,9 @@ impl SceneView {
         let (target, view, texture) = target_of(device, &uploader, (1, 1));
         Ok(Self {
             renderer,
-            list: Vello::new(),
+            base: Vello::new(),
+            encoded: None,
+            framed: Vello::new(),
             target,
             view,
             texture,
@@ -183,11 +228,15 @@ impl SceneView {
     /// `frame` maps surface units onto the window, so the same list draws
     /// sharply at every zoom and under any turn.
     ///
+    /// The list encodes once, in surface units, and each frame places the whole
+    /// of it with one [`Vello::append`], so a zoom and a pan cost a copy and not
+    /// an encode (see [`Self::base`]).
+    ///
     /// A frame that asks for the paint of the frame before it reuses that paint,
     /// and a frame whose window moved since the last one reuses it too and
     /// places it where the new window puts the same surface units (see
     /// [`Self::place_stale`]). The paint is the one expensive step of this pass
-    /// and neither of those frames changes a pixel of it.
+    /// and none of those frames changes a pixel of it.
     ///
     /// # Errors
     ///
@@ -224,25 +273,40 @@ impl SceneView {
                 return Ok(self.place_stale(drawn, to_window));
             }
         }
-        if let Some(drawn) = &self.drawn
-            && !Arc::ptr_eq(&drawn.list, list)
+        let plane = (frame.img.width, frame.img.height);
+        if !self
+            .encoded
+            .as_ref()
+            .is_some_and(|base| base.holds(list, plane))
         {
-            // Another list is another set of leaves, so the pictures of the
-            // last one cannot be trusted and the addresses they were keyed on
-            // may now mean something else.
-            // The faces stay: a run carries its bytes, so a face of this tree
-            // outlives the list that drew it, and vello caches the outlines of
-            // a face by its bytes. Dropping them would make the first frame of
-            // every relaid map outline every label again.
-            self.images.clear();
+            if self
+                .encoded
+                .as_ref()
+                .is_some_and(|base| !Arc::ptr_eq(&base.list, list))
+            {
+                // Another list is another set of leaves, so the pictures of the
+                // last one cannot be trusted and the addresses they were keyed
+                // on may now mean something else.
+                // The faces stay: a run carries its bytes, so a face of this
+                // tree outlives the list that drew it, and vello caches the
+                // outlines of a face by its bytes. Dropping them would make the
+                // first frame of every relaid map outline every label again.
+                self.images.clear();
+            }
+            self.base.reset();
+            self.encode(list, plane);
+            self.encoded = Some(Base {
+                list: Arc::clone(list),
+                plane,
+            });
         }
         self.resize(device, size);
-        self.list.reset();
-        self.encode(list, to_window);
+        self.framed.reset();
+        self.framed.append(&self.base, Some(to_window));
         self.renderer.render_to_texture(
             device,
             queue,
-            &self.list,
+            &self.framed,
             &self.view,
             &RenderParams {
                 // Transparent, so the letterbox bars and the window background
@@ -287,14 +351,18 @@ impl SceneView {
         }
     }
 
-    /// Encode every primitive of `list`, placed by `to_window`.
-    fn encode(&mut self, list: &[Primitive], to_window: Affine) {
+    /// Encode every primitive of `list` in surface units.
+    ///
+    /// Nothing here is placed by a window: the frame that draws the list places
+    /// all of it at once (see [`Self::draw`]), so the geometry of a zoom or a pan
+    /// costs no encode.
+    fn encode(&mut self, list: &[Primitive], plane: (f32, f32)) {
         for primitive in list {
             match primitive {
                 Primitive::Rect { rect, paint } => {
                     // A rect carries no transform, so both its shape and its
                     // paint live in surface units.
-                    self.paint(Fill::NonZero, to_window, paint, None, rect);
+                    self.paint(Fill::NonZero, Affine::IDENTITY, paint, None, rect);
                 }
                 Primitive::Path {
                     path,
@@ -303,15 +371,22 @@ impl SceneView {
                     fill_rule,
                     stroke,
                 } => {
-                    let placed = to_window * *transform;
+                    // The shape carries its own transform, which is what puts a
+                    // leaf of a document in surface units.
                     // A ramp is written in surface units and the shape in its
                     // own, so the brush takes the inverse the shape applied.
                     let paint_at = Some(transform.inverse());
                     if let Some(paint) = fill {
-                        self.paint(vello_fill_rule(*fill_rule), placed, paint, paint_at, path);
+                        self.paint(
+                            vello_fill_rule(*fill_rule),
+                            *transform,
+                            paint,
+                            paint_at,
+                            path,
+                        );
                     }
                     if let Some(outline) = stroke {
-                        self.outline(outline, placed, paint_at, path);
+                        self.outline(outline, *transform, paint_at, path);
                     }
                 }
                 Primitive::Glyphs {
@@ -335,7 +410,7 @@ impl SceneView {
                             FontData::new(Blob::from(run.font.to_vec()), run.face),
                         )
                     });
-                    let placed = to_window * *transform;
+                    let placed = *transform;
                     let glyphs = run.glyphs.iter().map(|glyph| Glyph {
                         id: glyph.id,
                         x: glyph.x,
@@ -343,7 +418,7 @@ impl SceneView {
                     });
                     match brush(paint) {
                         Brush::Solid(color) => {
-                            self.list
+                            self.base
                                 .draw_glyphs(font)
                                 .font_size(run.size)
                                 .brush(color)
@@ -351,7 +426,7 @@ impl SceneView {
                                 .draw(Fill::NonZero, glyphs);
                         }
                         Brush::Ramp(ramp) => {
-                            self.list
+                            self.base
                                 .draw_glyphs(font)
                                 .font_size(run.size)
                                 .brush(&ramp)
@@ -365,20 +440,18 @@ impl SceneView {
                     transform,
                     fill_rule,
                 } => {
-                    self.list.push_clip_layer(
-                        vello_fill_rule(*fill_rule),
-                        to_window * *transform,
-                        path,
-                    );
+                    self.base
+                        .push_clip_layer(vello_fill_rule(*fill_rule), *transform, path);
                 }
-                Primitive::PopClip | Primitive::PopLayer => self.list.pop_layer(),
+                Primitive::PopClip | Primitive::PopLayer => self.base.pop_layer(),
                 Primitive::PushLayer { alpha } => {
-                    // vello opens a layer only around a clip shape, so a plain
-                    // opacity layer clips to the whole target: every draw of
-                    // this pass is written in window pixels.
-                    let whole =
-                        kurbo::Rect::new(0.0, 0.0, f64::from(self.size.0), f64::from(self.size.1));
-                    self.list.push_layer(
+                    // vello opens a layer only around a clip shape, and the list
+                    // is encoded without a window, so the layer is bounded by
+                    // the plane: no window shows more of it than that, and the
+                    // `append` of the frame carries the clip into the window with
+                    // the rest of the list.
+                    let whole = kurbo::Rect::new(0.0, 0.0, f64::from(plane.0), f64::from(plane.1));
+                    self.base.push_layer(
                         Fill::NonZero,
                         peniko::Mix::Normal,
                         *alpha,
@@ -392,7 +465,7 @@ impl SceneView {
                         .images
                         .entry(key)
                         .or_insert_with(|| image_brush(pixels));
-                    self.list.draw_image(brush.as_ref(), to_window * *transform);
+                    self.base.draw_image(brush.as_ref(), *transform);
                 }
             }
         }
@@ -472,7 +545,7 @@ enum Brush {
 }
 
 impl SceneView {
-    /// Fill `shape` with `paint`.
+    /// Fill a shape of the list with `paint`, in surface units.
     ///
     /// `paint_at` maps the paint's own space onto the shape's, which is the
     /// inverse of the shape transform because every ramp of this tree is
@@ -486,8 +559,8 @@ impl SceneView {
         shape: &impl kurbo::Shape,
     ) {
         match brush(paint) {
-            Brush::Solid(color) => self.list.fill(style, placed, color, None, shape),
-            Brush::Ramp(ramp) => self.list.fill(style, placed, &ramp, paint_at, shape),
+            Brush::Solid(color) => self.base.fill(style, placed, color, None, shape),
+            Brush::Ramp(ramp) => self.base.fill(style, placed, &ramp, paint_at, shape),
         }
     }
 
@@ -500,9 +573,9 @@ impl SceneView {
         path: &kurbo::BezPath,
     ) {
         match brush(&outline.paint) {
-            Brush::Solid(color) => self.list.stroke(&outline.style, placed, color, None, path),
+            Brush::Solid(color) => self.base.stroke(&outline.style, placed, color, None, path),
             Brush::Ramp(ramp) => self
-                .list
+                .base
                 .stroke(&outline.style, placed, &ramp, paint_at, path),
         }
     }
