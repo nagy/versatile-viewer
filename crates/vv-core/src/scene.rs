@@ -26,10 +26,13 @@
 //!     rect,
 //!     paint: scene::Paint::Solid(Color::new(255, 0, 0, 255)),
 //! };
-//! assert_eq!(primitive, scene::Primitive::Rect {
-//!     rect,
-//!     paint: scene::Paint::Solid(Color::new(255, 0, 0, 255)),
-//! });
+//! assert_eq!(
+//!     primitive,
+//!     scene::Primitive::Rect {
+//!         rect,
+//!         paint: scene::Paint::Solid(Color::new(255, 0, 0, 255)),
+//!     }
+//! );
 //! ```
 
 use kurbo::{Affine, BezPath, Rect};
