@@ -16,7 +16,8 @@
 //!
 //! [`gpu`] owns the instance, the adapter, the device, the queue and the
 //! swapchain, [`render`] owns the one instanced-quad pipeline and its batch,
-//! and [`texture`] owns one uploaded picture and its two filter groups.
+//! [`display`] owns the `vello` pass that paints a `scene` primitive list, and
+//! [`texture`] owns one uploaded picture and its two filter groups.
 //! Nothing here reads a window event and nothing here decodes a file: a host
 //! hands this layer a texture view, and a decode worker hands it pixels
 //! through [`texture::Uploader`].
@@ -25,11 +26,12 @@
 //! non-sRGB swapchain, so the bytes a decoder writes reach the screen
 //! unchanged.
 
+pub mod display;
 pub mod gpu;
 pub mod render;
 pub mod texture;
 
 // The layers below, named through this crate as well, so one `crate::dim` path
 // serves a module of this crate and a caller of it.
-pub use vv_core::{dim, draw};
+pub use vv_core::{dim, draw, region, scene};
 pub use vv_pixels::{DecodedImage, MAX_TEXTURE_SIDE, downscale_rgba, error};

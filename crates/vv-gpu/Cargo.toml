@@ -24,6 +24,16 @@ winit = { version = "0.30.13", default-features = false, features = [
   "x11",
   "rwh_06",
 ] }
+# The compute rasterizer behind a `scene` display list: paths with analytic
+# anti-aliasing, gradients, clips, blends and glyphs, on the device and queue
+# this crate already holds. Pure Rust like wgpu (naga, wgpu-core), and its
+# `wgpu 30` requirement is the exact version above, so the process carries one
+# wgpu and one device: vello never opens a second.
+# `default-features = false` with only `wgpu`: the default set also turns on
+# `wgpu/default`, which would pull every backend and every native library this
+# build exists to keep out. Vello drives the device through the same
+# `wgpu 30` typed API either way.
+vello = { version = "0.12.0", default-features = false, features = ["wgpu"] }
 # Block on the two async wgpu calls of startup (adapter, device).
 pollster = "1.0.2"
 # The instance bytes of one quad.

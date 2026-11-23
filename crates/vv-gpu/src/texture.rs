@@ -211,6 +211,14 @@ impl Uploader {
             rgba,
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.wrap(&view, (width, height))
+    }
+
+    /// Wrap a texture view in the two filter groups a draw needs.
+    ///
+    /// The display-list pass renders a scene with its own pipeline and hands the
+    /// result here, so the quad pipeline composites it like any other picture.
+    pub(crate) fn wrap(&self, view: &wgpu::TextureView, dims: (u32, u32)) -> Texture {
         let group = |sampler: &wgpu::Sampler| {
             Arc::new(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("vv texture"),
@@ -222,7 +230,7 @@ impl Uploader {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&view),
+                        resource: wgpu::BindingResource::TextureView(view),
                     },
                 ],
             }))
@@ -231,7 +239,7 @@ impl Uploader {
         // so the allocation lives as long as this value does and no handle has
         // to be kept beside them.
         Texture {
-            dims: (width, height),
+            dims,
             linear: group(&self.shared.linear),
             nearest: group(&self.shared.nearest),
         }
@@ -239,6 +247,11 @@ impl Uploader {
 }
 
 /// One uploaded picture and its two filter groups.
+///
+/// A clone shares both groups, so it costs two `Arc` bumps: the display-list
+/// pass hands its target to the quad draw through one, so the pass borrow ends
+/// before the batch is built.
+#[derive(Clone)]
 pub struct Texture {
     dims: (u32, u32),
     /// The linear group: the default of a picture and of a thumbnail.

@@ -1295,12 +1295,12 @@ mod tests {
         let surface = TreemapSurface::from_tree(sample_tree());
         let first = surface.display(0).expect("a list").expect("some");
         let again = surface.display(0).expect("a list").expect("some");
-        assert!(Arc::ptr_eq(&first, &again), "the frame's list is built once");
+        assert!(
+            Arc::ptr_eq(&first, &again),
+            "the frame's list is built once"
+        );
         // A window of another shape is another frame, so it rebuilds.
-        assert!(surface.frame_window(Size {
-            w: 640.0,
-            h: 480.0
-        }));
+        assert!(surface.frame_window(Size { w: 640.0, h: 480.0 }));
         let resized = surface.display(0).expect("a list").expect("some");
         assert!(!Arc::ptr_eq(&first, &resized));
     }

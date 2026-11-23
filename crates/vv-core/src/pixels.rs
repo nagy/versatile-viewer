@@ -160,6 +160,9 @@ mod tests {
     #[test]
     fn the_parts_round_trip() {
         let img = DecodedImage::from_exact(ImgW::new(1), ImgH::new(1), vec![1, 2, 3, 4]);
-        assert_eq!(img.into_parts(), (ImgW::new(1), ImgH::new(1), vec![1, 2, 3, 4]));
+        assert_eq!(
+            img.into_parts(),
+            (ImgW::new(1), ImgH::new(1), vec![1, 2, 3, 4])
+        );
     }
 }

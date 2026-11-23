@@ -471,6 +471,70 @@ fn paint_plane(canvas: &mut Canvas, surface: &dyn vv_source::surface::Surface) -
     dest
 }
 
+/// A display list paints its rects and its pictures at any zoom.
+///
+/// This is the seam itself: the list is written in surface units, the frame maps
+/// them onto the window, and `vello` renders the primitives into the target the
+/// quad pipeline composites. Half the window is a red rect, and a blue picture
+/// sits inside the other half, so a wrong transform, a lost primitive and an
+/// uncomposited pass all land on a different pixel.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_display_list_paints_its_rects_and_its_pictures() {
+    use std::sync::Arc;
+
+    use vv_core::{
+        dim::{ImgH, ImgW, SurfaceSize, WindowSize, WindowVector},
+        pixels::DecodedImage,
+        region,
+        scene::{self, Paint, Primitive},
+    };
+
+    let mut canvas = canvas!(200, 100);
+    canvas.begin(CLEAR);
+    let (win_w, win_h) = (canvas.size.0 as f32, canvas.size.1 as f32);
+    let frame = region::Frame {
+        img: SurfaceSize::new(win_w, win_h),
+        win: WindowSize::new(win_w, win_h),
+        pan: WindowVector::zero(),
+        scale: 1.0,
+        angle: 0.0,
+    };
+    let blue = [0, 0, 255, 255];
+    let pixels = DecodedImage::from_exact(ImgW::new(2), ImgH::new(2), blue.repeat(4));
+    let list: Arc<[Primitive]> = Arc::from(vec![
+        Primitive::Rect {
+            rect: scene::rect_of(region::crop(0.0, 0.0, 100.0, 100.0)),
+            paint: Paint::Solid(Color::new(255, 0, 0, 255)),
+        },
+        scene::image_of(region::crop(120.0, 20.0, 40.0, 40.0), pixels),
+    ]);
+    let mut pass = canvas
+        .renderer
+        .display_pass(&canvas.device)
+        .expect("a display-list pass");
+    let texture = pass
+        .draw(&canvas.device, &canvas.queue, &list, &frame, canvas.size)
+        .expect("the list draws")
+        .clone();
+    let whole = dim::whole(win_w, win_h);
+    canvas.renderer.texture(
+        &texture,
+        whole,
+        Quad::rect(whole),
+        Color::WHITE,
+        Filter::Linear,
+    );
+    let out = canvas.print();
+    assert_eq!(out.at(50, 50), [255, 0, 0, 255], "the rect fills its half");
+    assert_eq!(out.at(140, 40), blue, "the picture lands in its box");
+    assert_eq!(
+        out.at(190, 90),
+        [CLEAR.r, CLEAR.g, CLEAR.b, CLEAR.a],
+        "the transparent base leaves the clear color alone"
+    );
+}
+
 /// A treemap paints the window it was framed for, edge to edge.
 ///
 /// The plane takes the shape of the window (see `Surface::frame_window`), so a

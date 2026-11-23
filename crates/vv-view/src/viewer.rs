@@ -75,8 +75,9 @@ use crate::{
         BACKGROUND, CropState, EASE_TIME, Mode, NavKeys, OpenAlign, PAN_RATE, Prefetch,
         ROTATE_DRAG_SPAN, ROTATE_DRAG_SPEED, Ramps, SPREAD_EASE_TIME, ViewState, ZOOM_ANCHOR_DRIFT,
         ZOOM_DRAG_SPAN, ZOOM_DRAG_SPEED, ZoomMode, aim_fill_pan, attach_blur_bg, draw_cell,
-        draw_patch, draw_selection, draw_turned, keep_pivot, pan_drag_speed, patch_covers,
-        put_back_view, read_nav_mouse, same_plane, selection_rect, show_entry, view_filter,
+        draw_list, draw_patch, draw_selection, draw_turned, keep_pivot, pan_drag_speed,
+        patch_covers, put_back_view, read_nav_mouse, same_plane, selection_rect, show_entry,
+        view_filter,
     },
     zoomkeys::TypedKeys,
 };
@@ -473,6 +474,11 @@ pub struct Viewer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     renderer: Renderer,
+    /// The display-list pass, built the first time a source answers a list.
+    ///
+    /// Vello compiles its compute pipelines when it is built, which costs a
+    /// moment, so a run that shows only pictures never pays for it.
+    scene_pass: Option<crate::display::SceneView>,
 
     // --- what the viewer shows ---
     st: ViewState,
@@ -616,7 +622,10 @@ impl Viewer {
                 crop_quiet_at: Instant::now(),
                 crop_tx,
                 crop_rx,
+                scene: None,
+                scene_pending: false,
             },
+            scene_pass: None,
             grid: None,
             shows_grid: launch.shows_grid,
             input: Input::default(),
@@ -2419,13 +2428,32 @@ impl Viewer {
             if let Some(bg) = &mut self.st.blur_bg {
                 bg.draw(r, WinW::new(win_w), WinH::new(win_h));
             }
+            // A source that answers primitives draws them at any zoom: the
+            // list is in surface units, so the frame's transform places it and
+            // there is no patch to paint and no plane texture to draw beside
+            // it. The list *is* the picture.
+            let listed = match (
+                self.st.scene.clone(),
+                self.st.frame(Vec2::new(win_w, win_h)),
+            ) {
+                (Some(list), Some(frame)) => draw_list(
+                    &mut self.scene_pass,
+                    r,
+                    &self.device,
+                    &self.queue,
+                    &list,
+                    &frame,
+                    size,
+                ),
+                _ => false,
+            };
             // The region patch covers the window on its own with the sharp
             // pixels of the visible part, so the whole-image texture draws only
             // where the patch cannot reach: the frames of a resize or a pan
             // that outran the repaint.
             // Both over the same pixels would double the alpha of an
             // antialiased edge.
-            if !patch_covers(&self.st, win_w, win_h) {
+            if !listed && !patch_covers(&self.st, win_w, win_h) {
                 if let Some(texture) = &self.st.view_tex {
                     // The image turns around its own center on screen, which
                     // is the pan offset on top of the window middle.
@@ -2470,7 +2498,7 @@ impl Viewer {
             // image loses its blur where the patch already reached.
             // A patch that still matches the view scale lands on whole
             // window pixels (see `draw_patch`), so its text stays sharp.
-            if let Some(frame) = self.st.frame(Vec2::new(win_w, win_h)) {
+            if !listed && let Some(frame) = self.st.frame(Vec2::new(win_w, win_h)) {
                 for patch in self
                     .st
                     .crop

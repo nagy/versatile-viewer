@@ -253,6 +253,18 @@ impl Renderer {
         }
     }
 
+    /// The display-list pass, on this renderer's device, queue and textures.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SceneError`] when vello refuses the device.
+    pub fn display_pass(
+        &self,
+        device: &wgpu::Device,
+    ) -> Result<crate::display::SceneView, crate::display::SceneError> {
+        crate::display::SceneView::new(device, self.uploader.clone())
+    }
+
     /// The handle a decode worker uses to upload its own pixels.
     #[must_use]
     pub fn uploader(&self) -> Uploader {

@@ -46,6 +46,7 @@ use crate::{
     region, region_sel,
     render::Renderer,
     rotate,
+    scene::Primitive,
     surface::{Size, Surface, View, open_book_surface},
     texture::{Filter, Texture, Uploader},
     tween::Ramp,
@@ -367,6 +368,17 @@ pub struct ViewState {
     /// The region workers talk back over this pair.
     pub crop_tx: Sender<CropMsg>,
     pub crop_rx: Receiver<CropMsg>,
+    /// The display list of the open plane, when the source answers one.
+    ///
+    /// A list draws at any zoom and under any turn, so a source that answers
+    /// one needs no region patch: the picture *is* the list. The texture in
+    /// `view_tex` and the patch in `crop` then stay empty, and the draw stops
+    /// reading them.
+    /// None for every source that answers a raster, which keeps the region
+    /// patch and the whole-plane texture as the path those sources take.
+    pub scene: Option<Arc<[Primitive]>>,
+    /// Whether a worker builds the list of the plane the view holds now.
+    pub scene_pending: bool,
 }
 
 /// The visible part of the open image, painted at the scale the window shows
@@ -476,6 +488,15 @@ pub enum CropMsg {
     /// A whole-plane texture of the plane the view frames now, so the base
     /// picture follows a plane the source laid out again.
     Base { generation: u64, texture: Texture },
+    /// The display list of the plane the view holds, built on a worker.
+    ///
+    /// `None` says the source answers a raster, which keeps the region patch
+    /// and the whole-plane texture as the path the view takes.
+    Scene {
+        generation: u64,
+        plane: Size,
+        list: Option<Arc<[Primitive]>>,
+    },
 }
 
 impl ViewState {
@@ -700,6 +721,8 @@ impl ViewState {
     /// worker result still in flight.
     pub fn close_crop(&mut self) {
         self.source = None;
+        self.scene = None;
+        self.scene_pending = false;
         self.drop_patch();
     }
 
@@ -754,8 +777,17 @@ impl ViewState {
     /// settled window, and no worker per frame of a drag.
     /// The paint is the whole plane at scale 1.0, which is the size the draw
     /// maps it from, and a worker uploads it like every other decode.
+    /// A source that answered a list has no plane texture to repaint: its list
+    /// is the picture, so the new frame asks for the list of the new plane and
+    /// the one on screen draws until the answer lands.
     pub fn refresh_plane(&mut self, uploader: &Uploader) {
         if !self.plane_stale || self.crop_pending {
+            return;
+        }
+        if self.scene.is_some() {
+            // One build per plane, the same guard a paint takes.
+            self.plane_stale = false;
+            self.request_scene();
             return;
         }
         let Some(source) = self.source.clone() else {
@@ -804,6 +836,37 @@ impl ViewState {
     pub fn adopt_source(&mut self, source: Option<Arc<dyn Surface>>) {
         self.close_crop();
         self.source = source;
+        self.request_scene();
+    }
+
+    /// Ask a worker for the display list of the plane the view holds.
+    ///
+    /// A source that answers primitives draws at any zoom, so the list is the
+    /// picture and the region patch has nothing to paint.
+    /// The build runs off the main thread because a treemap rasterizes one
+    /// label picture per label the first time it is asked, and a document
+    /// parses its content stream.
+    /// One build in flight: a plane that moves again asks once the first answer
+    /// lands, and the list on screen stays until the new one does.
+    pub fn request_scene(&mut self) {
+        if self.scene_pending {
+            return;
+        }
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        self.scene_pending = true;
+        let (generation, tx) = (self.crop_gen, self.crop_tx.clone());
+        let plane = self.source_plane;
+        let size = self.img;
+        rayon::spawn(move || {
+            let list = source.display(plane).ok().flatten();
+            let _ = tx.send(CropMsg::Scene {
+                generation,
+                plane: size,
+                list,
+            });
+        });
     }
 
     /// Ask a worker for the source of an entry, so the view can repaint the
@@ -968,6 +1031,25 @@ impl ViewState {
                 CropMsg::Source { generation, source } => {
                     if generation == self.crop_gen {
                         self.source = source;
+                        // The list of this plane rides its own worker, so the
+                        // frame that adopts the source draws the old answer
+                        // until the new one lands.
+                        self.request_scene();
+                    }
+                }
+                CropMsg::Scene {
+                    generation,
+                    plane,
+                    list,
+                } => {
+                    if generation != self.crop_gen {
+                        continue;
+                    }
+                    self.scene_pending = false;
+                    // A list of a plane the view left would draw the layout of
+                    // the frame before it, so only the current one lands.
+                    if same_plane(plane, self.img) {
+                        self.scene = list;
                     }
                 }
                 CropMsg::Crop {
@@ -1364,6 +1446,54 @@ pub fn draw_patch(r: &mut Renderer, patch: &CropState, frame: &region::Frame, fi
             angle,
             filter,
         ),
+    }
+}
+
+/// Draw a display list over the window, and answer whether it drew.
+///
+/// The list is written in surface units and `frame` maps them onto the window,
+/// so the primitives render at the zoom and the turn the window shows and the
+/// quad pipeline composites the one picture that comes out.
+/// The pass is built on the first list, because vello compiles its compute
+/// pipelines when it is built and a run that shows only pictures never pays for
+/// that.
+pub(crate) fn draw_list(
+    pass: &mut Option<crate::display::SceneView>,
+    r: &mut Renderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    list: &Arc<[Primitive]>,
+    frame: &region::Frame,
+    size: (u32, u32),
+) -> bool {
+    if pass.is_none() {
+        match r.display_pass(device) {
+            Ok(built) => *pass = Some(built),
+            Err(err) => {
+                tracing::warn!(err = %err, "display list");
+                return false;
+            }
+        }
+    }
+    let Some(view) = pass.as_mut() else {
+        return false;
+    };
+    match view.draw(device, queue, list, frame, size) {
+        Ok(texture) => {
+            let whole = dim::whole(size.0 as f32, size.1 as f32);
+            r.texture(
+                texture,
+                whole,
+                Quad::rect(whole),
+                Color::WHITE,
+                Filter::Linear,
+            );
+            true
+        }
+        Err(err) => {
+            tracing::warn!(err = %err, "display list");
+            false
+        }
     }
 }
 
