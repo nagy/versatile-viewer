@@ -98,16 +98,23 @@ pub enum Paint {
         /// What the ramp does past its last stop.
         spread: Spread,
     },
-    /// A ramp from an inner circle to an outer one, both in surface units.
+    /// A ramp from an inner circle to an outer one.
+    ///
+    /// The circles are in the ramp's own space, which the `transform` maps onto
+    /// the plane, so a radial that squashes its two circles differently keeps
+    /// them circles here and puts the squash in the transform, where a renderer
+    /// draws the ellipse it names.
     Radial {
-        /// The center of the outer circle.
+        /// The center of the outer circle, in the ramp's own space.
         center: (f64, f64),
-        /// The radius of the outer circle.
+        /// The radius of the outer circle, in the ramp's own space.
         radius: f64,
         /// The center of the inner circle, which is the focus of the ramp.
         focus: (f64, f64),
         /// The radius of the inner circle, zero for a point focus.
         focus_radius: f64,
+        /// Where the ramp's own space lands on the plane.
+        transform: Affine,
         /// The stops, in increasing order of offset.
         stops: Arc<[Stop]>,
         /// What the ramp does past its last stop.
@@ -118,13 +125,11 @@ pub enum Paint {
 impl Paint {
     /// This paint placed by `at`.
     ///
-    /// A solid colour has nowhere to go, but a ramp's axis and circles are
-    /// geometry in the units of the plane it was built for, so a list that moves
-    /// whole — a book places one list per page — moves its ramps as well.
-    /// A radial is a pair of circles and `at` may squeeze them into ellipses,
-    /// where a ramp of this list has no shape to say so: the radius takes the
-    /// mean of the two axes, the reading [`crate::scene`]'s SVG walk makes for a
-    /// squashed `gradientTransform`.
+    /// A solid colour has nowhere to go, but a ramp is geometry, so a list that
+    /// moves whole — a book places one list per page — moves its ramps as well.
+    /// A linear ramp's two points are in surface units, so `at` moves them; a
+    /// radial keeps its circles in its own space, so `at` composes with that
+    /// space and a squash the shading named stays a squash.
     #[must_use]
     pub fn placed(&self, at: Affine) -> Self {
         match self {
@@ -145,20 +150,18 @@ impl Paint {
                 radius,
                 focus,
                 focus_radius,
+                transform,
                 stops,
                 spread,
-            } => {
-                let [xx, yx, xy, yy, _, _] = at.as_coeffs();
-                let scale = f64::midpoint(xx.hypot(yx), xy.hypot(yy));
-                Self::Radial {
-                    center: placed_point(at, *center),
-                    radius: radius * scale,
-                    focus: placed_point(at, *focus),
-                    focus_radius: focus_radius * scale,
-                    stops: Arc::clone(stops),
-                    spread: *spread,
-                }
-            }
+            } => Self::Radial {
+                center: *center,
+                radius: *radius,
+                focus: *focus,
+                focus_radius: *focus_radius,
+                transform: at * *transform,
+                stops: Arc::clone(stops),
+                spread: *spread,
+            },
         }
     }
 }
@@ -506,11 +509,15 @@ mod tests {
             "the stops are colours, and colours move nowhere"
         );
 
+        // A radial keeps its circles in its own space, so the placement goes
+        // into that space and a squash stays a squash.
+        let squash = Affine::scale_non_uniform(1.0, 0.5);
         let radial = Paint::Radial {
             center: (4.0, 0.0),
             radius: 2.0,
             focus: (0.0, 0.0),
             focus_radius: 0.0,
+            transform: squash,
             stops,
             spread: Spread::Pad,
         };
@@ -518,18 +525,23 @@ mod tests {
             center,
             radius,
             focus,
-            focus_radius,
+            transform,
             ..
         } = radial.placed(at)
         else {
             panic!("a placed ramp stays a ramp");
         };
-        assert_eq!((center, focus), ((28.0, 40.0), (20.0, 40.0)));
         assert_eq!(
-            (radius, focus_radius),
-            (4.0, 0.0),
-            "a scale of two grows the circles"
+            (center, focus),
+            ((4.0, 0.0), (0.0, 0.0)),
+            "the circles stay where the ramp puts them"
         );
+        assert_eq!(radius, 2.0);
+        assert_eq!(transform, at * squash, "and the space takes the placement");
+        // The two axes of that space are the ellipse the ramp draws: `at` scales
+        // by two and the squash halves the y axis.
+        let [xx, yx, xy, yy, _, _] = transform.as_coeffs();
+        assert_eq!((xx.hypot(yx), xy.hypot(yy)), (2.0, 1.0));
     }
 
     #[test]

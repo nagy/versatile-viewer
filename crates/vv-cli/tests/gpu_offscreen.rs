@@ -1572,11 +1572,6 @@ fn pictured_page() -> Vec<u8> {
 #[test]
 #[ignore = "needs a Vulkan device"]
 fn a_listed_page_paints_what_the_raster_path_paints() {
-    use vv_core::{
-        dim::{SurfaceSize, WindowSize, WindowVector},
-        region,
-    };
-
     let dir = tempfile::tempdir().expect("a temp dir");
     let path = dir.path().join("pictured.pdf");
     std::fs::write(&path, pictured_page()).expect("write the pdf");
@@ -1592,29 +1587,7 @@ fn a_listed_page_paints_what_the_raster_path_paints() {
     let list = surface.display(0).expect("a list").expect("the page lists");
 
     let mut canvas = canvas!(200, 100);
-    canvas.begin(CLEAR);
-    let frame = region::Frame {
-        img: SurfaceSize::new(plane.w, plane.h),
-        win: WindowSize::new(200.0, 100.0),
-        pan: WindowVector::zero(),
-        scale: 1.0,
-        angle: 0.0,
-    };
-    let mut pass = canvas
-        .renderer
-        .display_pass(&canvas.device)
-        .expect("a display-list pass");
-    let painted = pass
-        .draw(&canvas.device, &canvas.queue, &list, &frame, canvas.size)
-        .expect("the list draws");
-    canvas.renderer.texture(
-        painted.texture,
-        painted.src,
-        painted.quad,
-        Color::WHITE,
-        Filter::Linear,
-    );
-    let pixels = canvas.print();
+    let pixels = paint_list_flat(&mut canvas, &list);
 
     // The page draws its square at 20..80 by 60..90 of the render space (y
     // down), and its picture at 100..180 by 20..80, red then green.
@@ -1631,6 +1604,45 @@ fn a_listed_page_paints_what_the_raster_path_paints() {
         mean <= 8,
         "the list and the raster paint the same page: mean difference {mean}"
     );
+}
+
+/// Paint a list into `canvas` at one output pixel per unit, and read it back.
+///
+/// A plane under a frame of scale 1.0 and no pan puts one unit on one pixel,
+/// which is the scale `render_whole` draws the raster path at, so a plane whose
+/// size is the canvas size lands on it whole.
+fn paint_list_flat(
+    canvas: &mut Canvas,
+    list: &std::sync::Arc<[vv_source::scene::Primitive]>,
+) -> Pixels {
+    use vv_core::{
+        dim::{SurfaceSize, WindowSize, WindowVector},
+        region,
+    };
+
+    canvas.begin(CLEAR);
+    let frame = region::Frame {
+        img: SurfaceSize::new(canvas.size.0 as f32, canvas.size.1 as f32),
+        win: WindowSize::new(canvas.size.0 as f32, canvas.size.1 as f32),
+        pan: WindowVector::zero(),
+        scale: 1.0,
+        angle: 0.0,
+    };
+    let mut pass = canvas
+        .renderer
+        .display_pass(&canvas.device)
+        .expect("a display-list pass");
+    let painted = pass
+        .draw(&canvas.device, &canvas.queue, list, &frame, canvas.size)
+        .expect("the list draws");
+    canvas.renderer.texture(
+        painted.texture,
+        painted.src,
+        painted.quad,
+        Color::WHITE,
+        Filter::Linear,
+    );
+    canvas.print()
 }
 
 /// Assert that a painted frame agrees with a rendered picture at `probes`.
@@ -1683,40 +1695,48 @@ fn raster_pixel(image: &vv_source::DecodedImage, x: usize, y: usize) -> [u8; 4] 
     ]
 }
 
-/// A 200 by 100 page painted by two shadings: a ramp across the left half and a
-/// pair of circles in the right half.
+/// A 200 by 160 page painted by three shadings: a ramp down the left side, a
+/// pair of circles in the right half, and the same circles squeezed into an
+/// ellipse below them.
 ///
 /// A shading paints a function rather than a colour, so it is the case a list
-/// can only carry as a ramp — and a ramp placed wrong smears the whole page.
+/// can only carry as a ramp — and a ramp placed wrong smears the whole page,
+/// while a radial drawn round where the page names an ellipse paints one.
 fn shaded_page() -> Vec<u8> {
-    let content = "/Pattern cs /P1 scn 0 0 100 100 re f\n/Pattern cs /P2 scn 100 0 100 100 re f\n";
+    let content = "/Pattern cs /P1 scn 0 0 100 160 re f\n/Pattern cs /P2 scn 100 80 100 80 re \
+                   f\n/Pattern cs /P3 scn 100 0 100 80 re f\n";
     let objects = vec![
         b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n".to_vec(),
         b"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n".to_vec(),
-        b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R \
-          /Resources << /Pattern << /P1 5 0 R /P2 8 0 R >> >> >> endobj\n"
+        b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 160] /Contents 4 0 R \
+          /Resources << /Pattern << /P1 5 0 R /P2 8 0 R /P3 11 0 R >> >> >> endobj\n"
             .to_vec(),
         format!(
             "4 0 obj << /Length {} >> stream\n{content}endstream\nendobj\n",
             content.len()
         )
         .into_bytes(),
-        // The left half: red at the left edge, blue at the middle of the page.
+        // The left column: red at the left edge, blue at the middle of the page.
         b"5 0 obj << /Type /Pattern /PatternType 2 /Shading 6 0 R >> endobj\n".to_vec(),
         b"6 0 obj << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 100 0] \
           /Function 7 0 R /Extend [true true] >> endobj\n"
             .to_vec(),
         b"7 0 obj << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> endobj\n"
             .to_vec(),
-        // The right half: a green centre and a white rim, in the unit circle
-        // scaled by fifty and moved into place.
+        // The circles: a green centre and a white rim, in the unit circle scaled
+        // by forty and moved into the top right quarter.
         b"8 0 obj << /Type /Pattern /PatternType 2 /Shading 9 0 R \
-          /Matrix [50 0 0 50 150 50] >> endobj\n"
+          /Matrix [40 0 0 40 150 120] >> endobj\n"
             .to_vec(),
         b"9 0 obj << /ShadingType 3 /ColorSpace /DeviceRGB /Coords [0 0 0 0 0 1] \
           /Function 10 0 R /Extend [true true] >> endobj\n"
             .to_vec(),
         b"10 0 obj << /FunctionType 2 /Domain [0 1] /C0 [0 0.6 0] /C1 [1 1 1] /N 1 >> endobj\n"
+            .to_vec(),
+        // The same circles under a matrix that squeezes the y axis by half: an
+        // ellipse forty points across and twenty down, below the first one.
+        b"11 0 obj << /Type /Pattern /PatternType 2 /Shading 9 0 R \
+          /Matrix [40 0 0 20 150 40] >> endobj\n"
             .to_vec(),
     ];
     pdf_bytes(&objects)
@@ -1731,17 +1751,14 @@ fn shaded_page() -> Vec<u8> {
 #[test]
 #[ignore = "needs a Vulkan device"]
 fn a_listed_page_paints_its_shadings() {
-    use vv_core::{
-        dim::{SurfaceSize, WindowSize, WindowVector},
-        region,
-        scene::{Paint, Primitive},
-    };
+    use vv_core::scene::{Paint, Primitive};
 
     let dir = tempfile::tempdir().expect("a temp dir");
     let path = dir.path().join("shaded.pdf");
     std::fs::write(&path, shaded_page()).expect("write the pdf");
     let surface = open_surface(&path).expect("the page opens");
     let plane = surface.bounds(0).expect("the page measures");
+    assert_eq!((plane.w, plane.h), (200.0, 160.0));
     let raster = surface.render_whole(0, 1.0).expect("the raster renders");
     let list = surface.display(0).expect("a list").expect("the page lists");
     let fills = list
@@ -1762,64 +1779,66 @@ fn a_listed_page_paints_its_shadings() {
             | Primitive::PopLayer => None,
         })
         .count();
-    assert_eq!(fills, 2, "both shadings ride the list as ramps: {list:?}");
+    assert_eq!(fills, 3, "every shading rides the list as a ramp: {list:?}");
 
-    let mut canvas = canvas!(200, 100);
-    canvas.begin(CLEAR);
-    let frame = region::Frame {
-        img: SurfaceSize::new(plane.w, plane.h),
-        win: WindowSize::new(200.0, 100.0),
-        pan: WindowVector::zero(),
-        scale: 1.0,
-        angle: 0.0,
-    };
-    let mut pass = canvas
-        .renderer
-        .display_pass(&canvas.device)
-        .expect("a display-list pass");
-    let painted = pass
-        .draw(&canvas.device, &canvas.queue, &list, &frame, canvas.size)
-        .expect("the list draws");
-    canvas.renderer.texture(
-        painted.texture,
-        painted.src,
-        painted.quad,
-        Color::WHITE,
-        Filter::Linear,
-    );
-    let pixels = canvas.print();
+    let mut canvas = canvas!(200, 160);
+    let pixels = paint_list_flat(&mut canvas, &list);
 
-    // The ramp runs red at the left edge to blue at the middle of the page, and
-    // the circles go from green at their centre to white at their rim.
+    // The ramp runs red at the left edge to blue at the middle of the page, the
+    // circles go from green at their centre to white at their rim, and the
+    // ellipse is the same ramp in a shape of its own. The page's y axis points
+    // up, so the circles of the page land in the upper half of the frame.
     let probes = [
-        (5, 50, "the red end of the ramp"),
-        (99, 50, "the blue end of the ramp"),
-        (50, 50, "the middle of the ramp"),
-        (150, 50, "the green centre of the circles"),
-        (190, 90, "the white rim of the circles"),
+        (5, 80, "the red end of the ramp"),
+        (99, 80, "the blue end of the ramp"),
+        (50, 80, "the middle of the ramp"),
+        (150, 40, "the green centre of the circles"),
+        (185, 40, "the ramp between the circle and its rim"),
+        (150, 120, "the green centre of the ellipse"),
+        // Forty points to the right of the ellipse's centre, which is inside an
+        // ellipse forty across and outside a circle twenty across: a ramp drawn
+        // round where the page draws an ellipse disagrees here.
+        (190, 120, "the wide end of the ellipse"),
+        (150, 132, "the narrow top of the ellipse"),
     ];
     assert_probes(&pixels, &raster, &probes);
     // And the ramps paint what the shading names, so a pair of blank shapes
     // cannot agree with the raster and pass.
-    let [red, _, blue, _] = pixels.at(5, 50);
+    let [red, _, blue, _] = pixels.at(5, 80);
     assert!(
         red > 200 && blue < 60,
         "the ramp starts red at the left edge: {:?}",
-        pixels.at(5, 50)
+        pixels.at(5, 80)
     );
-    let [red, _, blue, _] = pixels.at(99, 50);
+    let [red, _, blue, _] = pixels.at(99, 80);
     assert!(
         blue > 200 && red < 60,
         "and ends blue at the middle: {:?}",
-        pixels.at(99, 50)
+        pixels.at(99, 80)
     );
-    let [red, green, blue, _] = pixels.at(150, 50);
+    for (x, y, what) in [(150, 40, "circles"), (150, 120, "ellipse")] {
+        let [red, green, blue, _] = pixels.at(x, y);
+        assert!(
+            green > 120 && red < 60 && blue < 60,
+            "the {what} start green at their centre: {:?}",
+            pixels.at(x, y)
+        );
+    }
+    // The ellipse reaches forty points across its centre and only twenty above
+    // it, so two probes tell it from a circle: twenty points out sideways is
+    // still inside the ramp, and twenty-five points up is past its rim.
+    let wide = pixels.at(170, 120);
     assert!(
-        green > 120 && red < 60 && blue < 60,
-        "the circles start green at their centre: {:?}",
-        pixels.at(150, 50)
+        wide[0] > 60 && wide[0] < 220 && wide[1] > wide[0],
+        "the ellipse is still painted twenty points out: {wide:?}"
     );
-    let mean = mean_difference(&pixels, &raster, (200, 100));
+    let narrow = pixels.at(150, 145);
+    assert_eq!(
+        narrow,
+        [255, 255, 255, 255],
+        "and has ended above that: {narrow:?}"
+    );
+    let mean = mean_difference(&pixels, &raster, (200, 160));
     assert!(
         mean <= 8,
         "the list and the raster paint the same shading: mean difference {mean}"

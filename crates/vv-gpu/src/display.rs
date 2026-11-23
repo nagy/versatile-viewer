@@ -425,11 +425,15 @@ impl SceneView {
                                 .transform(placed)
                                 .draw(Fill::NonZero, glyphs);
                         }
-                        Brush::Ramp(ramp) => {
+                        Brush::Ramp { gradient, space } => {
+                            // A glyph run's coordinates are in its own space, so
+                            // the ramp reaches it the way it reaches a path.
+                            let at = brush_at(Some(placed.inverse()), space);
                             self.base
                                 .draw_glyphs(font)
                                 .font_size(run.size)
-                                .brush(&ramp)
+                                .brush(&gradient)
+                                .brush_transform(Some(at))
                                 .transform(placed)
                                 .draw(Fill::NonZero, glyphs);
                         }
@@ -540,8 +544,13 @@ pub fn to_window(frame: &region::Frame) -> Affine {
 enum Brush {
     /// One color.
     Solid(VelloColor),
-    /// A ramp, whose geometry vello reads through a brush transform.
-    Ramp(Gradient),
+    /// A ramp, and the space its own geometry is written in.
+    ///
+    /// A linear ramp is written in surface units, so its space is the identity
+    /// and its two points already land where they belong; a radial keeps its
+    /// circles in its own space and lets that space squash them, so the space
+    /// travels with the ramp and the draw composes it (see [`brush_at`]).
+    Ramp { gradient: Gradient, space: Affine },
 }
 
 impl SceneView {
@@ -560,7 +569,10 @@ impl SceneView {
     ) {
         match brush(paint) {
             Brush::Solid(color) => self.base.fill(style, placed, color, None, shape),
-            Brush::Ramp(ramp) => self.base.fill(style, placed, &ramp, paint_at, shape),
+            Brush::Ramp { gradient, space } => {
+                let at = Some(brush_at(paint_at, space));
+                self.base.fill(style, placed, &gradient, at, shape);
+            }
         }
     }
 
@@ -574,9 +586,11 @@ impl SceneView {
     ) {
         match brush(&outline.paint) {
             Brush::Solid(color) => self.base.stroke(&outline.style, placed, color, None, path),
-            Brush::Ramp(ramp) => self
-                .base
-                .stroke(&outline.style, placed, &ramp, paint_at, path),
+            Brush::Ramp { gradient, space } => {
+                let at = Some(brush_at(paint_at, space));
+                self.base
+                    .stroke(&outline.style, placed, &gradient, at, path);
+            }
         }
     }
 }
@@ -590,34 +604,54 @@ fn brush(paint: &Paint) -> Brush {
             to,
             stops,
             spread,
-        } => Brush::Ramp(Gradient {
-            kind: GradientKind::Linear(LinearGradientPosition {
-                start: kurbo::Point::new(from.0, from.1),
-                end: kurbo::Point::new(to.0, to.1),
-            }),
-            extend: extend(*spread),
-            stops: ramp(stops),
-            ..Gradient::default()
-        }),
+        } => Brush::Ramp {
+            gradient: Gradient {
+                kind: GradientKind::Linear(LinearGradientPosition {
+                    start: kurbo::Point::new(from.0, from.1),
+                    end: kurbo::Point::new(to.0, to.1),
+                }),
+                extend: extend(*spread),
+                stops: ramp(stops),
+                ..Gradient::default()
+            },
+            // A linear ramp of this list is stated in surface units.
+            space: Affine::IDENTITY,
+        },
         Paint::Radial {
             center,
             radius,
             focus,
             focus_radius,
+            transform,
             stops,
             spread,
-        } => Brush::Ramp(Gradient {
-            kind: GradientKind::Radial(RadialGradientPosition {
-                start_center: kurbo::Point::new(focus.0, focus.1),
-                start_radius: *focus_radius as f32,
-                end_center: kurbo::Point::new(center.0, center.1),
-                end_radius: *radius as f32,
-            }),
-            extend: extend(*spread),
-            stops: ramp(stops),
-            ..Gradient::default()
-        }),
+        } => Brush::Ramp {
+            gradient: Gradient {
+                kind: GradientKind::Radial(RadialGradientPosition {
+                    start_center: kurbo::Point::new(focus.0, focus.1),
+                    start_radius: *focus_radius as f32,
+                    end_center: kurbo::Point::new(center.0, center.1),
+                    end_radius: *radius as f32,
+                }),
+                extend: extend(*spread),
+                stops: ramp(stops),
+                ..Gradient::default()
+            },
+            space: *transform,
+        },
     }
+}
+
+/// The brush transform of a ramp whose own space lands on the plane by `space`.
+///
+/// `shape_at` is the inverse of the shape's transform, which is the brush
+/// transform a ramp written in surface units takes: it hands the ramp to the
+/// shape's own space, where the fill reads it.
+/// A ramp with a space of its own goes through that space first, so `space`
+/// multiplies in on the right and the ramp still lands in surface units before
+/// the shape takes it back.
+fn brush_at(shape_at: Option<Affine>, space: Affine) -> Affine {
+    shape_at.map_or(space, |inverse| inverse * space)
 }
 
 /// The stops of a ramp, as vello reads them.

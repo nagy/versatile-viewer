@@ -74,13 +74,6 @@ const PAPER: Color = Color::new(255, 255, 255, 255);
 /// the same function.
 const RAMP_TOLERANCE: f32 = 0.01;
 
-/// How far from square and round a transform may sit and still count as a
-/// similarity, relative to its own scale.
-///
-/// A page's transform is exact apart from rounding, so a squeezed shading misses
-/// this by whole percent rather than by a hair.
-const SIMILARITY: f64 = 1.0e-6;
-
 /// What a page needs that a primitive list cannot express.
 ///
 /// A caller that reads one of these answers no list, so the page keeps the
@@ -94,10 +87,8 @@ pub(crate) enum Unsupported {
     /// A shading that a ramp of this list cannot state.
     ///
     /// That covers a function-based or a mesh shading, which paints a function
-    /// over an area rather than along an axis; a shading that does not cover the
-    /// shape it paints, where a ramp would pad past its last stop; and a radial
-    /// shading whose matrix squeezes its circles into ellipses, which two
-    /// circular ramps cannot draw.
+    /// over an area rather than along an axis, and a shading that does not cover
+    /// the shape it paints, where a ramp would pad past its last stop.
     Shading,
     /// A tiling pattern, which needs a tile drawn once and repeated.
     Pattern,
@@ -233,19 +224,16 @@ impl PdfScene {
                 end_center,
                 end_radius,
             } => {
-                // A ramp of this list is a pair of circles. A shading matrix that
-                // squeezes or shears turns those circles into ellipses, and
-                // drawing them round would paint a different picture, so the page
-                // keeps the raster path.
-                let Some(scale) = similarity(space) else {
-                    self.stop(Unsupported::Shading);
-                    return None;
-                };
+                // The encoded shading states its circles in its own space, and
+                // `space` maps that space onto the page, so a shading matrix that
+                // squeezes them into ellipses keeps them circles here and the
+                // squash stays in the transform.
                 Paint::Radial {
-                    center: placed(space, end_center),
-                    radius: f64::from(end_radius) * scale,
-                    focus: placed(space, start_center),
-                    focus_radius: f64::from(start_radius) * scale,
+                    center: (end_center.x, end_center.y),
+                    radius: f64::from(end_radius),
+                    focus: (start_center.x, start_center.y),
+                    focus_radius: f64::from(start_radius),
+                    transform: space,
                     stops,
                     spread: scene::Spread::Pad,
                 }
@@ -593,21 +581,6 @@ fn placed(space: Affine, point: Point) -> (f64, f64) {
     (point.x, point.y)
 }
 
-/// The scale of `space` where it is a similarity, or `None` where it squeezes or
-/// shears.
-///
-/// A ramp of this list is a pair of circles, so its geometry only survives a
-/// transform that keeps circles round: two equal axes that stay square to each
-/// other.
-fn similarity(space: Affine) -> Option<f64> {
-    let [xx, yx, xy, yy, _, _] = space.as_coeffs();
-    let (x, y) = (xx.hypot(yx), xy.hypot(yy));
-    let longest = x.max(y);
-    let square = (x - y).abs() <= longest * SIMILARITY;
-    let round = (xx * xy + yx * yy).abs() <= longest * longest * SIMILARITY;
-    (square && round).then(|| f64::midpoint(x, y))
-}
-
 /// The longest of the two axis advances of `space`.
 ///
 /// A stroke of a width named in a shape's own units lands on the page stretched
@@ -950,46 +923,61 @@ trailer<</Root 1 0 R/Size 8>>",
         );
     }
 
-    /// A radial shading answers a pair of circles in surface units.
+    /// A radial shading answers its circles and the space they live in.
+    ///
+    /// The shading states a unit circle and the pattern's matrix places it, so
+    /// the ramp keeps that circle and carries the placement in its own space.
     #[test]
     fn a_radial_shading_answers_a_circle() {
-        // A circle of radius one, scaled by a hundred and moved to the page.
         let fill = shaded_fill(&radial_page("100 0 0 100 100 50"));
         let Paint::Radial {
             center,
             radius,
             focus,
             focus_radius,
+            transform,
             ..
         } = fill
         else {
             panic!("a radial shading is a radial ramp: {fill:?}");
         };
-        assert!(
-            (center.0 - 100.0).abs() < 1e-6 && (center.1 - 50.0).abs() < 1e-6,
-            "the ramp is centred where the matrix puts it: {center:?}"
+        assert_eq!((center, radius), ((0.0, 0.0), 1.0), "a unit circle");
+        assert_eq!(
+            (focus, focus_radius),
+            ((0.0, 0.0), 0.0),
+            "and a point for a focus"
         );
+        let middle = transform * kurbo::Point::new(0.0, 0.0);
         assert!(
-            (radius - 100.0).abs() < 1e-6,
-            "its radius is a hundred points"
+            (middle.x - 100.0).abs() < 1e-6 && (middle.y - 50.0).abs() < 1e-6,
+            "the space puts the circle where the matrix names it: {middle:?}"
         );
-        assert!((focus_radius).abs() < 1e-6, "the inner circle is a point");
+        let [xx, yx, xy, yy, _, _] = transform.as_coeffs();
         assert!(
-            (focus.0 - center.0).abs() < 1e-6 && (focus.1 - center.1).abs() < 1e-6,
-            "a concentric shading has one centre"
+            (xx.hypot(yx) - 100.0).abs() < 1e-6 && (xy.hypot(yy) - 100.0).abs() < 1e-6,
+            "and scales it to a hundred points across"
         );
     }
 
-    /// A radial shading squeezed into an ellipse keeps the raster path.
+    /// A radial shading squeezed by its matrix keeps its circles and its squash.
     ///
-    /// A ramp of this list is a pair of circles, so drawing a squeezed one round
-    /// would paint a picture nobody drew.
+    /// The squash belongs to the ramp's space, where the renderer draws the
+    /// ellipse the page names, so the page rides the list instead of keeping the
+    /// raster path.
     #[test]
-    fn a_squeezed_radial_shading_answers_no_list() {
-        let surface = radial_page("200 0 0 50 0 0");
+    fn a_squeezed_radial_shading_carries_its_matrix() {
+        let fill = shaded_fill(&radial_page("200 0 0 50 0 0"));
+        let Paint::Radial {
+            radius, transform, ..
+        } = fill
+        else {
+            panic!("a radial shading is a radial ramp: {fill:?}");
+        };
+        assert_eq!(radius, 1.0, "the circle is the shading's own");
+        let [xx, yx, xy, yy, _, _] = transform.as_coeffs();
         assert!(
-            surface.display(0).expect("an answer").is_none(),
-            "an elliptical ramp is not a circle pair"
+            (xx.hypot(yx) - 200.0).abs() < 1e-6 && (xy.hypot(yy) - 50.0).abs() < 1e-6,
+            "the space squeezes the circle into an ellipse of 200 by 50 points"
         );
     }
 

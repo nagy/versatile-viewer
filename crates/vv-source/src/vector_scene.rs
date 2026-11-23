@@ -305,17 +305,17 @@ fn paint(
             })
         }
         usvg::Paint::RadialGradient(gradient) => {
+            // The circles stay circles in the gradient's own space, which
+            // `gradientTransform` maps onto the plane: a squash becomes an
+            // ellipse the renderer draws, not two radii averaged into a round
+            // ramp nobody drew.
             let space = transform * affine(gradient.transform());
-            // A ramp of this list is a circle, and a `gradientTransform` may
-            // squash it into an ellipse, so the radius takes the mean of the
-            // two axis lengths.
-            let coeffs = space.as_coeffs();
-            let scale = f64::midpoint(coeffs[0].hypot(coeffs[1]), coeffs[2].hypot(coeffs[3]));
             Ok(Paint::Radial {
-                center: apply(space, gradient.cx(), gradient.cy()),
-                radius: f64::from(gradient.r().get()) * scale,
-                focus: apply(space, gradient.fx(), gradient.fy()),
-                focus_radius: f64::from(gradient.fr().get()) * scale,
+                center: (f64::from(gradient.cx()), f64::from(gradient.cy())),
+                radius: f64::from(gradient.r().get()),
+                focus: (f64::from(gradient.fx()), f64::from(gradient.fy())),
+                focus_radius: f64::from(gradient.fr().get()),
+                transform: space,
                 stops: stops(gradient.stops(), alpha),
                 spread: spread(gradient.spread_method()),
             })
@@ -443,6 +443,54 @@ mod tests {
         let stroke = stroke.as_ref().expect("an outline");
         assert_eq!(stroke.style.width, 3.0);
         assert_eq!(stroke.paint, Paint::Solid(Color::new(0, 255, 0, 255)));
+    }
+
+    /// A squashed `gradientTransform` keeps its circles and takes the squash.
+    ///
+    /// A radial gradient states one circle and a transform, and the transform may
+    /// squeeze it into an ellipse. A ramp of this list draws every ellipse it
+    /// names, so the circle stays the gradient's own and the squeeze rides in the
+    /// ramp's space instead of being averaged into a round ramp nobody drew.
+    #[test]
+    fn a_squashed_radial_gradient_keeps_its_circles() {
+        let list = walk(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10">
+                  <defs>
+                    <radialGradient id="g" gradientTransform="scale(2 1)">
+                      <stop offset="0" stop-color="#000"/>
+                      <stop offset="1" stop-color="#fff"/>
+                    </radialGradient>
+                  </defs>
+                  <rect width="20" height="10" fill="url(#g)"/>
+                </svg>"##,
+        )
+        .expect("a ramp lists");
+        let Primitive::Path { fill, .. } = &list[0] else {
+            panic!("a path");
+        };
+        let Some(Paint::Radial {
+            center,
+            radius,
+            transform,
+            ..
+        }) = fill
+        else {
+            panic!("a radial ramp: {fill:?}");
+        };
+        // `objectBoundingBox` units put a unit circle in the middle of the rect,
+        // and `gradientTransform` works in the box's space after that: the circle
+        // spans the rect's twenty units across and ten down, and the scale
+        // doubles the wider axis.
+        assert!(
+            (center.0 - 0.5).abs() < 1e-3 && (center.1 - 0.5).abs() < 1e-3,
+            "{center:?}"
+        );
+        assert!((radius - 0.5).abs() < 1e-3, "{radius}");
+        let [xx, yx, xy, yy, _, _] = transform.as_coeffs();
+        assert!(
+            (xx.hypot(yx) - 40.0).abs() < 1e-3 && (xy.hypot(yy) - 10.0).abs() < 1e-3,
+            "the space is the ellipse's own axes: {transform:?}"
+        );
     }
 
     #[test]
