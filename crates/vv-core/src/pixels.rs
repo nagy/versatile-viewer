@@ -154,7 +154,7 @@ mod tests {
     #[test]
     fn an_empty_image_takes_an_empty_buffer() {
         let img = DecodedImage::new(ImgW::new(0), ImgH::new(0), Vec::new()).expect("empty");
-        assert!(img.as_rgba().is_empty());
+        assert_eq!(img.as_rgba(), []);
     }
 
     #[test]

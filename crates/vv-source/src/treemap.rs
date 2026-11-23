@@ -20,12 +20,18 @@
 //! argument, so a zoom re-lays-out the sub-frame under the viewport with the
 //! same call and no change to [`TreemapSurface`].
 
-use std::{fmt::Write as _, path::Path, sync::Mutex};
+use std::{
+    fmt::Write as _,
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 use crate::{
     DecodedImage,
+    dim::LongSide,
     draw::Color,
     region::{self, Crop},
+    scene::{self, Paint, Primitive},
     surface::{ChunkSource, Size, Surface, SurfaceError, VectorSurface, View},
 };
 
@@ -51,6 +57,20 @@ const FONT_TOP: f32 = 13.0;
 const FONT_MID: f32 = 10.5;
 /// The label size inside one leaf.
 const FONT_LEAF: f32 = 11.0;
+/// How much larger than its framed box a label rasterizes.
+///
+/// A label is an [`Primitive::Image`] leaf until the text path lands, and a leaf
+/// is a picture: it blurs past its own pixels exactly like a photo does.
+/// Three times the framed size keeps the label sharp through the first zoom
+/// steps, and the crate pays that bill once per plane, when the list is built.
+const LABEL_OVERSAMPLE: f32 = 3.0;
+
+/// How tall a label's box is per unit of label size.
+///
+/// The glyph body of a label sits under three quarters of its size, so the box
+/// leaves the descender room and no clip eats a comma.
+const LABEL_BOX: f32 = 1.35;
+
 /// The height of a group band per unit of label size.
 const BAND: f32 = 1.5;
 /// The slack a band leaves around its label, in frame pixels.
@@ -753,6 +773,11 @@ struct Canvas {
     /// The frame rides beside it, so a resize frame only records a size and the
     /// settled repaint pays for the parse and the rasterize.
     painted: Option<(Size, VectorSurface)>,
+    /// The primitives of `frame`, built by the first draw that asks for them.
+    ///
+    /// The list holds no scale and no region, so it survives every zoom and pan
+    /// of the same frame and only a resize rebuilds it.
+    scene: Option<(Size, Arc<[Primitive]>)>,
 }
 
 impl TreemapSurface {
@@ -777,6 +802,7 @@ impl TreemapSurface {
             canvas: Mutex::new(Canvas {
                 frame: Self::frame_for(DEFAULT_FRAME),
                 painted: None,
+                scene: None,
             }),
         }
     }
@@ -831,6 +857,98 @@ impl TreemapSurface {
     }
 }
 
+/// The primitives of one layout, `frame` units wide.
+///
+/// This is what [`svg`] writes as a document and [`crate::svg`] then parses: the
+/// paper, one rect per tile, the darker band of a group, and one picture per
+/// label.
+/// The rects are answered directly, so the document round trip survives only for
+/// the labels, which ride the host fonts through it until the glyph path lands.
+///
+/// # Errors
+///
+/// The function errors when a label rasterizes to nothing.
+fn primitives(layout: &[Placed], frame: Size) -> Result<Vec<Primitive>, SurfaceError> {
+    let mut out = Vec::with_capacity(layout.len() * 2 + 1);
+    // The paper fills first, so a gutter and the outer border show it and never
+    // the window color behind the plane.
+    out.push(Primitive::Rect {
+        rect: scene::rect_of(frame.whole()),
+        paint: Paint::Solid(PAPER),
+    });
+    for placed in layout {
+        match placed.ink {
+            Ink::Leaf => {
+                out.push(Primitive::Rect {
+                    rect: scene::rect_of(placed.rect),
+                    paint: Paint::Solid(placed.fill),
+                });
+                if let Some((center, baseline, font)) = leaf_label(placed)
+                    && let Some(leaf) = label_leaf(&placed.node.label, center, baseline, font)?
+                {
+                    out.push(leaf);
+                }
+            }
+            Ink::Group { band } => {
+                out.push(Primitive::Rect {
+                    rect: scene::rect_of(band),
+                    paint: Paint::Solid(dim(placed.fill)),
+                });
+                let font = font_for(placed.depth);
+                let baseline = band.min_y() + band.height() / 2.0 + font * 0.35;
+                let center = band.min_x() + BAND_PAD + label_width(&placed.node.label, font) / 2.0;
+                if let Some(leaf) = label_leaf(&placed.node.label, center, baseline, font)? {
+                    out.push(leaf);
+                }
+            }
+            Ink::Bare => {}
+        }
+    }
+    Ok(out)
+}
+
+/// The picture of one label, centered on `center` and sitting on `baseline`.
+///
+/// A label rasterizes through [`crate::svg`], the painter the document path
+/// already used, at [`LABEL_OVERSAMPLE`] times its framed box, so it stays sharp
+/// through the first zoom steps of the map.
+///
+/// # Errors
+///
+/// The function errors when the label's document fails to parse or rasterize.
+fn label_leaf(
+    label: &str,
+    center: f32,
+    baseline: f32,
+    font: f32,
+) -> Result<Option<Primitive>, SurfaceError> {
+    let (box_w, box_h) = (label_width(label, font), font * LABEL_BOX);
+    let usable = font.is_finite() && font > 0.0 && box_w > 0.0 && box_h > 0.0;
+    if !usable {
+        return Ok(None);
+    }
+    // The document declares the pixel size and draws in frame units, so one
+    // frame unit maps onto `LABEL_OVERSAMPLE` pixels.
+    let (px_w, px_h) = (
+        (box_w * LABEL_OVERSAMPLE).round().max(1.0) as u32,
+        (box_h * LABEL_OVERSAMPLE).round().max(1.0) as u32,
+    );
+    // The baseline sits this far into the box, measured from its top.
+    let descent = font * 1.05;
+    let document = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{px_w}" height="{px_h}" viewBox="0 0 {box_w} {box_h}"><text x="{cx}" y="{descent}" font-family="sans-serif" font-size="{font}" fill="#{r:02x}{g:02x}{b:02x}" text-anchor="middle">{label}</text></svg>"##,
+        cx = box_w / 2.0,
+        r = INK.r,
+        g = INK.g,
+        b = INK.b,
+        label = escape(label),
+    );
+    let vector = crate::svg::from_str(&document)?;
+    let pixels = vector.rasterize(LongSide::new(px_w.max(px_h)))?;
+    let box_ = region::crop(center - box_w / 2.0, baseline - descent, box_w, box_h);
+    Ok(Some(scene::image_of(box_, pixels)))
+}
+
 /// The file, opened and dropped, so a path that vanished fails at open.
 ///
 /// The tree is the sample tree either way: a `.treemap` file carries no data
@@ -867,6 +985,26 @@ impl Surface for TreemapSurface {
         // The layout anchors a region, so a patch paints only the rect the
         // window shows, at the scale it shows it.
         self.with_surface(|surface| surface.render(view))
+    }
+
+    fn display(&self, plane: usize) -> Result<Option<Arc<[Primitive]>>, SurfaceError> {
+        // The layout *is* the list: a rect per tile, the darker band of a group,
+        // and one picture per label. No scale and no region, so a zoom reuses it
+        // and only a resize of the window rebuilds it.
+        if plane != 0 {
+            return Err(SurfaceError::Plane(plane));
+        }
+        let mut canvas = self.canvas.lock().map_err(|_| locked())?;
+        let frame = canvas.frame;
+        if let Some((built, list)) = canvas.scene.as_ref()
+            && *built == frame
+        {
+            return Ok(Some(Arc::clone(list)));
+        }
+        let placed = layout(&self.tree, frame.whole());
+        let list: Arc<[Primitive]> = Arc::from(primitives(&placed, frame)?);
+        canvas.scene = Some((frame, Arc::clone(&list)));
+        Ok(Some(list))
     }
 
     fn progressive(&self) -> Result<Option<Box<dyn ChunkSource>>, SurfaceError> {
@@ -1128,6 +1266,43 @@ mod tests {
             surface.render_whole(3, 1.0),
             Err(SurfaceError::Plane(3))
         ));
+        assert!(matches!(surface.display(1), Err(SurfaceError::Plane(1))));
+    }
+
+    #[test]
+    fn the_display_list_is_the_layout_as_rects() {
+        let surface = TreemapSurface::from_tree(sample_tree());
+        let list = surface.display(0).expect("a list").expect("some");
+        let frame = surface.bounds(0).expect("a frame");
+        let tree = sample_tree();
+        let placed = layout(&tree, frame.whole());
+        // The paper, then one rect per tile: every placed node fills one.
+        let rects = list
+            .iter()
+            .filter(|primitive| matches!(primitive, Primitive::Rect { .. }))
+            .count();
+        assert_eq!(rects, placed.len() + 1);
+        // The map carries labels, so the list carries pictures.
+        assert!(
+            list.iter()
+                .any(|primitive| matches!(primitive, Primitive::Image { .. })),
+            "a labelled map answers at least one label leaf"
+        );
+    }
+
+    #[test]
+    fn one_list_serves_every_zoom_of_a_frame() {
+        let surface = TreemapSurface::from_tree(sample_tree());
+        let first = surface.display(0).expect("a list").expect("some");
+        let again = surface.display(0).expect("a list").expect("some");
+        assert!(Arc::ptr_eq(&first, &again), "the frame's list is built once");
+        // A window of another shape is another frame, so it rebuilds.
+        assert!(surface.frame_window(Size {
+            w: 640.0,
+            h: 480.0
+        }));
+        let resized = surface.display(0).expect("a list").expect("some");
+        assert!(!Arc::ptr_eq(&first, &resized));
     }
 
     #[test]

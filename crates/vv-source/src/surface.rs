@@ -29,6 +29,7 @@ use crate::{
     draw::Color,
     error::DecodeError,
     region,
+    scene::Primitive,
     sign::{self, SignError},
 };
 
@@ -202,6 +203,25 @@ pub trait Surface: Send + Sync {
     ///
     /// The function errors when the stream cannot be opened.
     fn progressive(&self) -> Result<Option<Box<dyn ChunkSource>>, SurfaceError>;
+
+    /// The primitives of `plane`, in surface units, or `None` when this backend
+    /// answers a raster only.
+    ///
+    /// The list holds no scale and no region: a zoom or a pan changes the
+    /// transform of a draw and never the list, so a caller builds it once per
+    /// plane and draws it every frame.
+    /// The default answers `None`, which leaves [`Self::render`] and
+    /// [`Self::render_whole`] as the only path a backend has to write, so a
+    /// backend opts into a list one at a time and no source ever disagrees with
+    /// itself about which answer it means.
+    ///
+    /// # Errors
+    ///
+    /// The function errors when the plane index is out of range, or when
+    /// building the list fails.
+    fn display(&self, _plane: usize) -> Result<Option<Arc<[Primitive]>>, SurfaceError> {
+        Ok(None)
+    }
 
     /// Whether the loader sends a fast low-resolution preview before the
     /// full-quality render.

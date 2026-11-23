@@ -98,6 +98,30 @@ pub fn rect_of(crop: region::Crop) -> Rect {
     )
 }
 
+/// An image leaf covering `crop`.
+///
+/// The transform maps the picture's pixels onto the box in surface units, so a
+/// producer names the box it means and never an [`Affine`].
+/// An empty box or an empty picture carries no scale, because neither has a
+/// ratio to compute.
+#[must_use]
+pub fn image_of(crop: region::Crop, pixels: DecodedImage) -> Primitive {
+    let (box_w, box_h) = (f64::from(crop.width()), f64::from(crop.height()));
+    let (px_w, px_h) = (
+        f64::from(pixels.width().raw()),
+        f64::from(pixels.height().raw()),
+    );
+    let scale = if px_w > 0.0 && px_h > 0.0 {
+        Affine::scale_non_uniform(box_w / px_w, box_h / px_h)
+    } else {
+        Affine::IDENTITY
+    };
+    Primitive::Image {
+        pixels,
+        transform: Affine::translate((f64::from(crop.min_x()), f64::from(crop.min_y()))) * scale,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,5 +148,32 @@ mod tests {
             transform: Affine::IDENTITY,
         };
         assert!(matches!(leaf, Primitive::Image { .. }));
+    }
+
+    #[test]
+    fn an_image_leaf_maps_its_pixels_onto_its_box() {
+        // Four pixels square into a box of twenty by ten: five across and two
+        // and a half down, from the box corner.
+        let pixels = DecodedImage::from_exact(ImgW::new(4), ImgH::new(4), vec![0; 64]);
+        let leaf = image_of(region::crop(10.0, 20.0, 20.0, 10.0), pixels);
+        let Primitive::Image { transform, .. } = leaf else {
+            panic!("an image leaf");
+        };
+        let coeffs = transform.as_coeffs();
+        assert_eq!(
+            (coeffs[0], coeffs[1], coeffs[2], coeffs[3]),
+            (5.0, 0.0, 0.0, 2.5)
+        );
+        assert_eq!((coeffs[4], coeffs[5]), (10.0, 20.0));
+    }
+
+    #[test]
+    fn an_empty_image_leaf_keeps_its_corner() {
+        let pixels = DecodedImage::from_exact(ImgW::new(0), ImgH::new(0), Vec::new());
+        let leaf = image_of(region::crop(3.0, 4.0, 0.0, 0.0), pixels);
+        let Primitive::Image { transform, .. } = leaf else {
+            panic!("an image leaf");
+        };
+        assert_eq!(transform, Affine::translate((3.0, 4.0)));
     }
 }

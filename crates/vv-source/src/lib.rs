@@ -43,7 +43,7 @@ pub mod treemap;
 // The layers below, named through this crate as well, so one `crate::dim` path
 // serves a module of this crate and a caller of it.
 pub use vv_cache as cache;
-pub use vv_core::{dim, draw, region};
+pub use vv_core::{dim, draw, region, scene};
 pub use vv_pixels::{
     DecodeError, DecodedImage, MAX_TEXTURE_SIDE, cap_texture_side, downscale_rgba,
     downscale_rgba_ref, error, fitted, placeholder, resample_rgba,
