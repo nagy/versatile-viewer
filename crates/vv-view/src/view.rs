@@ -863,7 +863,19 @@ impl ViewState {
         let plane = self.source_plane;
         let size = self.img;
         rayon::spawn(move || {
+            let started = Instant::now();
             let list = source.display(plane).ok().flatten();
+            // The build is the one step of a list this viewer cannot see: a
+            // document walks its tree and a map lays itself out, and a slow one
+            // shows as a picture that arrives late.
+            // A source that answers no list reports none, which is what its own
+            // `debug` event beside this one names the reason for.
+            tracing::debug!(
+                ms = started.elapsed().as_secs_f64() * 1000.0,
+                listed = list.is_some(),
+                prims = list.as_ref().map_or(0, |list| list.len()),
+                "display list"
+            );
             let _ = tx.send(CropMsg::Scene {
                 generation,
                 plane: size,
