@@ -17,7 +17,17 @@
 //! [`Unsupported`] names it, and the page then keeps the raster path whole —
 //! the same trade the SVG walk makes. That covers a soft mask (an intermediate
 //! buffer and a luminance pass), a blend mode other than `normal` (the backdrop),
-//! and a shading or a tiling pattern (a painted function or a repeated tile).
+//! a tiling pattern (a repeated tile) and the shadings that a ramp cannot state.
+//!
+//! # Shadings
+//!
+//! A gradient background is a *shading pattern*, and it answers a
+//! [`Paint::Linear`] or a [`Paint::Radial`] — the same two ramps the SVG walk
+//! builds. `hayro` encodes the shading and samples its function into stops, so
+//! both paths read the same colours, and the transform the encoded shading
+//! carries already maps its own space into the page, because the interpreter
+//! pre-composes the pattern's matrix with the page — so the ramp's axis needs no
+//! placement of its own.
 //!
 //! # Glyphs
 //!
@@ -34,9 +44,12 @@ use std::sync::Arc;
 use hayro::hayro_interpret::{
     BlendMode, ClipPath, Device, DrawMode, DrawProps, FillRule, Image, ImageData, ImageDrawProps,
     Paint as PdfPaint, StrokeProps,
+    encode::EncodedShadingType,
     font::{Glyph, GlyphRun},
+    gradient::SvgGradientKind,
+    pattern::{Pattern as PdfPattern, ShadingPattern},
 };
-use kurbo::{Affine, BezPath};
+use kurbo::{Affine, BezPath, Point, Rect, Shape};
 
 use crate::{
     DecodedImage,
@@ -53,6 +66,21 @@ use crate::{
 /// other primitive of the page lands on it.
 const PAPER: Color = Color::new(255, 255, 255, 255);
 
+/// The largest colour error a ramp may carry against the shading it replaces.
+///
+/// A shading is a function sampled at every pixel, and a ramp is a list of stops
+/// the renderer interpolates between. `hayro` approximates the same shading with
+/// the same ramp at this tolerance, so both paths read the same colours out of
+/// the same function.
+const RAMP_TOLERANCE: f32 = 0.01;
+
+/// How far from square and round a transform may sit and still count as a
+/// similarity, relative to its own scale.
+///
+/// A page's transform is exact apart from rounding, so a squeezed shading misses
+/// this by whole percent rather than by a hair.
+const SIMILARITY: f64 = 1.0e-6;
+
 /// What a page needs that a primitive list cannot express.
 ///
 /// A caller that reads one of these answers no list, so the page keeps the
@@ -63,8 +91,15 @@ pub(crate) enum Unsupported {
     Mask,
     /// A blend mode other than `normal`, which needs the backdrop.
     Blend,
-    /// A shading or a tiling pattern, which needs a painted function or a
-    /// repeated tile.
+    /// A shading that a ramp of this list cannot state.
+    ///
+    /// That covers a function-based or a mesh shading, which paints a function
+    /// over an area rather than along an axis; a shading that does not cover the
+    /// shape it paints, where a ramp would pad past its last stop; and a radial
+    /// shading whose matrix squeezes its circles into ellipses, which two
+    /// circular ramps cannot draw.
+    Shading,
+    /// A tiling pattern, which needs a tile drawn once and repeated.
     Pattern,
 }
 
@@ -75,6 +110,7 @@ impl Unsupported {
         match self {
             Self::Mask => "soft mask",
             Self::Blend => "blend mode",
+            Self::Shading => "shading",
             Self::Pattern => "pattern",
         }
     }
@@ -83,6 +119,11 @@ impl Unsupported {
 /// One page, walked into the primitives that draw it.
 pub(crate) struct PdfScene {
     out: Vec<Primitive>,
+    /// The page's own box, in render space.
+    ///
+    /// A ramp has to know the area it covers, and `hayro` clips that area to its
+    /// target, which for this walk is the page.
+    page: Rect,
     /// The feature that stopped the walk.
     ///
     /// The walk stops at the first one, because a page that needs it keeps the
@@ -93,11 +134,13 @@ pub(crate) struct PdfScene {
 impl PdfScene {
     /// A collector that holds a page of `width` by `height`, paper included.
     pub(crate) fn new(width: f32, height: f32) -> Self {
+        let page = Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
         Self {
             out: vec![Primitive::Rect {
-                rect: scene::rect_of(crate::region::crop(0.0, 0.0, width, height)),
+                rect: page,
                 paint: Paint::Solid(PAPER),
             }],
+            page,
             stop: None,
         }
     }
@@ -120,17 +163,139 @@ impl PdfScene {
         self.stop.is_some()
     }
 
-    /// The solid paint of `paint`, or the pattern that stops the walk.
-    fn solid(&mut self, paint: &PdfPaint<'_>) -> Option<Paint> {
+    /// The paint of a shape of `shape`'s box, and the clip its shading carries.
+    ///
+    /// `shape` is the box the paint has to cover, in surface units.
+    /// `None` stops the walk: nothing of this page may enter the list after a
+    /// paint it cannot state.
+    fn paint_of(&mut self, paint: &PdfPaint<'_>, shape: Rect) -> Option<(Paint, Option<BezPath>)> {
         match paint {
             PdfPaint::Color(color) => {
                 let [r, g, b, a] = color.to_rgba().to_rgba8();
-                Some(Paint::Solid(Color::new(r, g, b, a)))
+                Some((Paint::Solid(Color::new(r, g, b, a)), None))
             }
-            PdfPaint::Pattern(_) => {
-                self.stop(Unsupported::Pattern);
-                None
+            PdfPaint::Pattern(pattern) => match pattern.as_ref() {
+                PdfPattern::Shading(shading) => self.ramp(shading, shape),
+                PdfPattern::Tiling(_) => {
+                    // A tile has to render once and repeat, which the list
+                    // cannot say yet.
+                    self.stop(Unsupported::Pattern);
+                    None
+                }
+            },
+        }
+    }
+
+    /// A shading as a ramp in surface units, and the box it clips itself to.
+    ///
+    /// `hayro` encodes the shading and approximates its colour function with
+    /// stops, so this walk and the raster path read the same function at the same
+    /// tolerance.
+    /// A pattern's matrix is anchored in the default space of the page, not in
+    /// the transform of the draw, and `hayro` pre-composes that space into the
+    /// matrix, so the transform the encoded shading carries already lands in the
+    /// render space: composing the draw's transform as well would apply it twice
+    /// and move every ramp.
+    fn ramp(&mut self, pattern: &ShadingPattern, shape: Rect) -> Option<(Paint, Option<BezPath>)> {
+        let encoded = pattern.encode();
+        let EncodedShadingType::RadialAxial(gradient) = &encoded.shading_type else {
+            // A function-based shading paints a function over an area and a mesh
+            // shading paints sampled corners: neither runs along an axis.
+            self.stop(Unsupported::Shading);
+            return None;
+        };
+        let Some(native) = gradient.as_svg_gradient(&encoded, shape, RAMP_TOLERANCE) else {
+            // The shading does not cover the shape it paints — its extend is off,
+            // or it lays its own background down — and a ramp pads past its last
+            // stop, so it would paint where the page paints nothing.
+            self.stop(Unsupported::Shading);
+            return None;
+        };
+        let space = native.transform;
+        let stops: Arc<[scene::Stop]> = native
+            .stops
+            .iter()
+            .map(|stop| scene::Stop {
+                offset: stop.offset,
+                color: srgb(stop.color),
+            })
+            .collect();
+        let paint = match native.kind {
+            SvgGradientKind::Linear { start, end } => Paint::Linear {
+                from: placed(space, start),
+                to: placed(space, end),
+                stops,
+                spread: scene::Spread::Pad,
+            },
+            SvgGradientKind::Radial {
+                start_center,
+                start_radius,
+                end_center,
+                end_radius,
+            } => {
+                // A ramp of this list is a pair of circles. A shading matrix that
+                // squeezes or shears turns those circles into ellipses, and
+                // drawing them round would paint a different picture, so the page
+                // keeps the raster path.
+                let Some(scale) = similarity(space) else {
+                    self.stop(Unsupported::Shading);
+                    return None;
+                };
+                Paint::Radial {
+                    center: placed(space, end_center),
+                    radius: f64::from(end_radius) * scale,
+                    focus: placed(space, start_center),
+                    focus_radius: f64::from(start_radius) * scale,
+                    stops,
+                    spread: scene::Spread::Pad,
+                }
             }
+        };
+        let clip = pattern.shading.clip_path.clone();
+        Some((paint, clip))
+    }
+
+    /// The paint of a path drawn by `props`, its own box placed in the page.
+    fn path_paint(
+        &mut self,
+        props: &DrawProps<'_>,
+        path: &BezPath,
+        draw_mode: &DrawMode,
+    ) -> Option<(Paint, Option<BezPath>)> {
+        let mut shape = props.transform.transform_rect_bbox(path.bounding_box());
+        // `hayro` widens the box of a stroke by the width its outline takes, so a
+        // ramp is measured against the ink and not the centre line.
+        let width = match draw_mode {
+            DrawMode::Stroke(stroke) | DrawMode::FillAndStroke(_, stroke) => stroke.line_width,
+            DrawMode::Fill(_) | DrawMode::Invisible => 0.0,
+        };
+        if width > 0.0 {
+            let factor = longest_advance(props.transform) * f64::from(width);
+            shape = shape.inflate(factor, factor);
+        }
+        self.paint_of(&props.paint, shape.intersect(self.page))
+    }
+
+    /// Open the clip a shading carries, and answer whether it did.
+    ///
+    /// A shading names its own box, which `hayro` composes into device space, so
+    /// the path lands in the render space as it is.
+    fn open_clip(&mut self, clip: Option<&BezPath>) -> bool {
+        let Some(path) = clip else {
+            return false;
+        };
+        self.out.push(Primitive::PushClip {
+            path: path.clone(),
+            transform: Affine::IDENTITY,
+            fill_rule: scene::FillRule::NonZero,
+        });
+        true
+    }
+
+    /// Close the clip [`Self::open_clip`] opened.
+    fn close_clip(&mut self, opened: bool) {
+        if opened {
+            self.out.push(Primitive::PopClip);
         }
     }
 
@@ -152,13 +317,7 @@ impl PdfScene {
     /// The placement of every glyph is baked into its outline, so the run draws
     /// as one shape and one primitive, and a translucent paint lands once
     /// instead of once per glyph.
-    fn fill_run(
-        &mut self,
-        glyph_run: &GlyphRun<'_, '_>,
-        props: &DrawProps<'_>,
-        rule: FillRule,
-        paint: Paint,
-    ) {
+    fn fill_run(&mut self, glyph_run: &GlyphRun<'_, '_>, props: &DrawProps<'_>, rule: FillRule) {
         let mut merged = BezPath::new();
         for glyph in glyph_run.glyphs() {
             let Glyph::Outline(outline) = &**glyph else {
@@ -170,6 +329,13 @@ impl PdfScene {
         if merged.elements().is_empty() {
             return;
         }
+        // The outlines are already in the page, so the paint is measured against
+        // them where they are.
+        let shape = merged.bounding_box().intersect(self.page);
+        let Some((paint, clip)) = self.paint_of(&props.paint, shape) else {
+            return;
+        };
+        let opened = self.open_clip(clip.as_ref());
         self.out.push(Primitive::Path {
             path: merged,
             transform: Affine::IDENTITY,
@@ -177,6 +343,7 @@ impl PdfScene {
             fill_rule: fill_rule(rule),
             stroke: None,
         });
+        self.close_clip(opened);
     }
 
     /// Append the stroke of one glyph run, one path per glyph.
@@ -189,27 +356,49 @@ impl PdfScene {
         glyph_run: &GlyphRun<'_, '_>,
         props: &DrawProps<'_>,
         stroke: &StrokeProps,
-        paint: &Paint,
     ) {
+        let mut outlines = Vec::new();
         for glyph in glyph_run.glyphs() {
             let Glyph::Outline(outline) = &**glyph else {
                 continue;
             };
             let placed = glyph.transform() * outline.outline();
-            if placed.elements().is_empty() {
-                continue;
+            if !placed.elements().is_empty() {
+                outlines.push(placed);
             }
+        }
+        if outlines.is_empty() {
+            return;
+        }
+        // The box of the ink: every outline of the run, widened by the join the
+        // widest corner of the stroke takes.
+        let extent = f64::from(stroke.line_width) / 2.0
+            * f64::from(stroke.miter_limit).max(std::f64::consts::SQRT_2);
+        let union = outlines.iter().fold(Rect::ZERO, |area, outline| {
+            area.union(outline.bounding_box())
+        });
+        let shape = props
+            .transform
+            .transform_rect_bbox(union.inflate(extent, extent))
+            .intersect(self.page);
+        let Some((paint, clip)) = self.paint_of(&props.paint, shape) else {
+            return;
+        };
+        let opened = self.open_clip(clip.as_ref());
+        let style = outline_style(stroke);
+        for placed in outlines {
             self.out.push(Primitive::Path {
                 path: placed,
                 transform: props.transform,
                 fill: None,
                 fill_rule: scene::FillRule::NonZero,
                 stroke: Some(Stroke {
-                    style: outline_style(stroke),
+                    style: style.clone(),
                     paint: paint.clone(),
                 }),
             });
         }
+        self.close_clip(opened);
     }
 
     /// Append one picture, in the box its transform names.
@@ -239,7 +428,10 @@ impl<'a> Device<'a> for PdfScene {
         if self.stopped() || !self.drawable(props.soft_mask.is_some(), props.blend_mode) {
             return;
         }
-        let Some(paint) = self.solid(&props.paint) else {
+        if matches!(draw_mode, DrawMode::Invisible) {
+            return;
+        }
+        let Some((paint, clip)) = self.path_paint(&props, path, draw_mode) else {
             return;
         };
         let (fill, stroke) = match draw_mode {
@@ -258,8 +450,10 @@ impl<'a> Device<'a> for PdfScene {
                     paint,
                 }),
             ),
+            // An invisible draw lays down no paint, and returned above.
             DrawMode::Invisible => return,
         };
+        let opened = self.open_clip(clip.as_ref());
         self.out.push(Primitive::Path {
             path: path.clone(),
             transform: props.transform,
@@ -267,6 +461,7 @@ impl<'a> Device<'a> for PdfScene {
             fill_rule: fill.map_or(scene::FillRule::NonZero, |(_, rule)| rule),
             stroke,
         });
+        self.close_clip(opened);
     }
 
     fn push_clip_path(&mut self, clip_path: &ClipPath) {
@@ -315,9 +510,6 @@ impl<'a> Device<'a> for PdfScene {
         if self.stopped() || !self.drawable(props.soft_mask.is_some(), props.blend_mode) {
             return;
         }
-        let Some(paint) = self.solid(&props.paint) else {
-            return;
-        };
         let outlines_only = glyph_run
             .glyphs()
             .iter()
@@ -334,11 +526,11 @@ impl<'a> Device<'a> for PdfScene {
             return;
         }
         match draw_mode {
-            DrawMode::Fill(rule) => self.fill_run(glyph_run, &props, *rule, paint),
-            DrawMode::Stroke(stroke) => self.stroke_run(glyph_run, &props, stroke, &paint),
+            DrawMode::Fill(rule) => self.fill_run(glyph_run, &props, *rule),
+            DrawMode::Stroke(stroke) => self.stroke_run(glyph_run, &props, stroke),
             DrawMode::FillAndStroke(rule, stroke) => {
-                self.fill_run(glyph_run, &props, *rule, paint.clone());
-                self.stroke_run(glyph_run, &props, stroke, &paint);
+                self.fill_run(glyph_run, &props, *rule);
+                self.stroke_run(glyph_run, &props, stroke);
             }
             DrawMode::Invisible => {}
         }
@@ -361,8 +553,8 @@ impl<'a> Device<'a> for PdfScene {
             Image::Stencil(stencil) => stencil.with_stencil(
                 |mask, paint| {
                     let PdfPaint::Color(color) = paint else {
-                        // A stencil painted by a pattern needs the pattern work
-                        // the walk does not do.
+                        // A stencil painted by a pattern needs a mask under a
+                        // ramp, which the list cannot say yet.
                         self.stop(Unsupported::Pattern);
                         return;
                     };
@@ -384,6 +576,45 @@ const fn fill_rule(rule: FillRule) -> scene::FillRule {
         FillRule::NonZero => scene::FillRule::NonZero,
         FillRule::EvenOdd => scene::FillRule::EvenOdd,
     }
+}
+
+/// One stop colour of a ramp, out of the shading's sRGB components.
+///
+/// A shading function answers straight-alpha components in 0..1 and a stop wants
+/// bytes, so the clamp keeps a function that overshoots from wrapping.
+fn srgb(rgba: [f32; 4]) -> Color {
+    let [r, g, b, a] = rgba.map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8);
+    Color::new(r, g, b, a)
+}
+
+/// Where a point of a shading's own space lands in surface units.
+fn placed(space: Affine, point: Point) -> (f64, f64) {
+    let point = space * point;
+    (point.x, point.y)
+}
+
+/// The scale of `space` where it is a similarity, or `None` where it squeezes or
+/// shears.
+///
+/// A ramp of this list is a pair of circles, so its geometry only survives a
+/// transform that keeps circles round: two equal axes that stay square to each
+/// other.
+fn similarity(space: Affine) -> Option<f64> {
+    let [xx, yx, xy, yy, _, _] = space.as_coeffs();
+    let (x, y) = (xx.hypot(yx), xy.hypot(yy));
+    let longest = x.max(y);
+    let square = (x - y).abs() <= longest * SIMILARITY;
+    let round = (xx * xy + yx * yy).abs() <= longest * longest * SIMILARITY;
+    (square && round).then(|| f64::midpoint(x, y))
+}
+
+/// The longest of the two axis advances of `space`.
+///
+/// A stroke of a width named in a shape's own units lands on the page stretched
+/// by the axes of its placement, so the wider axis measures its ink.
+fn longest_advance(space: Affine) -> f64 {
+    let [xx, yx, xy, yy, _, _] = space.as_coeffs();
+    xx.hypot(yx).max(xy.hypot(yy))
 }
 
 /// The outline style of a PDF stroke.
@@ -503,6 +734,286 @@ endstream
 endobj
 trailer<</Root 1 0 R/Size 6>>";
         PdfSurface::from_bytes(PICTURE.to_vec()).expect("the picture fixture parses")
+    }
+
+    /// A one-page document whose whole page is painted by the shading `shading`
+    /// names, under the pattern `matrix`.
+    ///
+    /// The page is 200 by 100 and its shading covers all of it, so a ramp built
+    /// from it spans the page and is easy to read back.
+    fn shaded_page(shading: &str, matrix: &str) -> PdfSurface {
+        let content = "/Pattern cs /P1 scn 0 0 200 100 re f\n";
+        let document = format!(
+            "%PDF-1.4
+1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj
+2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj
+3 0 obj<</Type/Page/Parent 2 0 R/MediaBox [0 0 200 100]/Contents 4 0 R/Resources<</Pattern<</P1 5 \
+             0 R>>>>>>endobj
+4 0 obj<</Length {}>>stream
+{content}endstream
+endobj
+5 0 obj<</Type/Pattern/PatternType 2/Shading 6 0 R/Matrix [{matrix}]>>endobj
+6 0 obj<</ShadingType {shading}/Function 7 0 R/Extend [true true]>>endobj
+7 0 obj<</FunctionType 2/Domain [0 1]/C0 [1 0 0]/C1 [0 0 1]/N 1>>endobj
+trailer<</Root 1 0 R/Size 8>>",
+            content.len()
+        );
+        PdfSurface::from_bytes(document.into_bytes()).expect("the shading fixture parses")
+    }
+
+    /// A page painted by an axial shading from its left edge to its right.
+    ///
+    /// The shading runs in the page's own space with the y axis up, so the ramp
+    /// lands on the bottom edge of the render space, where the y axis points
+    /// down.
+    fn axial_page(matrix: &str) -> PdfSurface {
+        shaded_page("2/ColorSpace/DeviceRGB/Coords [0 0 200 0]", matrix)
+    }
+
+    /// A page painted by a radial shading: one centre, two radii.
+    fn radial_page(matrix: &str) -> PdfSurface {
+        shaded_page("3/ColorSpace/DeviceRGB/Coords [0 0 0 0 0 1]", matrix)
+    }
+
+    /// The one path a shaded page draws, with its fill.
+    fn shaded_fill(surface: &PdfSurface) -> Paint {
+        let list = surface
+            .display(0)
+            .expect("a list")
+            .expect("a shaded page lists");
+        let fills = list
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::Path { fill, .. } => fill.clone(),
+                // Every other leaf lays down no fill.
+                Primitive::Rect { .. }
+                | Primitive::Image { .. }
+                | Primitive::Glyphs { .. }
+                | Primitive::PushClip { .. }
+                | Primitive::PopClip
+                | Primitive::PushLayer { .. }
+                | Primitive::PopLayer => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(fills.len(), 1, "one shaded shape: {list:?}");
+        fills.into_iter().next().expect("one fill")
+    }
+
+    /// An axial shading answers a ramp from one edge of the page to the other.
+    ///
+    /// The stop colours come from the shading's function, so the first is the
+    /// function's value at zero and the last its value at one — the same samples
+    /// `hayro` reads when it rasterizes the page.
+    #[test]
+    fn an_axial_shading_answers_a_ramp_across_the_page() {
+        // The pattern's matrix is the identity, so the shading runs in points.
+        let fill = shaded_fill(&axial_page("1 0 0 1 0 0"));
+        let Paint::Linear {
+            from,
+            to,
+            stops,
+            spread,
+        } = fill
+        else {
+            panic!("an axial shading is a linear ramp: {fill:?}");
+        };
+        assert!(
+            (from.0).abs() < 1e-6
+                && (from.1 - 100.0).abs() < 1e-6
+                && (to.0 - 200.0).abs() < 1e-6
+                && (to.1 - 100.0).abs() < 1e-6,
+            "the ramp runs along the bottom edge of the render space: {from:?} to {to:?}"
+        );
+        assert_eq!(spread, scene::Spread::Pad, "a ramp pads past its ends");
+        assert_eq!(
+            stops.first().map(|stop| stop.color),
+            Some(Color::new(255, 0, 0, 255))
+        );
+        assert_eq!(
+            stops.last().map(|stop| stop.color),
+            Some(Color::new(0, 0, 255, 255))
+        );
+        assert_eq!(
+            (stops.first(), stops.last()),
+            (
+                Some(&scene::Stop {
+                    offset: 0.0,
+                    color: Color::new(255, 0, 0, 255)
+                }),
+                Some(&scene::Stop {
+                    offset: 1.0,
+                    color: Color::new(0, 0, 255, 255)
+                })
+            ),
+            "the function's ends are the ramp's ends"
+        );
+    }
+
+    /// The pattern's matrix places the ramp, not only the colours.
+    ///
+    /// The matrix maps the shading's own space onto the page's default space, so
+    /// squeezing it by twenty shortens the ramp and moving it moves the ramp.
+    #[test]
+    fn a_shading_matrix_places_its_ramp() {
+        let fill = shaded_fill(&axial_page("0.05 0 0 1 10 0"));
+        let Paint::Linear { from, to, .. } = fill else {
+            panic!("an axial shading is a linear ramp: {fill:?}");
+        };
+        assert!(
+            (from.0 - 10.0).abs() < 1e-6
+                && (to.0 - 20.0).abs() < 1e-6
+                && (from.1 - 100.0).abs() < 1e-6
+                && (to.1 - 100.0).abs() < 1e-6,
+            "the ramp covers the box the matrix names: {from:?} to {to:?}"
+        );
+    }
+
+    /// A one-page document painted by a shading `extra` describes.
+    ///
+    /// The entries go into the shading dictionary, so a test states the one it
+    /// cares about — a box of its own, an extend, or neither — and nothing else.
+    fn shading_with(extra: &str) -> PdfSurface {
+        let content = "/Pattern cs /P1 scn 0 0 200 100 re f\n";
+        let document = format!(
+            "%PDF-1.4
+1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj
+2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj
+3 0 obj<</Type/Page/Parent 2 0 R/MediaBox [0 0 200 100]/Contents 4 0 R/Resources<</Pattern<</P1 5 \
+             0 R>>>>>>endobj
+4 0 obj<</Length {}>>stream
+{content}endstream
+endobj
+5 0 obj<</Type/Pattern/PatternType 2/Shading 6 0 R>>endobj
+6 0 obj<</ShadingType 2/ColorSpace/DeviceRGB/Coords [0 0 20 0]/Function 7 0 R{extra}>>endobj
+7 0 obj<</FunctionType 2/Domain [0 1]/C0 [1 0 0]/C1 [0 0 1]/N 1>>endobj
+trailer<</Root 1 0 R/Size 8>>",
+            content.len()
+        );
+        PdfSurface::from_bytes(document.into_bytes()).expect("the fixture parses")
+    }
+
+    /// A shading that names its own box clips the shape it paints to it.
+    ///
+    /// `hayro` hands the box to its rasterizer as a clip, so a list that ignored
+    /// it would paint the ramp's padding outside the box the page drew.
+    #[test]
+    fn a_shading_clips_itself_to_its_box() {
+        // The box covers the lower half of the page in the page's own space,
+        // which is the lower half of the render space once the y axis flips.
+        let list = shading_with("/Extend [true true]/BBox [0 0 200 50]")
+            .display(0)
+            .expect("a list")
+            .expect("a shaded page lists");
+        let kinds = list
+            .iter()
+            .map(|primitive| match primitive {
+                Primitive::Rect { .. } => "rect",
+                Primitive::Path { .. } => "path",
+                Primitive::PushClip { .. } => "push",
+                Primitive::PopClip => "pop",
+                Primitive::Image { .. } => "image",
+                Primitive::Glyphs { .. } => "glyphs",
+                Primitive::PushLayer { .. } => "layer",
+                Primitive::PopLayer => "unlayer",
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            ["rect", "push", "path", "pop"],
+            "the box wraps the shape it paints: {list:?}"
+        );
+        let Primitive::PushClip {
+            path, transform, ..
+        } = &list[1]
+        else {
+            panic!("a clip comes first: {list:?}");
+        };
+        assert_eq!(*transform, Affine::IDENTITY, "the box lands in the page");
+        let bounds = kurbo::Shape::bounding_box(path);
+        assert_eq!(
+            (bounds.x0, bounds.y0, bounds.x1, bounds.y1),
+            (0.0, 50.0, 200.0, 100.0),
+            "the box is the one the shading names"
+        );
+    }
+
+    /// A shading that stops inside the shape keeps the raster path.
+    ///
+    /// A ramp pads past its last stop, so carrying this one would paint the
+    /// ramp's end colour over the whole page where the page paints nothing.
+    #[test]
+    fn a_shading_that_misses_its_shape_answers_no_list() {
+        let surface = shading_with("/Extend [false false]");
+        assert!(
+            surface.display(0).expect("an answer").is_none(),
+            "a ramp that pads past its ends is not the shading the page names"
+        );
+    }
+
+    /// A radial shading answers a pair of circles in surface units.
+    #[test]
+    fn a_radial_shading_answers_a_circle() {
+        // A circle of radius one, scaled by a hundred and moved to the page.
+        let fill = shaded_fill(&radial_page("100 0 0 100 100 50"));
+        let Paint::Radial {
+            center,
+            radius,
+            focus,
+            focus_radius,
+            ..
+        } = fill
+        else {
+            panic!("a radial shading is a radial ramp: {fill:?}");
+        };
+        assert!(
+            (center.0 - 100.0).abs() < 1e-6 && (center.1 - 50.0).abs() < 1e-6,
+            "the ramp is centred where the matrix puts it: {center:?}"
+        );
+        assert!(
+            (radius - 100.0).abs() < 1e-6,
+            "its radius is a hundred points"
+        );
+        assert!((focus_radius).abs() < 1e-6, "the inner circle is a point");
+        assert!(
+            (focus.0 - center.0).abs() < 1e-6 && (focus.1 - center.1).abs() < 1e-6,
+            "a concentric shading has one centre"
+        );
+    }
+
+    /// A radial shading squeezed into an ellipse keeps the raster path.
+    ///
+    /// A ramp of this list is a pair of circles, so drawing a squeezed one round
+    /// would paint a picture nobody drew.
+    #[test]
+    fn a_squeezed_radial_shading_answers_no_list() {
+        let surface = radial_page("200 0 0 50 0 0");
+        assert!(
+            surface.display(0).expect("an answer").is_none(),
+            "an elliptical ramp is not a circle pair"
+        );
+    }
+
+    /// A tiling pattern keeps the raster path, because a tile has to repeat.
+    #[test]
+    fn a_tiling_pattern_answers_no_list() {
+        const TILED: &[u8] = b"%PDF-1.4
+1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj
+2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj
+3 0 obj<</Type/Page/Parent 2 0 R/MediaBox [0 0 100 100]/Contents 4 0 R/Resources<</Pattern<</P1 5 0 R>>>>>>endobj
+4 0 obj<</Length 32>>stream
+/Pattern cs /P1 scn 0 0 100 100 re f
+endstream
+endobj
+5 0 obj<</Type/Pattern/PatternType 1/PaintType 1/TilingType 1/BBox [0 0 10 10]/XStep 10/YStep 10/Length 26>>stream
+1 0 0 rg 0 0 10 10 re f
+endstream
+endobj
+trailer<</Root 1 0 R/Size 6>>";
+        let surface = PdfSurface::from_bytes(TILED.to_vec()).expect("the fixture parses");
+        assert!(
+            surface.display(0).expect("an answer").is_none(),
+            "a repeated tile is not a ramp"
+        );
     }
 
     /// A line of text is one run, and one run is one merged path.

@@ -115,6 +115,60 @@ pub enum Paint {
     },
 }
 
+impl Paint {
+    /// This paint placed by `at`.
+    ///
+    /// A solid colour has nowhere to go, but a ramp's axis and circles are
+    /// geometry in the units of the plane it was built for, so a list that moves
+    /// whole — a book places one list per page — moves its ramps as well.
+    /// A radial is a pair of circles and `at` may squeeze them into ellipses,
+    /// where a ramp of this list has no shape to say so: the radius takes the
+    /// mean of the two axes, the reading [`crate::scene`]'s SVG walk makes for a
+    /// squashed `gradientTransform`.
+    #[must_use]
+    pub fn placed(&self, at: Affine) -> Self {
+        match self {
+            Self::Solid(color) => Self::Solid(*color),
+            Self::Linear {
+                from,
+                to,
+                stops,
+                spread,
+            } => Self::Linear {
+                from: placed_point(at, *from),
+                to: placed_point(at, *to),
+                stops: Arc::clone(stops),
+                spread: *spread,
+            },
+            Self::Radial {
+                center,
+                radius,
+                focus,
+                focus_radius,
+                stops,
+                spread,
+            } => {
+                let [xx, yx, xy, yy, _, _] = at.as_coeffs();
+                let scale = f64::midpoint(xx.hypot(yx), xy.hypot(yy));
+                Self::Radial {
+                    center: placed_point(at, *center),
+                    radius: radius * scale,
+                    focus: placed_point(at, *focus),
+                    focus_radius: focus_radius * scale,
+                    stops: Arc::clone(stops),
+                    spread: *spread,
+                }
+            }
+        }
+    }
+}
+
+/// A surface point of a ramp, placed by `at`.
+fn placed_point(at: Affine, point: (f64, f64)) -> (f64, f64) {
+    let placed = at * kurbo::Point::new(point.0, point.1);
+    (placed.x, placed.y)
+}
+
 /// An outline drawn around a shape.
 ///
 /// The style is `kurbo`'s, because it already carries the width, the caps, the
@@ -236,7 +290,9 @@ impl Primitive {
     ///
     /// A list is written for one plane, so a caller that stacks several of them
     /// — a book places one list per page — moves each one whole.
-    /// A transform on the primitive takes `at` on the left.
+    /// A transform on the primitive takes `at` on the left, and a ramp inside a
+    /// paint moves with it (see [`Paint::placed`]), because a ramp is written in
+    /// the units of the plane its list was built for.
     /// A [`Self::Rect`] carries no transform of its own, so a placed rect is a
     /// path in the shape of that rect with `at` around it: the same leaf, in the
     /// one form that can be moved.
@@ -246,7 +302,7 @@ impl Primitive {
             Self::Rect { rect, paint } => Self::Path {
                 path: kurbo::Shape::to_path(rect, 0.1),
                 transform: at,
-                fill: Some(paint.clone()),
+                fill: Some(paint.placed(at)),
                 fill_rule: FillRule::NonZero,
                 stroke: None,
             },
@@ -259,9 +315,12 @@ impl Primitive {
             } => Self::Path {
                 path: path.clone(),
                 transform: at * *transform,
-                fill: fill.clone(),
+                fill: fill.as_ref().map(|paint| paint.placed(at)),
                 fill_rule: *fill_rule,
-                stroke: stroke.clone(),
+                stroke: stroke.as_ref().map(|outline| Stroke {
+                    style: outline.style.clone(),
+                    paint: outline.paint.placed(at),
+                }),
             },
             Self::Image { pixels, transform } => Self::Image {
                 pixels: pixels.clone(),
@@ -274,7 +333,7 @@ impl Primitive {
             } => Self::Glyphs {
                 run: run.clone(),
                 transform: at * *transform,
-                paint: paint.clone(),
+                paint: paint.placed(at),
             },
             Self::PushClip {
                 path,
@@ -405,6 +464,72 @@ mod tests {
         );
         assert_eq!(Primitive::PopClip.placed(at), Primitive::PopClip);
         assert_eq!(Primitive::PopLayer.placed(at), Primitive::PopLayer);
+    }
+
+    /// A ramp moves with the list that carries it.
+    ///
+    /// A ramp's axis and circles are geometry in the units of the plane its list
+    /// was built for, so a list placed into another plane has to carry its ramps
+    /// along: a book stacks pages in base units, and a ramp left in page points
+    /// would paint the colour of one place over another.
+    #[test]
+    fn a_placed_ramp_moves_with_its_plane() {
+        let at = Affine::scale(2.0) * Affine::translate((10.0, 20.0));
+        let stops: Arc<[Stop]> = Arc::from(vec![Stop {
+            offset: 0.0,
+            color: Color::new(1, 2, 3, 255),
+        }]);
+
+        let linear = Paint::Linear {
+            from: (0.0, 0.0),
+            to: (10.0, 0.0),
+            stops: Arc::clone(&stops),
+            spread: Spread::Repeat,
+        };
+        let Paint::Linear {
+            from,
+            to,
+            stops: kept,
+            spread,
+        } = linear.placed(at)
+        else {
+            panic!("a placed ramp stays a ramp");
+        };
+        assert_eq!(
+            (from, to),
+            ((20.0, 40.0), (40.0, 40.0)),
+            "the axis moves as one"
+        );
+        assert_eq!(spread, Spread::Repeat, "and the spread rides along");
+        assert_eq!(
+            *kept, *stops,
+            "the stops are colours, and colours move nowhere"
+        );
+
+        let radial = Paint::Radial {
+            center: (4.0, 0.0),
+            radius: 2.0,
+            focus: (0.0, 0.0),
+            focus_radius: 0.0,
+            stops,
+            spread: Spread::Pad,
+        };
+        let Paint::Radial {
+            center,
+            radius,
+            focus,
+            focus_radius,
+            ..
+        } = radial.placed(at)
+        else {
+            panic!("a placed ramp stays a ramp");
+        };
+        assert_eq!((center, focus), ((28.0, 40.0), (20.0, 40.0)));
+        assert_eq!(
+            (radius, focus_radius),
+            (4.0, 0.0),
+            "a scale of two grows the circles"
+        );
     }
 
     #[test]

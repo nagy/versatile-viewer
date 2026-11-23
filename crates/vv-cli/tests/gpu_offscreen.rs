@@ -1624,9 +1624,28 @@ fn a_listed_page_paints_what_the_raster_path_paints() {
         (160, 50, "the green half of the picture"),
         (10, 5, "the paper"),
     ];
-    for (x, y, what) in probes {
+    assert_probes(&pixels, &raster, &probes);
+    // And no corner of the page disagrees by more than an edge does.
+    let mean = mean_difference(&pixels, &raster, (200, 100));
+    assert!(
+        mean <= 8,
+        "the list and the raster paint the same page: mean difference {mean}"
+    );
+}
+
+/// Assert that a painted frame agrees with a rendered picture at `probes`.
+///
+/// A test of two painters asserts a tolerance and never an equality: vello and
+/// `hayro` anti-alias their own way, so an edge is a few shades apart even where
+/// both agree about the geometry.
+fn assert_probes(
+    pixels: &Pixels,
+    raster: &vv_source::DecodedImage,
+    probes: &[(usize, usize, &str)],
+) {
+    for &(x, y, what) in probes {
         let got = pixels.at(x, y);
-        let want = raster_pixel(&raster, x, y);
+        let want = raster_pixel(raster, x, y);
         for channel in 0..4 {
             assert!(
                 got[channel].abs_diff(want[channel]) <= 24,
@@ -1634,21 +1653,21 @@ fn a_listed_page_paints_what_the_raster_path_paints() {
             );
         }
     }
-    // And no corner of the page disagrees by more than an edge does.
+}
+
+/// The mean difference per colour channel between a painted frame and a
+/// rendered picture of the same size.
+fn mean_difference(pixels: &Pixels, raster: &vv_source::DecodedImage, size: (usize, usize)) -> u64 {
     let mut sum = 0u64;
-    for y in 0..100 {
-        for x in 0..200 {
-            let (got, want) = (pixels.at(x, y), raster_pixel(&raster, x, y));
+    for y in 0..size.1 {
+        for x in 0..size.0 {
+            let (got, want) = (pixels.at(x, y), raster_pixel(raster, x, y));
             sum += (0..3)
                 .map(|channel| u64::from(got[channel].abs_diff(want[channel])))
                 .sum::<u64>();
         }
     }
-    let mean = sum / (200 * 100 * 3);
-    assert!(
-        mean <= 8,
-        "the list and the raster paint the same page: mean difference {mean}"
-    );
+    sum / (size.0 as u64 * size.1 as u64 * 3)
 }
 
 /// The pixel of a rendered picture, as RGBA8.
@@ -1662,6 +1681,149 @@ fn raster_pixel(image: &vv_source::DecodedImage, x: usize, y: usize) -> [u8; 4] 
         rgba[start + 2],
         rgba[start + 3],
     ]
+}
+
+/// A 200 by 100 page painted by two shadings: a ramp across the left half and a
+/// pair of circles in the right half.
+///
+/// A shading paints a function rather than a colour, so it is the case a list
+/// can only carry as a ramp — and a ramp placed wrong smears the whole page.
+fn shaded_page() -> Vec<u8> {
+    let content = "/Pattern cs /P1 scn 0 0 100 100 re f\n/Pattern cs /P2 scn 100 0 100 100 re f\n";
+    let objects = vec![
+        b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n".to_vec(),
+        b"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n".to_vec(),
+        b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R \
+          /Resources << /Pattern << /P1 5 0 R /P2 8 0 R >> >> >> endobj\n"
+            .to_vec(),
+        format!(
+            "4 0 obj << /Length {} >> stream\n{content}endstream\nendobj\n",
+            content.len()
+        )
+        .into_bytes(),
+        // The left half: red at the left edge, blue at the middle of the page.
+        b"5 0 obj << /Type /Pattern /PatternType 2 /Shading 6 0 R >> endobj\n".to_vec(),
+        b"6 0 obj << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 100 0] \
+          /Function 7 0 R /Extend [true true] >> endobj\n"
+            .to_vec(),
+        b"7 0 obj << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> endobj\n"
+            .to_vec(),
+        // The right half: a green centre and a white rim, in the unit circle
+        // scaled by fifty and moved into place.
+        b"8 0 obj << /Type /Pattern /PatternType 2 /Shading 9 0 R \
+          /Matrix [50 0 0 50 150 50] >> endobj\n"
+            .to_vec(),
+        b"9 0 obj << /ShadingType 3 /ColorSpace /DeviceRGB /Coords [0 0 0 0 0 1] \
+          /Function 10 0 R /Extend [true true] >> endobj\n"
+            .to_vec(),
+        b"10 0 obj << /FunctionType 2 /Domain [0 1] /C0 [0 0.6 0] /C1 [1 1 1] /N 1 >> endobj\n"
+            .to_vec(),
+    ];
+    pdf_bytes(&objects)
+}
+
+/// A listed page paints the ramps its shadings name, where the raster does.
+///
+/// A shading is a function sampled at every pixel, and the list carries it as a
+/// ramp the renderer interpolates between stops, so the two cannot agree to the
+/// byte — but they land in the same place, with the same colours at the same
+/// points. A ramp anchored in the wrong space smears the page and fails this.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_listed_page_paints_its_shadings() {
+    use vv_core::{
+        dim::{SurfaceSize, WindowSize, WindowVector},
+        region,
+        scene::{Paint, Primitive},
+    };
+
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("shaded.pdf");
+    std::fs::write(&path, shaded_page()).expect("write the pdf");
+    let surface = open_surface(&path).expect("the page opens");
+    let plane = surface.bounds(0).expect("the page measures");
+    let raster = surface.render_whole(0, 1.0).expect("the raster renders");
+    let list = surface.display(0).expect("a list").expect("the page lists");
+    let fills = list
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Primitive::Path {
+                fill: Some(Paint::Linear { .. } | Paint::Radial { .. }),
+                ..
+            } => Some(()),
+            // Every other leaf carries a solid paint or no fill at all.
+            Primitive::Path { .. }
+            | Primitive::Rect { .. }
+            | Primitive::Image { .. }
+            | Primitive::Glyphs { .. }
+            | Primitive::PushClip { .. }
+            | Primitive::PopClip
+            | Primitive::PushLayer { .. }
+            | Primitive::PopLayer => None,
+        })
+        .count();
+    assert_eq!(fills, 2, "both shadings ride the list as ramps: {list:?}");
+
+    let mut canvas = canvas!(200, 100);
+    canvas.begin(CLEAR);
+    let frame = region::Frame {
+        img: SurfaceSize::new(plane.w, plane.h),
+        win: WindowSize::new(200.0, 100.0),
+        pan: WindowVector::zero(),
+        scale: 1.0,
+        angle: 0.0,
+    };
+    let mut pass = canvas
+        .renderer
+        .display_pass(&canvas.device)
+        .expect("a display-list pass");
+    let painted = pass
+        .draw(&canvas.device, &canvas.queue, &list, &frame, canvas.size)
+        .expect("the list draws");
+    canvas.renderer.texture(
+        painted.texture,
+        painted.src,
+        painted.quad,
+        Color::WHITE,
+        Filter::Linear,
+    );
+    let pixels = canvas.print();
+
+    // The ramp runs red at the left edge to blue at the middle of the page, and
+    // the circles go from green at their centre to white at their rim.
+    let probes = [
+        (5, 50, "the red end of the ramp"),
+        (99, 50, "the blue end of the ramp"),
+        (50, 50, "the middle of the ramp"),
+        (150, 50, "the green centre of the circles"),
+        (190, 90, "the white rim of the circles"),
+    ];
+    assert_probes(&pixels, &raster, &probes);
+    // And the ramps paint what the shading names, so a pair of blank shapes
+    // cannot agree with the raster and pass.
+    let [red, _, blue, _] = pixels.at(5, 50);
+    assert!(
+        red > 200 && blue < 60,
+        "the ramp starts red at the left edge: {:?}",
+        pixels.at(5, 50)
+    );
+    let [red, _, blue, _] = pixels.at(99, 50);
+    assert!(
+        blue > 200 && red < 60,
+        "and ends blue at the middle: {:?}",
+        pixels.at(99, 50)
+    );
+    let [red, green, blue, _] = pixels.at(150, 50);
+    assert!(
+        green > 120 && red < 60 && blue < 60,
+        "the circles start green at their centre: {:?}",
+        pixels.at(150, 50)
+    );
+    let mean = mean_difference(&pixels, &raster, (200, 100));
+    assert!(
+        mean <= 8,
+        "the list and the raster paint the same shading: mean difference {mean}"
+    );
 }
 
 /// Build a PDF of `pages` pages, each filled with `color`.
