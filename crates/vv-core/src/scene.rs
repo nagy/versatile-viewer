@@ -231,6 +231,67 @@ pub enum Primitive {
     PopLayer,
 }
 
+impl Primitive {
+    /// This primitive placed by `at`, in the units of a plane of its own.
+    ///
+    /// A list is written for one plane, so a caller that stacks several of them
+    /// — a book places one list per page — moves each one whole.
+    /// A transform on the primitive takes `at` on the left.
+    /// A [`Self::Rect`] carries no transform of its own, so a placed rect is a
+    /// path in the shape of that rect with `at` around it: the same leaf, in the
+    /// one form that can be moved.
+    #[must_use]
+    pub fn placed(&self, at: Affine) -> Self {
+        match self {
+            Self::Rect { rect, paint } => Self::Path {
+                path: kurbo::Shape::to_path(rect, 0.1),
+                transform: at,
+                fill: Some(paint.clone()),
+                fill_rule: FillRule::NonZero,
+                stroke: None,
+            },
+            Self::Path {
+                path,
+                transform,
+                fill,
+                fill_rule,
+                stroke,
+            } => Self::Path {
+                path: path.clone(),
+                transform: at * *transform,
+                fill: fill.clone(),
+                fill_rule: *fill_rule,
+                stroke: stroke.clone(),
+            },
+            Self::Image { pixels, transform } => Self::Image {
+                pixels: pixels.clone(),
+                transform: at * *transform,
+            },
+            Self::Glyphs {
+                run,
+                transform,
+                paint,
+            } => Self::Glyphs {
+                run: run.clone(),
+                transform: at * *transform,
+                paint: paint.clone(),
+            },
+            Self::PushClip {
+                path,
+                transform,
+                fill_rule,
+            } => Self::PushClip {
+                path: path.clone(),
+                transform: at * *transform,
+                fill_rule: *fill_rule,
+            },
+            Self::PopClip => Self::PopClip,
+            Self::PushLayer { alpha } => Self::PushLayer { alpha: *alpha },
+            Self::PopLayer => Self::PopLayer,
+        }
+    }
+}
+
 /// `crop` as an untagged `kurbo` rect.
 ///
 /// [`region::Crop`] carries the surface tag, and a primitive carries none, so
@@ -273,6 +334,78 @@ pub fn image_of(crop: region::Crop, pixels: DecodedImage) -> Primitive {
 mod tests {
     use super::*;
     use crate::dim::{ImgH, ImgW};
+
+    /// A placed primitive carries the placement, one way or another.
+    ///
+    /// A list is written for one plane, and a caller that stacks several of them
+    /// — a book stacks one page per slot — moves each one whole, so the shape
+    /// has to land where `at` puts it and keep the paint it had.
+    #[test]
+    fn a_placed_primitive_moves_with_its_plane() {
+        let at = Affine::scale(2.0) * Affine::translate((10.0, 20.0));
+        let paint = Paint::Solid(Color::new(1, 2, 3, 255));
+        let own = Affine::translate((5.0, 0.0));
+
+        let path = Primitive::Path {
+            path: BezPath::new(),
+            transform: own,
+            fill: Some(paint.clone()),
+            fill_rule: FillRule::EvenOdd,
+            stroke: None,
+        };
+        let Primitive::Path {
+            transform,
+            fill_rule,
+            ..
+        } = path.placed(at)
+        else {
+            panic!("a placed path stays a path");
+        };
+        assert_eq!(transform, at * own, "the placement goes on the left");
+        assert_eq!(fill_rule, FillRule::EvenOdd, "and the rule rides along");
+
+        // A rect carries no transform of its own, so a placed one is a path in
+        // the shape of it, which is the leaf that can be moved.
+        let rect = Primitive::Rect {
+            rect: Rect::new(0.0, 0.0, 4.0, 2.0),
+            paint: paint.clone(),
+        };
+        let Primitive::Path {
+            path,
+            transform,
+            fill,
+            ..
+        } = rect.placed(at)
+        else {
+            panic!("a placed rect is a path");
+        };
+        assert_eq!(transform, at);
+        assert_eq!(fill, Some(paint));
+        // The path is the rect, and `at` puts it where it belongs: `at` scales
+        // by two around the origin and only then moves, so the corner of the
+        // rect lands at (20, 40).
+        let bounds = at.transform_rect_bbox(kurbo::Shape::bounding_box(&path));
+        assert_eq!(bounds, Rect::new(20.0, 40.0, 28.0, 44.0));
+
+        // A clip keeps its shape and takes the placement.
+        let clip = Primitive::PushClip {
+            path: BezPath::new(),
+            transform: own,
+            fill_rule: FillRule::NonZero,
+        };
+        let Primitive::PushClip { transform, .. } = clip.placed(at) else {
+            panic!("a placed clip stays a clip");
+        };
+        assert_eq!(transform, at * own);
+
+        // A layer and the pops carry nothing that can move.
+        assert_eq!(
+            Primitive::PushLayer { alpha: 0.5 }.placed(at),
+            Primitive::PushLayer { alpha: 0.5 }
+        );
+        assert_eq!(Primitive::PopClip.placed(at), Primitive::PopClip);
+        assert_eq!(Primitive::PopLayer.placed(at), Primitive::PopLayer);
+    }
 
     #[test]
     fn a_crop_becomes_its_rect() {

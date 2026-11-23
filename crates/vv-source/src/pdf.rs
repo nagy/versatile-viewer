@@ -22,14 +22,16 @@
 //! Every render runs in `catch_unwind` and degrades to an ordinary render
 //! error, so the viewer never crashes on a bad file.
 
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use derive_more::{Display, Error};
 use hayro::{
     RenderCache, RenderSettings,
-    hayro_interpret::{InterpreterSettings, util::TransformExt},
+    hayro_interpret::{
+        Context, InterpreterCache, InterpreterSettings, interpret_page, util::TransformExt,
+    },
     hayro_syntax::{Pdf, page::Page},
-    kurbo::Affine,
+    kurbo::{Affine, Rect},
     render_into,
     vello_cpu::{
         Pixmap, RasterizerSettings, RenderContext, Resources, TargetInit,
@@ -40,6 +42,7 @@ use hayro::{
 use crate::{
     DecodedImage,
     dim::{ImgH, ImgW},
+    scene::Primitive,
     surface::{ChunkSource, Crop, Size, Surface, SurfaceError, View},
 };
 
@@ -53,6 +56,25 @@ const MAX_RENDER_PIXELS: f64 = 4096.0 * 4096.0 * 1.5;
 /// The largest pixmap side the backend accepts (its pixel dimensions are
 /// `u16`).
 const MAX_RENDER_SIDE: f64 = 65535.0;
+
+/// A minimal single-page PDF (8.5x11 in letter, one text object).
+///
+/// A converted answer of a document is a PDF, so a test of that path needs
+/// bytes the parser accepts.
+/// A test fixture, so it stays behind `#[cfg(test)]`: `vv-view` keeps its own
+/// copy of these bytes, because a crate compiles its own test items alone.
+/// The two copies must stay in step.
+#[cfg(test)]
+pub(crate) const MINIMAL_PDF: &[u8] = b"%PDF-1.4
+1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj
+2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj
+3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj
+4 0 obj<</Length 60>>stream
+BT /F1 24 Tf 72 700 Td (Hello vv) Tj ET
+endstream
+endobj
+5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj
+trailer<</Root 1 0 R/Size 6>>";
 
 /// Why the PDF backend rejected a file or a page.
 #[derive(Debug, Display, Error)]
@@ -97,6 +119,11 @@ impl From<PdfError> for SurfaceError {
 pub struct PdfSurface {
     pdf: Pdf,
     dims: Vec<(f32, f32)>,
+    /// The list of the page walked last, and the page it describes.
+    ///
+    /// One entry: the view draws one plane at a time, and a book answers no list
+    /// at all, so a second page never asks while the first is on screen.
+    scene: std::sync::Mutex<Option<(usize, Arc<[Primitive]>)>>,
 }
 impl PdfSurface {
     /// Parse the PDF file at `path` and capture every page size.
@@ -126,7 +153,55 @@ impl PdfSurface {
         if dims.is_empty() {
             return Err(PdfError::Empty);
         }
-        Ok(PdfSurface { pdf, dims })
+        Ok(PdfSurface {
+            pdf,
+            dims,
+            scene: std::sync::Mutex::new(None),
+        })
+    }
+
+    /// The list of one page, or the feature that keeps it a raster.
+    ///
+    /// The interpreter is the one the raster path drives: `interpret_page` is
+    /// generic over `Device`, so the same page walks into a collector instead of
+    /// a pixmap (see [`crate::pdf_scene`]).
+    fn walk(&self, plane: usize) -> Result<Option<Arc<[Primitive]>>, SurfaceError> {
+        self.page_size(plane)?;
+        let pages = self.pdf.pages();
+        let page = pages.get(plane).ok_or(SurfaceError::Plane(plane))?;
+        let (width, height) = self.dims[plane];
+        // A panic must not cross this boundary: the walk runs on a rayon worker
+        // and the viewer must survive a malformed page.
+        let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let cache = InterpreterCache::new();
+            // The render space of the page: the one `bounds` measures, with the
+            // page's rotation and its y axis already applied.
+            let transform = page.initial_transform(true).to_kurbo();
+            let bbox = Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
+            let mut ctx = Context::new(
+                transform,
+                bbox,
+                &cache,
+                page.xref(),
+                InterpreterSettings::default(),
+            );
+            let mut scene = crate::pdf_scene::PdfScene::new(width, height);
+            interpret_page(page, &mut ctx, &mut scene);
+            scene.finish()
+        }));
+        match built {
+            Ok(Ok(list)) => Ok(Some(list)),
+            Ok(Err(why)) => {
+                // The page keeps the raster path, so its picture stays exactly
+                // what it was before this backend could answer a list at all.
+                tracing::debug!(feature = why.name(), page = plane, "pdf display list");
+                Ok(None)
+            }
+            Err(_) => {
+                tracing::warn!(page = plane, "pdf display list panicked");
+                Ok(None)
+            }
+        }
     }
 
     /// The natural size of `plane` in points, from the cached table.
@@ -261,6 +336,25 @@ impl Surface for PdfSurface {
     fn can_refine(&self) -> bool {
         true
     }
+
+    fn display(&self, plane: usize) -> Result<Option<Arc<[Primitive]>>, SurfaceError> {
+        // A page is one plane and one list, and the walk of a text page costs
+        // milliseconds, so the answer rides beside the page it describes.
+        if let Ok(held) = self.scene.lock()
+            && let Some((built, list)) = held.as_ref()
+            && *built == plane
+        {
+            return Ok(Some(Arc::clone(list)));
+        }
+        let Some(list) = self.walk(plane)? else {
+            return Ok(None);
+        };
+        match self.scene.lock() {
+            Ok(mut held) => *held = Some((plane, Arc::clone(&list))),
+            Err(_) => return Err(SurfaceError::Render("the PDF list lock is poisoned".into())),
+        }
+        Ok(Some(list))
+    }
 }
 
 /// The pixmap dimensions for `region` at `scale`, and the scale after the
@@ -305,25 +399,6 @@ fn file_magic_at_least(path: &Path, n: usize) -> Option<Vec<u8>> {
         .ok()
         .map(|()| buf)
 }
-
-/// A minimal single-page PDF (8.5x11 in letter, one text object).
-///
-/// A converted answer of a document is a PDF, so a test of that path needs
-/// bytes the parser accepts.
-/// A test fixture, so it stays behind `#[cfg(test)]`: `vv-view` keeps its own
-/// copy of these bytes, because a crate compiles its own test items alone.
-/// The two copies must stay in step.
-#[cfg(test)]
-pub(crate) const MINIMAL_PDF: &[u8] = b"%PDF-1.4
-1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj
-2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj
-3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj
-4 0 obj<</Length 60>>stream
-BT /F1 24 Tf 72 700 Td (Hello vv) Tj ET
-endstream
-endobj
-5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj
-trailer<</Root 1 0 R/Size 6>>";
 
 /// A two-page PDF with different page sizes, for the plane-grid tests.
 /// A test fixture, like [`MINIMAL_PDF`], and the same copy lives in `vv-view`.

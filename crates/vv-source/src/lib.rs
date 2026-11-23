@@ -35,6 +35,7 @@ pub mod book;
 pub mod convert;
 mod decode;
 pub mod pdf;
+mod pdf_scene;
 pub mod sign;
 pub mod surface;
 pub mod svg;

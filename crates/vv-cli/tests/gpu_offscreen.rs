@@ -471,6 +471,67 @@ fn paint_plane(canvas: &mut Canvas, surface: &dyn vv_source::surface::Surface) -
     dest
 }
 
+/// A listed PDF page paints the box its page names.
+///
+/// A PDF draws in points with the y axis up, so the page's own transform flips
+/// it into the render space `bounds` measures. A square in the page's upper left
+/// therefore lands in the window's upper left, and a paper that the list forgot
+/// would leave the window color where the page is blank.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_listed_pdf_page_lands_on_its_plane() {
+    use vv_core::{
+        dim::{SurfaceSize, WindowSize, WindowVector},
+        region,
+    };
+
+    // A 64 by 64 page that fills its upper half with red, in PDF coordinates
+    // (y up), which is the top of the render space (y down).
+    let document = pdf_with(1, "1 0 0 rg\n0 32 32 32 re f\n", "");
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("page.pdf");
+    std::fs::write(&path, document).expect("write the pdf");
+    let surface = vv_source::surface::open_surface(&path).expect("the page opens");
+    let list = surface.display(0).expect("a list").expect("a page lists");
+
+    let mut canvas = canvas!(200, 200);
+    canvas.begin(CLEAR);
+    let plane = surface.bounds(0).expect("the page measures");
+    let frame = region::Frame {
+        img: SurfaceSize::new(plane.w, plane.h),
+        win: WindowSize::new(200.0, 200.0),
+        pan: WindowVector::zero(),
+        // A page of 64 points fills the window at this scale.
+        scale: 200.0 / plane.w,
+        angle: 0.0,
+    };
+    let mut pass = canvas
+        .renderer
+        .display_pass(&canvas.device)
+        .expect("a display-list pass");
+    let painted = pass
+        .draw(&canvas.device, &canvas.queue, &list, &frame, canvas.size)
+        .expect("the list draws");
+    canvas.renderer.texture(
+        painted.texture,
+        painted.src,
+        painted.quad,
+        Color::WHITE,
+        Filter::Linear,
+    );
+    let pixels = canvas.print();
+    assert_eq!(
+        pixels.at(50, 50),
+        [255, 0, 0, 255],
+        "the red half of the page, in the top left"
+    );
+    assert_eq!(
+        pixels.at(150, 150),
+        [255, 255, 255, 255],
+        "the paper of the page, not the window color"
+    );
+}
+
 /// A nested document inside an `<image>` walks into the box that names it.
 ///
 /// A nested SVG is a tree and not a picture (see `vector_scene::image_of`), so
@@ -1314,6 +1375,295 @@ fn a_book_plane_keeps_its_gutter_transparent() {
     );
 }
 
+/// A listed book paints every page in its own slot.
+///
+/// A book is one plane of spreads, and each page of it is a list of its own, so
+/// the book's list is those lists placed in the slots the book measured. A page
+/// that landed in points instead of base units would draw at the top left of the
+/// plane, and the slots of the two spreads would show the same page.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_listed_book_places_its_pages() {
+    use vv_core::{
+        dim::{SurfacePoint, SurfaceSize, WindowSize, WindowVector},
+        region,
+        scene::Primitive,
+    };
+
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("book.pdf");
+    // Two pages: the cover is red and the page after it is blue.
+    let red = "1 0 0 rg\n0 0 64 64 re f\n";
+    let blue = "0 0 1 rg\n0 0 64 64 re f\n";
+    std::fs::write(&path, pdf_with(2, red, blue)).expect("write the pdf");
+    let surface = vv_source::surface::open_book_surface(&path).expect("a book");
+    let list = surface
+        .display(0)
+        .expect("a list")
+        .expect("a book of two pages lists");
+    assert!(
+        list.iter().any(|p| matches!(p, Primitive::Path { .. })),
+        "the pages ride the list"
+    );
+
+    let mut canvas = canvas!(256, 256);
+    canvas.begin(CLEAR);
+    let plane = surface.bounds(0).expect("the book measures");
+    let frame = region::Frame {
+        img: SurfaceSize::new(plane.w, plane.h),
+        win: WindowSize::new(256.0, 256.0),
+        pan: WindowVector::zero(),
+        scale: (256.0 / plane.w).min(256.0 / plane.h),
+        angle: 0.0,
+    };
+    let mut pass = canvas
+        .renderer
+        .display_pass(&canvas.device)
+        .expect("a display-list pass");
+    let painted = pass
+        .draw(&canvas.device, &canvas.queue, &list, &frame, canvas.size)
+        .expect("the list draws");
+    canvas.renderer.texture(
+        painted.texture,
+        painted.src,
+        painted.quad,
+        Color::WHITE,
+        Filter::Linear,
+    );
+    let pixels = canvas.print();
+
+    for (page, want) in [(0usize, [255, 0, 0, 255]), (1usize, [0, 0, 255, 255])] {
+        let slot = surface.page_box(page).expect("the page has a slot");
+        let center = frame.to_screen(SurfacePoint::new(
+            slot.min_x() + slot.width() / 2.0,
+            slot.min_y() + slot.height() / 2.0,
+        ));
+        let (x, y) = (center.x.round() as usize, center.y.round() as usize);
+        assert_eq!(pixels.at(x, y), want, "page {page} in its own slot");
+    }
+}
+
+/// A book that bakes a base scale below one still places every page.
+///
+/// The book's plane is in base units and each page's list is in points, so the
+/// placement converts the page's own units and only then moves it to its slot.
+/// A placement that scales the slot as well shrinks every page's offset by
+/// `units_per_point`, and the pages then pile up near the first spread. A short
+/// book bakes that scale to exactly 1.0, where both readings agree, so this one
+/// stands taller than [`vv_source::MAX_TEXTURE_SIDE`] and every page carries its
+/// own color: a page whose color is missing from its own slot is a page that
+/// landed somewhere else.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_listed_book_places_its_pages_below_one_base_unit() {
+    use std::sync::Arc;
+
+    use vv_core::{
+        dim::{SurfacePoint, SurfaceSize, WindowSize, WindowVector},
+        region,
+    };
+    use vv_source::{book::BookSurface, surface::Surface};
+
+    // 64 tall pages: the book is far taller than one texture, so the base scale
+    // lands below one.
+    let page_color = |page: usize| 2 * (page + 1);
+    let document = pdf_with_box(64, [0, 0, 64, 400], |page| {
+        format!(
+            "{} 0 0 rg\n0 0 64 400 re f\n",
+            f64::from(page_color(page) as u8) / 255.0
+        )
+    });
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("tall.pdf");
+    std::fs::write(&path, document).expect("write the pdf");
+    let inner = vv_source::pdf::PdfSurface::open(&path).expect("the document opens");
+    let surface = BookSurface::new(Arc::new(inner)).expect("a book");
+    assert!(
+        surface.units_per_point() < 0.9,
+        "the fixture bakes a base scale below one: {}",
+        surface.units_per_point()
+    );
+    let list = surface.display(0).expect("a list").expect("the book lists");
+    assert!(!list.is_empty(), "the pages ride the list");
+
+    let (win_w, win_h) = (512.0f32, 512.0f32);
+    let mut canvas = canvas!(512, 512);
+    canvas.begin(CLEAR);
+    let plane = surface.bounds(0).expect("the book measures");
+    let frame = region::Frame {
+        img: SurfaceSize::new(plane.w, plane.h),
+        win: WindowSize::new(win_w, win_h),
+        pan: WindowVector::zero(),
+        scale: (win_w / plane.w).min(win_h / plane.h),
+        angle: 0.0,
+    };
+    let mut pass = canvas
+        .renderer
+        .display_pass(&canvas.device)
+        .expect("a display-list pass");
+    let painted = pass
+        .draw(&canvas.device, &canvas.queue, &list, &frame, canvas.size)
+        .expect("the list draws");
+    canvas.renderer.texture(
+        painted.texture,
+        painted.src,
+        painted.quad,
+        Color::WHITE,
+        Filter::Linear,
+    );
+    let pixels = canvas.print();
+
+    for page in 0..surface.inner().plane_count() {
+        let slot = surface.page_box(page).expect("the page has a slot");
+        let center = frame.to_screen(SurfacePoint::new(
+            slot.min_x() + slot.width() / 2.0,
+            slot.min_y() + slot.height() / 2.0,
+        ));
+        let (x, y) = (center.x.round() as usize, center.y.round() as usize);
+        let [r, _, _, a] = pixels.at(x, y);
+        let want = page_color(page);
+        assert!(
+            a == 255 && r.abs_diff(want as u8) <= 4,
+            "page {page} is {want} in its own slot, and the frame holds {:?} at ({x}, {y})",
+            pixels.at(x, y)
+        );
+    }
+}
+
+/// A 200 by 100 page with a red square and a two by one picture in a box.
+///
+/// The picture is the leaf a list has to place in the box the page names, so a
+/// transform that also carries the picture's own pixel count throws it far past
+/// the page, where it smears over everything else the page draws.
+fn pictured_page() -> Vec<u8> {
+    let content = "q 1 0 0 rg 20 10 60 30 re f Q\nq 80 0 0 60 100 20 cm /Im1 Do Q\n";
+    let mut picture = b"5 0 obj << /Type /XObject /Subtype /Image /Width 2 /Height 1 /ColorSpace \
+        /DeviceRGB /BitsPerComponent 8 /Length 6 >> stream\n"
+        .to_vec();
+    // Two pixels: red then green, so each half of the box is flat and one
+    // misplaced transform cannot accidentally sample the other half.
+    picture.extend_from_slice(&[0xff, 0x00, 0x00, 0x00, 0xff, 0x00]);
+    picture.extend_from_slice(b"\nendstream\nendobj\n");
+    let objects = vec![
+        b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n".to_vec(),
+        b"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n".to_vec(),
+        b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R \
+          /Resources << /XObject << /Im1 5 0 R >> >> >> endobj\n"
+            .to_vec(),
+        format!(
+            "4 0 obj << /Length {} >> stream\n{content}endstream\nendobj\n",
+            content.len()
+        )
+        .into_bytes(),
+        picture,
+    ];
+    pdf_bytes(&objects)
+}
+
+/// A listed page paints what the raster path paints, picture included.
+///
+/// `hayro` drives both sides of this comparison — one into its own rasterizer
+/// and one into the display list — so the two have to agree wherever either one
+/// paints. A tolerance and not a hash: the two rasterizers anti-alias their own
+/// way, and a stored sum would break on a rounding change in either of them,
+/// while a leaf placed in the wrong box breaks the comparison everywhere. The
+/// probes pin the interesting places: the square, both halves of the picture,
+/// and the paper between them.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_listed_page_paints_what_the_raster_path_paints() {
+    use vv_core::{
+        dim::{SurfaceSize, WindowSize, WindowVector},
+        region,
+    };
+
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("pictured.pdf");
+    std::fs::write(&path, pictured_page()).expect("write the pdf");
+    let surface = open_surface(&path).expect("the page opens");
+    let plane = surface.bounds(0).expect("the page measures");
+    assert_eq!((plane.w, plane.h), (200.0, 100.0));
+    let raster = surface.render_whole(0, 1.0).expect("the raster renders");
+    assert_eq!(
+        (raster.width().raw(), raster.height().raw()),
+        (200, 100),
+        "one point is one pixel at this scale"
+    );
+    let list = surface.display(0).expect("a list").expect("the page lists");
+
+    let mut canvas = canvas!(200, 100);
+    canvas.begin(CLEAR);
+    let frame = region::Frame {
+        img: SurfaceSize::new(plane.w, plane.h),
+        win: WindowSize::new(200.0, 100.0),
+        pan: WindowVector::zero(),
+        scale: 1.0,
+        angle: 0.0,
+    };
+    let mut pass = canvas
+        .renderer
+        .display_pass(&canvas.device)
+        .expect("a display-list pass");
+    let painted = pass
+        .draw(&canvas.device, &canvas.queue, &list, &frame, canvas.size)
+        .expect("the list draws");
+    canvas.renderer.texture(
+        painted.texture,
+        painted.src,
+        painted.quad,
+        Color::WHITE,
+        Filter::Linear,
+    );
+    let pixels = canvas.print();
+
+    // The page draws its square at 20..80 by 60..90 of the render space (y
+    // down), and its picture at 100..180 by 20..80, red then green.
+    let probes = [
+        (50, 75, "the red square"),
+        (120, 50, "the red half of the picture"),
+        (160, 50, "the green half of the picture"),
+        (10, 5, "the paper"),
+    ];
+    for (x, y, what) in probes {
+        let got = pixels.at(x, y);
+        let want = raster_pixel(&raster, x, y);
+        for channel in 0..4 {
+            assert!(
+                got[channel].abs_diff(want[channel]) <= 24,
+                "{what} at ({x}, {y}): the list paints {got:?}, the raster {want:?}"
+            );
+        }
+    }
+    // And no corner of the page disagrees by more than an edge does.
+    let mut sum = 0u64;
+    for y in 0..100 {
+        for x in 0..200 {
+            let (got, want) = (pixels.at(x, y), raster_pixel(&raster, x, y));
+            sum += (0..3)
+                .map(|channel| u64::from(got[channel].abs_diff(want[channel])))
+                .sum::<u64>();
+        }
+    }
+    let mean = sum / (200 * 100 * 3);
+    assert!(
+        mean <= 8,
+        "the list and the raster paint the same page: mean difference {mean}"
+    );
+}
+
+/// The pixel of a rendered picture, as RGBA8.
+fn raster_pixel(image: &vv_source::DecodedImage, x: usize, y: usize) -> [u8; 4] {
+    let width = image.width().raw() as usize;
+    let start = (y * width + x) * 4;
+    let rgba = image.as_rgba();
+    [
+        rgba[start],
+        rgba[start + 1],
+        rgba[start + 2],
+        rgba[start + 3],
+    ]
+}
+
 /// Build a PDF of `pages` pages, each filled with `color`.
 ///
 /// The xref offsets are computed here, so the file is valid and needs no
@@ -1331,44 +1681,71 @@ fn page_pdf(pages: usize, color: [u8; 3]) -> Vec<u8> {
 /// Build a PDF of `pages` 64x64 pages: the first one draws `first`, and every
 /// other one draws `rest`.
 fn pdf_with(pages: usize, first: &str, rest: &str) -> Vec<u8> {
+    pdf_with_box(pages, [0, 0, 64, 64], |page| {
+        if page == 0 { first } else { rest }.to_owned()
+    })
+}
+
+/// Build a PDF of `pages` pages of `media_box`, each drawing its own content.
+///
+/// The xref offsets are computed here, so the file is valid and needs no
+/// fixture on disk.
+fn pdf_with_box(pages: usize, media_box: [u32; 4], content: impl Fn(usize) -> String) -> Vec<u8> {
+    let [x0, y0, x1, y1] = media_box;
     let kids = (0..pages)
         .map(|page| format!("{} 0 R", 3 + 2 * page))
         .collect::<Vec<_>>()
         .join(" ");
     let mut objects = vec![
-        "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n".to_string(),
-        format!("2 0 obj << /Type /Pages /Kids [{kids}] /Count {pages} >> endobj\n"),
+        b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n".to_vec(),
+        format!("2 0 obj << /Type /Pages /Kids [{kids}] /Count {pages} >> endobj\n").into_bytes(),
     ];
     for page in 0..pages {
         let (body, stream) = (3 + 2 * page, 4 + 2 * page);
-        objects.push(format!(
-            "{body} 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 64 64] /Contents {stream} 0 \
-             R /Resources << >> >> endobj\n"
-        ));
-        let content = if page == 0 { first } else { rest };
-        objects.push(format!(
-            "{stream} 0 obj << /Length {} >> stream\n{content}endstream\nendobj\n",
-            content.len()
-        ));
+        objects.push(
+            format!(
+                "{body} 0 obj << /Type /Page /Parent 2 0 R /MediaBox [{x0} {y0} {x1} {y1}] \
+                 /Contents {stream} 0 R /Resources << >> >> endobj\n"
+            )
+            .into_bytes(),
+        );
+        let content = content(page);
+        objects.push(
+            format!(
+                "{stream} 0 obj << /Length {} >> stream\n{content}endstream\nendobj\n",
+                content.len()
+            )
+            .into_bytes(),
+        );
     }
-    let mut pdf = String::from("%PDF-1.4\n");
+    pdf_bytes(&objects)
+}
+
+/// Assemble `objects`, numbered from one, into a PDF.
+///
+/// The xref offsets are computed here, so the file is valid and needs no
+/// fixture on disk. A picture's stream holds bytes rather than text, so an
+/// object is a byte string and a caller that formats one pushes the encoder's
+/// answer through [`String::into_bytes`].
+fn pdf_bytes(objects: &[Vec<u8>]) -> Vec<u8> {
+    let mut pdf = b"%PDF-1.4\n".to_vec();
     let mut offsets = Vec::new();
-    for object in &objects {
+    for object in objects {
         offsets.push(pdf.len());
-        pdf.push_str(object);
+        pdf.extend_from_slice(object);
     }
     let xref = pdf.len();
-    let _ = write!(pdf, "xref\n0 {}\n", objects.len() + 1);
-    pdf.push_str("0000000000 65535 f \n");
+    let mut tail = format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1);
     for offset in offsets {
-        let _ = writeln!(pdf, "{offset:010} 00000 n ");
+        let _ = writeln!(tail, "{offset:010} 00000 n ");
     }
     let _ = write!(
-        pdf,
+        tail,
         "trailer << /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
         objects.len() + 1
     );
-    pdf.into_bytes()
+    pdf.extend_from_slice(tail.as_bytes());
+    pdf
 }
 
 /// A PDF page paints its own paper under the drawing.

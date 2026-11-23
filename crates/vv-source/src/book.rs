@@ -34,10 +34,13 @@
 
 use std::sync::Arc;
 
+use kurbo::Affine;
+
 use crate::{
     DecodedImage, MAX_TEXTURE_SIDE,
     dim::{ImgH, ImgW},
     region,
+    scene::Primitive,
     surface::{Crop, Size, Surface, SurfaceError, View},
 };
 
@@ -69,6 +72,19 @@ pub const ROW_GAP: f32 = 0.0;
 
 /// The slots of one spread, left and right.
 pub const SLOTS: usize = 2;
+
+/// The most pages a book lists instead of rasterizing.
+///
+/// A book is one plane, and a list is written for the whole of the plane it
+/// names, so a listed book holds a list per page and every page of it at once.
+/// That is the right answer for an article and the wrong one for a five hundred
+/// page manual: the walk costs a few milliseconds a page and the encoded scene
+/// grows with every one of them.
+/// Past this count the book keeps the raster path, which paints only the spread
+/// the window shows.
+/// The real answer is one list per spread and a view that draws the spread it
+/// shows, which is its own decision and not a bigger constant here.
+pub const LIST_PAGES: usize = 64;
 
 /// The most output pixels one render makes.
 ///
@@ -377,6 +393,38 @@ impl Surface for BookSurface {
 
     fn can_refine(&self) -> bool {
         self.inner.can_refine()
+    }
+
+    fn display(&self, plane: usize) -> Result<Option<Arc<[Primitive]>>, SurfaceError> {
+        if plane != 0 {
+            return Err(SurfaceError::Plane(plane));
+        }
+        let pages = self.inner.plane_count();
+        if pages > LIST_PAGES {
+            tracing::debug!(pages, limit = LIST_PAGES, "book display list");
+            return Ok(None);
+        }
+        // A page of the book is a list of its own, so the book's list is those
+        // lists placed in their slots.
+        let mut out = Vec::new();
+        for page in 0..pages {
+            let Some(list) = self.inner.display(page)? else {
+                // One page that a list cannot express keeps the whole book on
+                // the raster path, because the list is the whole plane.
+                return Ok(None);
+            };
+            let Some(slot) = self.page_slot(page) else {
+                return Ok(None);
+            };
+            // A page's list is in points and its slot in base units, so the
+            // placement converts the page's own units first and then moves it.
+            // Scaling the slot as well would shrink every page's offset by
+            // `units_per_point` and stack the pages on top of each other.
+            let at = Affine::translate((f64::from(slot.min_x()), f64::from(slot.min_y())))
+                * Affine::scale(f64::from(self.units_per_point));
+            out.extend(list.iter().map(|primitive| primitive.placed(at)));
+        }
+        Ok(Some(Arc::from(out)))
     }
 
     fn open_box(&self, plane: usize) -> Option<Size> {
@@ -736,5 +784,147 @@ mod tests {
     fn an_empty_document_does_not_wrap() {
         let err = BookSurface::new(Arc::new(Pages(Vec::new()))).unwrap_err();
         assert_eq!(err.to_string(), "plane out of range");
+    }
+
+    /// A book whose pages answer a list of one paper rect each.
+    #[derive(Debug)]
+    struct Listed(Vec<(f32, f32)>);
+
+    impl Surface for Listed {
+        fn plane_count(&self) -> usize {
+            self.0.len()
+        }
+
+        fn bounds(&self, plane: usize) -> Result<Size, SurfaceError> {
+            let (w, h) = *self.0.get(plane).ok_or(SurfaceError::Plane(plane))?;
+            Ok(Size { w, h })
+        }
+
+        fn render_whole(&self, _plane: usize, _scale: f32) -> Result<DecodedImage, SurfaceError> {
+            Err(SurfaceError::Render("a listed page has no raster".into()))
+        }
+
+        fn progressive(
+            &self,
+        ) -> Result<Option<Box<dyn crate::surface::ChunkSource>>, SurfaceError> {
+            Ok(None)
+        }
+
+        fn display(&self, plane: usize) -> Result<Option<Arc<[Primitive]>>, SurfaceError> {
+            let size = self.bounds(plane)?;
+            Ok(Some(Arc::from(vec![Primitive::Rect {
+                rect: kurbo::Rect::new(0.0, 0.0, f64::from(size.w), f64::from(size.h)),
+                paint: crate::scene::Paint::Solid(crate::draw::Color::new(1, 2, 3, 255)),
+            }])))
+        }
+
+        fn can_refine(&self) -> bool {
+            true
+        }
+    }
+
+    /// Every page of a listed book lands in its own slot, in base units.
+    ///
+    /// A page's list is in points and its slot in base units, so the placement
+    /// converts the page's own units and only then moves it: the scale belongs
+    /// innermost, where it turns points into base units, and the move is already
+    /// in base units. A placement that scales the slot too — or that moves
+    /// before it scales — multiplies every page's offset by `units_per_point`
+    /// once more, and a tall book then stacks its pages near the first spread.
+    /// A book of a few short pages bakes `units_per_point` to 1.0, where both
+    /// readings agree, so the fixture is tall enough to bake a smaller one.
+    #[test]
+    fn a_listed_book_places_every_page_in_its_slot() {
+        let pages = vec![(100.0, 600.0); 40];
+        let book = BookSurface::new(Arc::new(Listed(pages.clone()))).expect("a book");
+        assert!(
+            book.units_per_point() < 0.9,
+            "the fixture bakes a base scale below one: {}",
+            book.units_per_point()
+        );
+        let list = book.display(0).expect("a list").expect("the book lists");
+        assert_eq!(list.len(), pages.len(), "one paper per page: {list:?}");
+        let size = book.size();
+        let mut seen: Vec<Crop> = Vec::new();
+        for (page, primitive) in list.iter().enumerate() {
+            let slot = book.page_slot(page).expect("a slot");
+            let Primitive::Path {
+                path, transform, ..
+            } = primitive
+            else {
+                panic!("a placed paper is a path: {primitive:?}");
+            };
+            // The paper covers the page, so the ink of the placed primitive is
+            // the box the page has to fill.
+            let ink = transform.transform_rect_bbox(kurbo::Shape::bounding_box(path));
+            let near = |a: f64, b: f32| (a - f64::from(b)).abs() < 1e-3;
+            assert!(
+                near(ink.x0, slot.min_x())
+                    && near(ink.y0, slot.min_y())
+                    && near(ink.max_x(), slot.max_x())
+                    && near(ink.max_y(), slot.max_y()),
+                "page {page} covers its slot: ink {ink:?} slot {slot:?}"
+            );
+            assert!(slot.max_x() <= size.w && slot.max_y() <= size.h);
+            assert!(
+                !seen.contains(&slot),
+                "page {page} lands on top of another page"
+            );
+            seen.push(slot);
+        }
+    }
+
+    /// A book past the page limit keeps the raster path.
+    #[test]
+    fn a_book_past_the_limit_answers_no_list() {
+        let pages = vec![(10.0, 10.0); LIST_PAGES + 1];
+        let book = BookSurface::new(Arc::new(Listed(pages))).expect("a book");
+        assert!(book.display(0).expect("an answer").is_none());
+    }
+
+    /// One page that a list cannot express keeps the whole book on the raster
+    /// path, because the list is the whole plane.
+    #[test]
+    fn one_unlisted_page_keeps_the_book_a_raster() {
+        /// A source whose second page answers no list.
+        #[derive(Debug)]
+        struct Half(Vec<(f32, f32)>);
+
+        impl Surface for Half {
+            fn plane_count(&self) -> usize {
+                self.0.len()
+            }
+
+            fn bounds(&self, plane: usize) -> Result<Size, SurfaceError> {
+                let (w, h) = *self.0.get(plane).ok_or(SurfaceError::Plane(plane))?;
+                Ok(Size { w, h })
+            }
+
+            fn render_whole(
+                &self,
+                _plane: usize,
+                _scale: f32,
+            ) -> Result<DecodedImage, SurfaceError> {
+                Err(SurfaceError::Render("a listed page has no raster".into()))
+            }
+
+            fn progressive(
+                &self,
+            ) -> Result<Option<Box<dyn crate::surface::ChunkSource>>, SurfaceError> {
+                Ok(None)
+            }
+
+            fn display(&self, plane: usize) -> Result<Option<Arc<[Primitive]>>, SurfaceError> {
+                self.bounds(plane)?;
+                Ok((plane == 0).then(|| Arc::from(Vec::new())))
+            }
+
+            fn can_refine(&self) -> bool {
+                true
+            }
+        }
+
+        let book = BookSurface::new(Arc::new(Half(vec![(10.0, 10.0); 2]))).expect("a book");
+        assert!(book.display(0).expect("an answer").is_none());
     }
 }
