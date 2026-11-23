@@ -88,6 +88,11 @@ libc = "0.2.191"
 # The key format belongs to the converter seam, so this crate hashes it and
 # hands `vv-cache` an opaque string.
 sha2 = "0.11.1"
+# The glyph ids and advance widths of a treemap label, which this tree lays out
+# itself instead of handing a document to a parser. The 0.44 line is the one
+# `usvg` and `hayro-font` already pull, so the lock carries no new copy; vello
+# parses the same face with its own line and the ids are just numbers.
+skrifa = "0.44.0"
 # The geometry a `scene` primitive names: the path of a vector leaf, the affine
 # that places it, and the stroke style of an outline. The same version `vv-core`
 # declares, and the one peniko wants, so the tree carries one `kurbo`.

@@ -127,6 +127,36 @@ pub struct Stroke {
     pub paint: Paint,
 }
 
+/// One glyph of a run, and where its origin lands.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlacedGlyph {
+    /// The glyph id inside the font.
+    pub id: u32,
+    /// The glyph's origin, in surface units.
+    pub x: f32,
+    /// The baseline, in surface units.
+    pub y: f32,
+}
+
+/// A font at one size, with the glyphs already placed.
+///
+/// The outlineless form of text: `usvg` outlines an SVG's own text, so a list
+/// holds [`Primitive::Glyphs`] only for text this tree lays out itself (a
+/// treemap label) and, later, for the glyph runs a PDF hands over.
+/// The font travels as its own bytes, because this layer sits below the
+/// renderer: the face index names which font of a collection to parse.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GlyphRun {
+    /// The font file's bytes.
+    pub font: Arc<[u8]>,
+    /// The face inside the file, or 0 for a single font.
+    pub face: u32,
+    /// The size, in surface units per em.
+    pub size: f32,
+    /// The glyphs, in paint order.
+    pub glyphs: Arc<[PlacedGlyph]>,
+}
+
 /// One drawable element of a display list, in surface units, in paint order.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Primitive {
@@ -164,6 +194,18 @@ pub enum Primitive {
         pixels: DecodedImage,
         /// Where the top-left corner lands and how the picture is scaled.
         transform: Affine,
+    },
+    /// A run of text outlines.
+    ///
+    /// The shapes come from the font rather than from a raster, so text stays
+    /// sharp at any zoom and needs no picture per label.
+    Glyphs {
+        /// The font, the size and the placed glyphs.
+        run: GlyphRun,
+        /// Where the run's own origin lands in surface units.
+        transform: Affine,
+        /// The fill of every glyph.
+        paint: Paint,
     },
     /// Open a clip for everything up to the matching [`Self::PopClip`].
     PushClip {
@@ -280,6 +322,38 @@ mod tests {
             panic!("an image leaf");
         };
         assert_eq!(transform, Affine::translate((3.0, 4.0)));
+    }
+
+    #[test]
+    fn a_glyph_run_carries_its_font_and_its_places() {
+        let run = GlyphRun {
+            font: Arc::from(vec![0_u8, 1, 2]),
+            face: 1,
+            size: 11.0,
+            glyphs: Arc::from(vec![
+                PlacedGlyph {
+                    id: 3,
+                    x: 10.0,
+                    y: 20.0,
+                },
+                PlacedGlyph {
+                    id: 4,
+                    x: 17.0,
+                    y: 20.0,
+                },
+            ]),
+        };
+        let primitive = Primitive::Glyphs {
+            run,
+            transform: Affine::IDENTITY,
+            paint: Paint::Solid(Color::new(255, 255, 255, 255)),
+        };
+        let Primitive::Glyphs { run, .. } = &primitive else {
+            panic!("a glyph run");
+        };
+        assert_eq!(run.face, 1);
+        assert_eq!(run.glyphs.len(), 2);
+        assert_eq!(run.glyphs[1].x, 17.0);
     }
 
     #[test]

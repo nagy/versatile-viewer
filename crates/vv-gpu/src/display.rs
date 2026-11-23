@@ -29,11 +29,12 @@ use std::{collections::HashMap, sync::Arc};
 
 use derive_more::{Display, Error, From};
 use vello::{
-    AaConfig, AaSupport, RenderParams, Renderer as VelloRenderer, RendererOptions, Scene as Vello,
+    AaConfig, AaSupport, Glyph, RenderParams, Renderer as VelloRenderer, RendererOptions,
+    Scene as Vello,
     kurbo::{self, Affine},
     peniko::{
-        self as peniko, Blob, Color as VelloColor, ColorStop, Extend, Fill, Gradient, GradientKind,
-        ImageAlphaType, ImageBrush, ImageData, ImageFormat, LinearGradientPosition,
+        self as peniko, Blob, Color as VelloColor, ColorStop, Extend, Fill, FontData, Gradient,
+        GradientKind, ImageAlphaType, ImageBrush, ImageData, ImageFormat, LinearGradientPosition,
         RadialGradientPosition,
     },
 };
@@ -77,6 +78,8 @@ pub struct SceneView {
     uploader: Uploader,
     /// The picture of each [`Primitive::Image`] leaf, keyed by its address.
     images: HashMap<usize, ImageBrush>,
+    /// The face of each [`Primitive::Glyphs`] run, keyed by its bytes.
+    fonts: HashMap<usize, FontData>,
     /// The list `images` belongs to, as its first primitive's address.
     owner: Option<usize>,
 }
@@ -111,6 +114,7 @@ impl SceneView {
             size: (1, 1),
             uploader,
             images: HashMap::new(),
+            fonts: HashMap::new(),
             owner: None,
         })
     }
@@ -139,11 +143,33 @@ impl SceneView {
             // last one cannot be trusted and the addresses they were keyed on
             // may now mean something else.
             self.images.clear();
+            self.fonts.clear();
             self.owner = Some(owner);
         }
         let to_window = to_window(frame);
         self.list.reset();
-        for primitive in list.iter() {
+        self.encode(list, to_window);
+        self.renderer.render_to_texture(
+            device,
+            queue,
+            &self.list,
+            &self.view,
+            &RenderParams {
+                // Transparent, so the letterbox bars and the window background
+                // stay the window's own color and the scene only paints where a
+                // primitive is.
+                base_color: VelloColor::TRANSPARENT,
+                width: self.size.0,
+                height: self.size.1,
+                antialiasing_method: AA,
+            },
+        )?;
+        Ok(&self.texture)
+    }
+
+    /// Encode every primitive of `list`, placed by `to_window`.
+    fn encode(&mut self, list: &[Primitive], to_window: Affine) {
+        for primitive in list {
             match primitive {
                 Primitive::Rect { rect, paint } => {
                     // A rect carries no transform, so both its shape and its
@@ -166,6 +192,43 @@ impl SceneView {
                     }
                     if let Some(outline) = stroke {
                         self.outline(outline, placed, paint_at, path);
+                    }
+                }
+                Primitive::Glyphs {
+                    run,
+                    transform,
+                    paint,
+                } => {
+                    // The face is parsed once per run, keyed by its bytes, so a
+                    // label never re-parses a font per frame.
+                    let key = run.font.as_ptr() as usize;
+                    let font = self
+                        .fonts
+                        .entry(key)
+                        .or_insert_with(|| FontData::new(Blob::from(run.font.to_vec()), run.face));
+                    let placed = to_window * *transform;
+                    let glyphs = run.glyphs.iter().map(|glyph| Glyph {
+                        id: glyph.id,
+                        x: glyph.x,
+                        y: glyph.y,
+                    });
+                    match brush(paint) {
+                        Brush::Solid(color) => {
+                            self.list
+                                .draw_glyphs(font)
+                                .font_size(run.size)
+                                .brush(color)
+                                .transform(placed)
+                                .draw(Fill::NonZero, glyphs);
+                        }
+                        Brush::Ramp(ramp) => {
+                            self.list
+                                .draw_glyphs(font)
+                                .font_size(run.size)
+                                .brush(&ramp)
+                                .transform(placed)
+                                .draw(Fill::NonZero, glyphs);
+                        }
                     }
                 }
                 Primitive::PushClip {
@@ -204,22 +267,6 @@ impl SceneView {
                 }
             }
         }
-        self.renderer.render_to_texture(
-            device,
-            queue,
-            &self.list,
-            &self.view,
-            &RenderParams {
-                // Transparent, so the letterbox bars and the window background
-                // stay the window's own color and the scene only paints where a
-                // primitive is.
-                base_color: VelloColor::TRANSPARENT,
-                width: self.size.0,
-                height: self.size.1,
-                antialiasing_method: AA,
-            },
-        )?;
-        Ok(&self.texture)
     }
 
     /// Take a window size, rebuilding the target when it moved.

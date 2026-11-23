@@ -303,6 +303,22 @@ pub(crate) fn fontdb() -> &'static Arc<fontdb::Database> {
     })
 }
 
+/// A sans-serif face to draw generated text with, and its collection index.
+///
+/// A treemap labels a rectangle this tree lays out itself, so the face is the
+/// host's sans-serif through the same database an SVG parse reads.
+/// `None` on a host with no fonts, and then a label draws nothing: the shape it
+/// names is still there.
+pub(crate) fn sans_serif_face() -> Option<(Arc<[u8]>, u32)> {
+    let query = fontdb::Query {
+        families: &[fontdb::Family::SansSerif],
+        ..fontdb::Query::default()
+    };
+    let db = fontdb();
+    let id = db.query(&query)?;
+    db.with_face_data(id, |data, index| (Arc::from(data.to_vec()), index))
+}
+
 /// The parser options.
 fn options() -> usvg::Options<'static> {
     usvg::Options {

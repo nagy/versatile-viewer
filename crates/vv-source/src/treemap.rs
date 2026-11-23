@@ -28,7 +28,6 @@ use std::{
 
 use crate::{
     DecodedImage,
-    dim::LongSide,
     draw::Color,
     region::{self, Crop},
     scene::{self, Paint, Primitive},
@@ -57,20 +56,6 @@ const FONT_TOP: f32 = 13.0;
 const FONT_MID: f32 = 10.5;
 /// The label size inside one leaf.
 const FONT_LEAF: f32 = 11.0;
-/// How much larger than its framed box a label rasterizes.
-///
-/// A label is an [`Primitive::Image`] leaf until the text path lands, and a leaf
-/// is a picture: it blurs past its own pixels exactly like a photo does.
-/// Three times the framed size keeps the label sharp through the first zoom
-/// steps, and the crate pays that bill once per plane, when the list is built.
-const LABEL_OVERSAMPLE: f32 = 3.0;
-
-/// How tall a label's box is per unit of label size.
-///
-/// The glyph body of a label sits under three quarters of its size, so the box
-/// leaves the descender room and no clip eats a comma.
-const LABEL_BOX: f32 = 1.35;
-
 /// The height of a group band per unit of label size.
 const BAND: f32 = 1.5;
 /// The slack a band leaves around its label, in frame pixels.
@@ -864,11 +849,7 @@ impl TreemapSurface {
 /// label.
 /// The rects are answered directly, so the document round trip survives only for
 /// the labels, which ride the host fonts through it until the glyph path lands.
-///
-/// # Errors
-///
-/// The function errors when a label rasterizes to nothing.
-fn primitives(layout: &[Placed], frame: Size) -> Result<Vec<Primitive>, SurfaceError> {
+fn primitives(layout: &[Placed], frame: Size) -> Vec<Primitive> {
     let mut out = Vec::with_capacity(layout.len() * 2 + 1);
     // The paper fills first, so a gutter and the outer border show it and never
     // the window color behind the plane.
@@ -884,9 +865,9 @@ fn primitives(layout: &[Placed], frame: Size) -> Result<Vec<Primitive>, SurfaceE
                     paint: Paint::Solid(placed.fill),
                 });
                 if let Some((center, baseline, font)) = leaf_label(placed)
-                    && let Some(leaf) = label_leaf(&placed.node.label, center, baseline, font)?
+                    && let Some(run) = label_run(&placed.node.label, center, baseline, font)
                 {
-                    out.push(leaf);
+                    out.push(run);
                 }
             }
             Ink::Group { band } => {
@@ -897,56 +878,79 @@ fn primitives(layout: &[Placed], frame: Size) -> Result<Vec<Primitive>, SurfaceE
                 let font = font_for(placed.depth);
                 let baseline = band.min_y() + band.height() / 2.0 + font * 0.35;
                 let center = band.min_x() + BAND_PAD + label_width(&placed.node.label, font) / 2.0;
-                if let Some(leaf) = label_leaf(&placed.node.label, center, baseline, font)? {
-                    out.push(leaf);
+                if let Some(run) = label_run(&placed.node.label, center, baseline, font) {
+                    out.push(run);
                 }
             }
             Ink::Bare => {}
         }
     }
-    Ok(out)
+    out
 }
 
-/// The picture of one label, centered on `center` and sitting on `baseline`.
+/// The glyph run of one label, centered on `center` and sitting on `baseline`.
 ///
-/// A label rasterizes through [`crate::svg`], the painter the document path
-/// already used, at [`LABEL_OVERSAMPLE`] times its framed box, so it stays sharp
-/// through the first zoom steps of the map.
+/// A label is text this tree lays out itself, so it answers a
+/// [`Primitive::Glyphs`] run rather than a picture: the outlines come from the
+/// host's sans-serif face and stay sharp at any zoom.
+/// `None` on a host with no such face, and then the rectangle keeps its fill and
+/// carries no label.
+fn label_run(label: &str, center: f32, baseline: f32, size: f32) -> Option<Primitive> {
+    if !(size.is_finite() && size > 0.0) {
+        return None;
+    }
+    let (font, face) = crate::svg::sans_serif_face()?;
+    let glyphs = place_run(label, &font, face, size, center, baseline)?;
+    if glyphs.is_empty() {
+        return None;
+    }
+    Some(Primitive::Glyphs {
+        run: scene::GlyphRun {
+            font,
+            face,
+            size,
+            glyphs: Arc::from(glyphs),
+        },
+        transform: kurbo::Affine::IDENTITY,
+        paint: Paint::Solid(INK),
+    })
+}
+
+/// Where each glyph of `label` lands, measured at `size`.
 ///
-/// # Errors
-///
-/// The function errors when the label's document fails to parse or rasterize.
-fn label_leaf(
+/// The run centers on `center`, so the caller names where the label reads and
+/// not where its first glyph starts.
+fn place_run(
     label: &str,
+    font: &[u8],
+    face: u32,
+    size: f32,
     center: f32,
     baseline: f32,
-    font: f32,
-) -> Result<Option<Primitive>, SurfaceError> {
-    let (box_w, box_h) = (label_width(label, font), font * LABEL_BOX);
-    let usable = font.is_finite() && font > 0.0 && box_w > 0.0 && box_h > 0.0;
-    if !usable {
-        return Ok(None);
+) -> Option<Vec<scene::PlacedGlyph>> {
+    use skrifa::{
+        FontRef, MetadataProvider as _,
+        instance::{LocationRef, Size},
+    };
+    let font_ref = FontRef::from_index(font, face).ok()?;
+    let charmap = font_ref.charmap();
+    let metrics = font_ref.glyph_metrics(Size::new(size), LocationRef::default());
+    // One pass to measure, one to place: the run centers on `center`.
+    let mut advances = Vec::with_capacity(label.chars().count());
+    let mut width = 0.0;
+    for ch in label.chars() {
+        let id = charmap.map(ch)?;
+        let advance = metrics.advance_width(id).unwrap_or(0.0);
+        advances.push((id.to_u32(), advance));
+        width += advance;
     }
-    // The document declares the pixel size and draws in frame units, so one
-    // frame unit maps onto `LABEL_OVERSAMPLE` pixels.
-    let (px_w, px_h) = (
-        (box_w * LABEL_OVERSAMPLE).round().max(1.0) as u32,
-        (box_h * LABEL_OVERSAMPLE).round().max(1.0) as u32,
-    );
-    // The baseline sits this far into the box, measured from its top.
-    let descent = font * 1.05;
-    let document = format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{px_w}" height="{px_h}" viewBox="0 0 {box_w} {box_h}"><text x="{cx}" y="{descent}" font-family="sans-serif" font-size="{font}" fill="#{r:02x}{g:02x}{b:02x}" text-anchor="middle">{label}</text></svg>"##,
-        cx = box_w / 2.0,
-        r = INK.r,
-        g = INK.g,
-        b = INK.b,
-        label = escape(label),
-    );
-    let vector = crate::svg::from_str(&document)?;
-    let pixels = vector.rasterize(LongSide::new(px_w.max(px_h)))?;
-    let box_ = region::crop(center - box_w / 2.0, baseline - descent, box_w, box_h);
-    Ok(Some(scene::image_of(box_, pixels)))
+    let mut x = center - width / 2.0;
+    let mut out = Vec::with_capacity(advances.len());
+    for (id, advance) in advances {
+        out.push(scene::PlacedGlyph { id, x, y: baseline });
+        x += advance;
+    }
+    Some(out)
 }
 
 /// The file, opened and dropped, so a path that vanished fails at open.
@@ -1002,7 +1006,7 @@ impl Surface for TreemapSurface {
             return Ok(Some(Arc::clone(list)));
         }
         let placed = layout(&self.tree, frame.whole());
-        let list: Arc<[Primitive]> = Arc::from(primitives(&placed, frame)?);
+        let list: Arc<[Primitive]> = Arc::from(primitives(&placed, frame));
         canvas.scene = Some((frame, Arc::clone(&list)));
         Ok(Some(list))
     }
@@ -1282,12 +1286,37 @@ mod tests {
             .filter(|primitive| matches!(primitive, Primitive::Rect { .. }))
             .count();
         assert_eq!(rects, placed.len() + 1);
-        // The map carries labels, so the list carries pictures.
-        assert!(
-            list.iter()
-                .any(|primitive| matches!(primitive, Primitive::Image { .. })),
-            "a labelled map answers at least one label leaf"
-        );
+        // A label is a glyph run and never a picture, so a map carries no raster
+        // leaf at all.
+        for primitive in list.iter() {
+            assert!(
+                matches!(primitive, Primitive::Rect { .. } | Primitive::Glyphs { .. }),
+                "a map draws rects and glyphs, not {primitive:?}"
+            );
+        }
+        // A host with no fonts answers no face, and then the map is the same map
+        // without its labels.
+        if crate::svg::sans_serif_face().is_some() {
+            assert!(
+                list.iter()
+                    .any(|primitive| matches!(primitive, Primitive::Glyphs { .. })),
+                "a labelled map answers at least one glyph run"
+            );
+        }
+    }
+
+    #[test]
+    fn a_label_run_advances_from_its_center() {
+        let Some((font, face)) = crate::svg::sans_serif_face() else {
+            // A host with no fonts draws no label, which is what `label_run`
+            // answers there too.
+            return;
+        };
+        let glyphs = place_run("vv", &font, face, 11.0, 100.0, 50.0).expect("a run");
+        assert_eq!(glyphs.len(), 2);
+        assert!(glyphs[1].x > glyphs[0].x, "a glyph advances to its right");
+        assert!(glyphs[0].x < 100.0, "the run starts left of its center");
+        assert_eq!(glyphs[0].y, 50.0, "the baseline is the one asked for");
     }
 
     #[test]
