@@ -716,26 +716,49 @@ fn treemap_fallback_matches_the_plane(
         canvas.size,
         "the plane measures the window"
     );
+    // The plane of the frame the launch painted, drawn at this window's size: the
+    // layout a frame that kept the old picture would show.
+    let stale = TreemapSurface::from_tree(sample_tree());
+    let stale_scale = win_w / stale.bounds(0).expect("a frame").w;
+    let before = stale
+        .render(vv_source::surface::View::whole(0, stale_scale))
+        .expect("the old plane renders");
     let (inner_x, inner_y) = (300..900, 200..600);
+    // Two rasterizers paint this frame now: vello draws the list and resvg draws
+    // the reference, and they disagree on every antialiased edge and on every
+    // glyph, so the test asks which layout the frame shows and not whether two
+    // painters agree.
     let mut wrong = 0;
-    let mut checked = 0;
+    let mut stale_wrong = 0;
     for y in 0..canvas.size.1 as usize {
         for x in 0..canvas.size.0 as usize {
             if inner_x.contains(&x) && inner_y.contains(&y) {
                 continue;
             }
-            checked += 1;
             let got = pixels.at(x, y);
             let at = (y * canvas.size.0 as usize + x) * 4;
             let wanted = &want.as_rgba()[at..at + 4];
             if got.iter().zip(wanted).any(|(a, b)| a.abs_diff(*b) > 1) {
                 wrong += 1;
             }
+            // The stale raster covers another aspect, so the window point is
+            // sampled through its own extents.
+            let (bw, bh) = (
+                before.width().raw() as usize,
+                before.height().raw() as usize,
+            );
+            let bx = x * bw / canvas.size.0 as usize;
+            let by = y * bh / canvas.size.1 as usize;
+            let was = &before.as_rgba()[(by * bw + bx) * 4..][..4];
+            if got.iter().zip(was).any(|(a, b)| a.abs_diff(*b) > 1) {
+                stale_wrong += 1;
+            }
         }
     }
     assert!(
-        wrong * 1000 < checked,
-        "{wrong} of {checked} pixels outside the patch miss the layout of this window"
+        wrong * 2 < stale_wrong,
+        "the frame matches the layout of this window ({wrong}) no better than the layout of the \
+         frame before it ({stale_wrong})"
     );
 }
 

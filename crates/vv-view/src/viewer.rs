@@ -685,11 +685,15 @@ impl Viewer {
                 Ok(texture) => self.st.view_tex = Some(texture),
                 Err(err) => tracing::error!(err = %err, "upload"),
             }
-            self.st.adopt_source(source);
+            // The plane measures the picture before the source is adopted,
+            // because adopting one asks for its display list and a list of a
+            // plane the view has not measured yet would be dropped as another
+            // plane's.
             self.st.img = Size {
                 w: image.width().as_f32(),
                 h: image.height().as_f32(),
             };
+            self.st.adopt_source(source);
             self.planes = 1;
             // A book frames its first spread, a picture frames the whole plane.
             self.st.open_box = open_box;

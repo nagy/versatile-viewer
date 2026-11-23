@@ -784,12 +784,6 @@ impl ViewState {
         if !self.plane_stale || self.crop_pending {
             return;
         }
-        if self.scene.is_some() {
-            // One build per plane, the same guard a paint takes.
-            self.plane_stale = false;
-            self.request_scene();
-            return;
-        }
         let Some(source) = self.source.clone() else {
             // A source that painted its plane and kept no handle cannot paint it
             // again, so the texture on screen stays the best picture there is.
@@ -798,9 +792,18 @@ impl ViewState {
             self.plane_stale = false;
             return;
         };
+        self.plane_stale = false;
+        // A source that answers a list rebuilds it for the frame the window
+        // names, and the list on screen draws until the answer lands.
+        // The ask runs even when no list landed yet, because a list built
+        // before the first frame describes the plane the launch guessed, and
+        // that plane is not this one.
+        self.request_scene();
+        if self.scene.is_some() {
+            return;
+        }
         // One paint per plane: a window that moves again sets the flag again,
         // and its settled frame asks for the paint of the plane it lands on.
-        self.plane_stale = false;
         let (generation, tx) = (self.crop_gen, self.crop_tx.clone());
         let plane = self.source_plane;
         let uploader = uploader.clone();
@@ -1042,14 +1045,20 @@ impl ViewState {
                     plane,
                     list,
                 } => {
-                    if generation != self.crop_gen {
-                        continue;
-                    }
+                    // Any answer ends the build, stale or not: a flag left set
+                    // by a dropped answer would refuse every later ask.
                     self.scene_pending = false;
                     // A list of a plane the view left would draw the layout of
                     // the frame before it, so only the current one lands.
-                    if same_plane(plane, self.img) {
+                    if generation == self.crop_gen && same_plane(plane, self.img) {
                         self.scene = list;
+                    } else {
+                        // The launch asks for a list before the first frame
+                        // measures the plane, and a plane that follows the
+                        // window (a treemap) moves on that frame, so the first
+                        // answer is nearly always one plane behind. Ask again
+                        // for the plane the view holds now.
+                        self.request_scene();
                     }
                 }
                 CropMsg::Crop {
@@ -1881,6 +1890,7 @@ pub fn show_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::surface::SurfaceError;
 
     #[test]
     fn a_treemap_answers_the_plane_its_window_names() {
@@ -2158,5 +2168,215 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// A source that answers one rect, so a test can watch the list land.
+    struct Listed;
+
+    impl Surface for Listed {
+        fn plane_count(&self) -> usize {
+            1
+        }
+
+        fn bounds(&self, plane: usize) -> Result<Size, SurfaceError> {
+            if plane != 0 {
+                return Err(SurfaceError::Plane(plane));
+            }
+            Ok(Size { w: 100.0, h: 50.0 })
+        }
+
+        fn render_whole(&self, _plane: usize, _scale: f32) -> Result<DecodedImage, SurfaceError> {
+            Err(SurfaceError::Unsupported(
+                "a list source barely rasterizes".into(),
+            ))
+        }
+
+        fn progressive(
+            &self,
+        ) -> Result<Option<Box<dyn crate::surface::ChunkSource>>, SurfaceError> {
+            Ok(None)
+        }
+
+        fn display(
+            &self,
+            _plane: usize,
+        ) -> Result<Option<Arc<[crate::scene::Primitive]>>, SurfaceError> {
+            Ok(Some(Arc::from(vec![crate::scene::Primitive::Rect {
+                rect: crate::scene::rect_of(region::crop(0.0, 0.0, 100.0, 50.0)),
+                paint: crate::scene::Paint::Solid(Color::new(1, 2, 3, 255)),
+            }])))
+        }
+
+        fn can_refine(&self) -> bool {
+            true
+        }
+    }
+
+    /// A source whose first build waits for the test, so the plane can move
+    /// while the answer is still in flight.
+    struct Gated {
+        gate: Arc<std::sync::Barrier>,
+        blocked: std::sync::atomic::AtomicBool,
+    }
+
+    impl Surface for Gated {
+        fn plane_count(&self) -> usize {
+            1
+        }
+
+        fn bounds(&self, plane: usize) -> Result<Size, SurfaceError> {
+            if plane != 0 {
+                return Err(SurfaceError::Plane(plane));
+            }
+            Ok(Size { w: 100.0, h: 50.0 })
+        }
+
+        fn render_whole(&self, _plane: usize, _scale: f32) -> Result<DecodedImage, SurfaceError> {
+            Err(SurfaceError::Unsupported(
+                "a list source barely rasterizes".into(),
+            ))
+        }
+
+        fn progressive(
+            &self,
+        ) -> Result<Option<Box<dyn crate::surface::ChunkSource>>, SurfaceError> {
+            Ok(None)
+        }
+
+        fn display(
+            &self,
+            _plane: usize,
+        ) -> Result<Option<Arc<[crate::scene::Primitive]>>, SurfaceError> {
+            if !self.blocked.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                self.gate.wait();
+            }
+            Ok(Some(Arc::from(vec![crate::scene::Primitive::Rect {
+                rect: crate::scene::rect_of(region::crop(0.0, 0.0, 100.0, 50.0)),
+                paint: crate::scene::Paint::Solid(Color::new(1, 2, 3, 255)),
+            }])))
+        }
+
+        fn can_refine(&self) -> bool {
+            true
+        }
+    }
+
+    /// A fresh view with a channel pair and no open source.
+    fn view_state() -> ViewState {
+        let (crop_tx, crop_rx) = std::sync::mpsc::channel();
+        ViewState {
+            mode: Mode::Image,
+            open_id: None,
+            view_from_grid: None,
+            view_tex: None,
+            view_loading: false,
+            img: Size { w: 0.0, h: 0.0 },
+            zoom: ZoomMode::FitDown,
+            pan: Vec2::ZERO,
+            target_pan: Vec2::ZERO,
+            view_scale: None,
+            zoom_anchor: None,
+            angle: 0.0,
+            pivot: None,
+            selection: None,
+            ramps: Ramps::default(),
+            pixelated: false,
+            loader: None,
+            blur_bg: None,
+            source: None,
+            source_plane: 0,
+            loader_plane: None,
+            plane_stale: false,
+            open_box: None,
+            cell_box: None,
+            open_align: OpenAlign::Free,
+            spread_glide: None,
+            prefetch: Prefetch::Idle,
+            prefetch_seq: 0,
+            crop: None,
+            crop_pending: false,
+            crop_gen: 0,
+            crop_seen: None,
+            crop_quiet_at: Instant::now(),
+            crop_tx,
+            crop_rx,
+            scene: None,
+            scene_pending: false,
+        }
+    }
+
+    /// Drain the worker channel until the list lands, or the wait gives up.
+    fn wait_for_scene(st: &mut ViewState) -> bool {
+        for _ in 0..200 {
+            st.drain_crops();
+            if st.scene.is_some() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        false
+    }
+
+    #[test]
+    fn a_list_lands_once_the_plane_is_measured() {
+        // The launch measures the plane and then adopts the source; a list asked
+        // for before the measure answers no plane and would be dropped.
+        let mut st = view_state();
+        st.img = Size { w: 100.0, h: 50.0 };
+        st.adopt_source(Some(Arc::new(Listed)));
+        assert!(
+            wait_for_scene(&mut st),
+            "the list of the measured plane lands"
+        );
+    }
+
+    #[test]
+    fn a_list_of_an_earlier_plane_is_asked_again() {
+        // A plane that follows the window (a treemap) moves on the first frame,
+        // and every plane change bumps the paint generation, so the list of the
+        // plane before it drops. The answer must clear the pending flag and ask
+        // for the plane the view holds now, or the source never lists again.
+        let mut st = view_state();
+        st.img = Size { w: 100.0, h: 50.0 };
+        st.adopt_source(Some(Arc::new(Listed)));
+        assert!(wait_for_scene(&mut st), "the first list lands");
+        // The window moves, so the plane moves and the view drops its patch.
+        st.drop_patch();
+        st.img = Size { w: 100.0, h: 50.0 };
+        st.scene = None;
+        st.request_scene();
+        assert!(
+            wait_for_scene(&mut st),
+            "the list of the plane the view holds now lands"
+        );
+    }
+
+    #[test]
+    fn a_stale_answer_asks_again_instead_of_wedging() {
+        // The sequence every plane-shaped source takes: the launch asks for a
+        // list, the first frame re-frames the plane and bumps the paint
+        // generation, and only then does the launch's answer arrive.
+        // An answer that left the pending flag set would refuse every later ask,
+        // and the source would stay on the region patch for good.
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        let surface = Arc::new(Gated {
+            gate: Arc::clone(&gate),
+            blocked: std::sync::atomic::AtomicBool::new(false),
+        });
+        let mut st = view_state();
+        st.img = Size { w: 100.0, h: 50.0 };
+        // The worker enters the build and holds it.
+        st.adopt_source(Some(surface));
+        assert!(st.scene_pending, "a build is in flight");
+        // The first frame measures a plane of another shape.
+        st.drop_patch();
+        st.img = Size { w: 120.0, h: 60.0 };
+        // Let the launch's build finish, now that it describes another plane.
+        gate.wait();
+        assert!(
+            wait_for_scene(&mut st),
+            "the stale answer asks again for the plane the view holds"
+        );
+        assert!(!st.scene_pending, "no build is left in flight");
     }
 }
