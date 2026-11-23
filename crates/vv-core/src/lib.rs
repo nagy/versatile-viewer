@@ -20,6 +20,11 @@
 //! [`dim`] wraps every raw pixel and window primitive in a newtype, so no call
 //! site casts a dimension by hand.
 //! [`draw`] holds the point, the color and the quad the view code writes.
+//! [`pixels`] holds the RGBA8 buffer every decoder answers with, because a
+//! [`scene::Primitive`] carries one as its image leaf.
+//! [`scene`] holds the primitives a resolution-independent source answers with
+//! instead of a raster: a list in surface units, which a zoom draws through a
+//! transform and never rebuilds.
 //! [`region`] holds the visible-region geometry of the image view, and
 //! [`region_sel`] the selection the `v` hold drags over it.
 //! [`rotate`] holds the rotation angle behind the `r` hold.
@@ -34,10 +39,12 @@
 pub mod dim;
 pub mod draw;
 pub mod keyrepeat;
+pub mod pixels;
 pub mod push;
 pub mod region;
 pub mod region_sel;
 pub mod rotate;
+pub mod scene;
 pub mod tween;
 
 use crate::draw::Color;

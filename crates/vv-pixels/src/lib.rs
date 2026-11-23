@@ -16,6 +16,9 @@
 //!
 //! [`DecodedImage`] holds one decoded RGBA8 picture, and it is the only
 //! checked entrance for a buffer, so a wrong buffer never exists to check.
+//! The type itself lives in [`vv_core::pixels`], one layer down, because a
+//! `scene::Primitive` names it as its image leaf; this crate re-exports it so a
+//! decoder reads it through the layer it already imports.
 //! [`resample_rgba`] is the one resize path (the `fast_image_resize` SIMD
 //! path with Lanczos3), and [`cap_texture_side`] is the one texture budget.
 //! [`placeholder`] holds the few-byte
@@ -33,113 +36,13 @@ pub mod placeholder;
 // The dimension newtypes appear in the public API of this crate, so a caller
 // names one through this crate too.
 pub use vv_core::dim;
+// The decoded buffer and its buffer check moved down to the scene layer, so the
+// image leaf of a primitive can name them. Both names answer here, which is the
+// path every decoder and every test already writes.
+pub use vv_core::pixels::{BufferError, DecodedImage};
 
 use crate::dim::{ImgH, ImgW, LongSide};
 pub use crate::error::DecodeError;
-
-/// Holds the decoded image data.
-///
-/// The fields are private and [`DecodedImage::new`] is the only checked
-/// entrance, so a buffer that does not hold exactly `width * height * 4` bytes
-/// never becomes an image.
-/// The code then reads the pixels through [`DecodedImage::as_rgba`] and the
-/// extents through [`DecodedImage::width`] and [`DecodedImage::height`].
-///
-/// # Examples
-///
-/// ```
-/// # use vv_pixels::{DecodedImage, DecodeError};
-/// # use vv_pixels::dim::{ImgH, ImgW};
-/// let img = DecodedImage::new(ImgW::new(2), ImgH::new(2), vec![0; 16]).unwrap();
-/// assert_eq!(img.as_rgba().len(), 16);
-/// assert_eq!(img.width(), ImgW::new(2));
-/// // A buffer of the wrong size never becomes an image.
-/// assert!(matches!(
-///     DecodedImage::new(ImgW::new(2), ImgH::new(2), vec![0; 15]),
-///     Err(DecodeError::Buffer)
-/// ));
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DecodedImage {
-    /// The image width, in pixels.
-    width: ImgW,
-    /// The image height, in pixels.
-    height: ImgH,
-    /// RGBA8, row-major, 4 bytes per pixel.
-    data: Vec<u8>,
-}
-
-impl DecodedImage {
-    /// An RGBA8 image of `width` by `height`.
-    ///
-    /// # Errors
-    ///
-    /// The function errors with [`DecodeError::Buffer`] when `data` does not
-    /// hold exactly `width * height * 4` bytes.
-    pub fn new(width: ImgW, height: ImgH, data: Vec<u8>) -> Result<Self, DecodeError> {
-        if Some(data.len()) != pixel_bytes(width, height) {
-            return Err(DecodeError::Buffer);
-        }
-        Ok(Self {
-            width,
-            height,
-            data,
-        })
-    }
-
-    /// The image built from a buffer whose length this crate just computed.
-    ///
-    /// A buffer that does not match its dimensions trips the debug assertion,
-    /// so the invariant still holds in a test build.
-    #[must_use]
-    pub fn from_exact(width: ImgW, height: ImgH, data: Vec<u8>) -> Self {
-        debug_assert_eq!(Some(data.len()), pixel_bytes(width, height));
-        Self {
-            width,
-            height,
-            data,
-        }
-    }
-
-    /// The image width, in pixels.
-    #[must_use]
-    pub const fn width(&self) -> ImgW {
-        self.width
-    }
-
-    /// The image height, in pixels.
-    #[must_use]
-    pub const fn height(&self) -> ImgH {
-        self.height
-    }
-
-    /// The RGBA8 pixels, row-major, 4 bytes per pixel.
-    #[must_use]
-    pub fn as_rgba(&self) -> &[u8] {
-        &self.data
-    }
-
-    /// The RGBA8 pixels, consumed.
-    #[must_use]
-    pub fn into_rgba(self) -> Vec<u8> {
-        self.data
-    }
-
-    /// The width, the height and the RGBA8 pixels, consumed.
-    #[must_use]
-    pub fn into_parts(self) -> (ImgW, ImgH, Vec<u8>) {
-        (self.width, self.height, self.data)
-    }
-}
-
-/// The RGBA8 byte length of a `width` x `height` image, or `None` when the
-/// product overflows.
-fn pixel_bytes(width: ImgW, height: ImgH) -> Option<usize> {
-    usize::try_from(width.raw())
-        .ok()?
-        .checked_mul(usize::try_from(height.raw()).ok()?)?
-        .checked_mul(4)
-}
 
 /// The longest texture side the decode produces.
 ///

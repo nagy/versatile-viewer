@@ -100,12 +100,16 @@ impl Placeholder {
     /// then carries no placeholder, and the grid keeps its grey cell.
     #[must_use]
     pub fn encode(image: &DecodedImage) -> Option<Self> {
-        let small =
-            crate::downscale_rgba_ref(&image.data, image.width, image.height, ENCODE_LONG_SIDE);
+        let small = crate::downscale_rgba_ref(
+            image.as_rgba(),
+            image.width(),
+            image.height(),
+            ENCODE_LONG_SIDE,
+        );
         let hash = thumbhash::rgba_to_thumb_hash(
             small.width().raw() as usize,
-            small.height.raw() as usize,
-            &small.data,
+            small.height().raw() as usize,
+            small.as_rgba(),
         );
         Self::from_bytes(&hash)
     }
@@ -185,10 +189,10 @@ mod tests {
         let p = Placeholder::encode(&src).expect("encode");
         assert!(p.len() <= MAX_BYTES);
         let out = p.render().expect("render");
-        assert_eq!(out.width.raw(), RENDER_LONG_SIDE.raw());
+        assert_eq!(out.width().raw(), RENDER_LONG_SIDE.raw());
         // The render derives its height from the aspect of the DCT grid, which
         // rounds, so only the ratio matches.
-        let ratio = out.width.raw() as f32 / out.height.raw() as f32;
+        let ratio = out.width().raw() as f32 / out.height().raw() as f32;
         assert!((ratio - 2.0).abs() < 0.3, "{ratio}");
         // The DCT drops the detail, so only the average colour survives.
         let (a, b) = (average(&src), average(&out));
@@ -203,7 +207,7 @@ mod tests {
             let p = Placeholder::encode(&ramp(w, h)).expect("encode");
             let out = p.render().expect("render");
             let want = w as f32 / h as f32;
-            let got = out.width.raw() as f32 / out.height.raw() as f32;
+            let got = out.width().raw() as f32 / out.height().raw() as f32;
             assert!((want - got).abs() < 0.25 * want, "{w}x{h}: {got}");
         }
     }
@@ -212,10 +216,11 @@ mod tests {
     fn a_transparent_image_round_trips() {
         // The encoder reads the average alpha to pick the alpha plane, so a
         // half transparent image must survive as a payload.
-        let mut src = ramp(40, 40);
-        for (i, px) in src.data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let (w, h, mut data) = ramp(40, 40).into_parts();
+        for (i, px) in data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             px[3] = if i < 800 { 0 } else { 255 };
         }
+        let src = DecodedImage::from_exact(w, h, data);
         let p = Placeholder::encode(&src).expect("encode");
         assert!(p.render().is_some());
     }

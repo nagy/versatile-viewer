@@ -3450,8 +3450,10 @@ dependencies = [
 name = "vv-core"
 version = "0.1.0"
 dependencies = [
+ "derive_more",
  "euclid",
  "glam",
+ "kurbo",
  "proptest",
 ]
 

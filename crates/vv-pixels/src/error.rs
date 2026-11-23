@@ -1,6 +1,9 @@
 //! Errors for image decoding.
 //!
 //! [`DecodeError`] covers opening, sniffing and decoding a file.
+//! The buffer check of a decoded image is not one of these: it belongs to the
+//! container and answers [`vv_core::pixels::BufferError`], which this crate
+//! re-exports as [`crate::BufferError`].
 
 use derive_more::{Display, Error, From};
 
@@ -36,9 +39,4 @@ pub enum DecodeError {
     /// A vector file passed the input cap.
     #[display("svg input too large")]
     Input,
-    /// The RGBA buffer did not match its dimensions.
-    /// [`crate::DecodedImage::new`] answers this instead of building an image
-    /// whose pixel count and buffer disagree.
-    #[display("rgba buffer does not match its dimensions")]
-    Buffer,
 }
