@@ -1500,7 +1500,7 @@ pub(crate) fn draw_list(
         return false;
     };
     match view.draw(device, queue, list, frame, size) {
-        Ok(painted) => {
+        Ok(Some(painted)) => {
             // A frame the pass reused lands where the window it was painted for
             // puts the same surface units (see `SceneView::draw`), so the draw
             // takes the placement the pass answers instead of the whole
@@ -1514,6 +1514,12 @@ pub(crate) fn draw_list(
             );
             true
         }
+        // The frame asks vello for more than its fixed allocators hold, and a
+        // frame it cannot hold paints nothing at all without saying so (see
+        // `vv_gpu::display`), so the list answers no draw: the caller shows the
+        // plane texture and the region patch instead, which the source
+        // rasterizes at the window's own scale.
+        Ok(None) => false,
         Err(err) => {
             tracing::warn!(err = %err, "display list");
             false

@@ -511,7 +511,8 @@ fn a_listed_pdf_page_lands_on_its_plane() {
         .expect("a display-list pass");
     let painted = pass
         .draw(&canvas.device, &canvas.queue, &list, &frame, canvas.size)
-        .expect("the list draws");
+        .expect("the list draws")
+        .expect("the list fits the frame");
     canvas.renderer.texture(
         painted.texture,
         painted.src,
@@ -592,7 +593,8 @@ fn a_nested_document_lands_in_its_box() {
         .expect("a display-list pass");
     let painted = pass
         .draw(&canvas.device, &canvas.queue, &list, &frame, canvas.size)
-        .expect("the list draws");
+        .expect("the list draws")
+        .expect("the list fits the frame");
     canvas.renderer.texture(
         painted.texture,
         painted.src,
@@ -653,7 +655,8 @@ fn a_display_list_paints_its_rects_and_its_pictures() {
         .expect("a display-list pass");
     let painted = pass
         .draw(&canvas.device, &canvas.queue, &list, &frame, canvas.size)
-        .expect("the list draws");
+        .expect("the list draws")
+        .expect("the list fits the frame");
     canvas.renderer.texture(
         painted.texture,
         painted.src,
@@ -716,7 +719,8 @@ fn a_zoomed_list_follows_its_frame() {
             &frame(1.0),
             canvas.size,
         )
-        .expect("the list draws");
+        .expect("the list draws")
+        .expect("the list fits the frame");
     canvas.begin(CLEAR);
     canvas.renderer.texture(
         at_one.texture,
@@ -738,7 +742,8 @@ fn a_zoomed_list_follows_its_frame() {
             &frame(2.0),
             canvas.size,
         )
-        .expect("the list draws");
+        .expect("the list draws")
+        .expect("the list fits the frame");
     canvas.begin(CLEAR);
     canvas.renderer.texture(
         at_two.texture,
@@ -803,7 +808,8 @@ fn a_listed_opacity_layer_blends_its_content() {
             &frame(2.0),
             canvas.size,
         )
-        .expect("the list draws");
+        .expect("the list draws")
+        .expect("the list fits the frame");
     canvas.begin(Color::BLACK);
     canvas.renderer.texture(
         painted.texture,
@@ -876,7 +882,8 @@ fn a_resized_window_places_the_paint_it_has() {
             &frame((200.0, 100.0)),
             (200, 100),
         )
-        .expect("the list draws");
+        .expect("the list draws")
+        .expect("the list fits the frame");
 
     // The window doubles, so the paint of the first frame covers the whole of
     // it and the halves stay halves.
@@ -888,7 +895,8 @@ fn a_resized_window_places_the_paint_it_has() {
             &frame((400.0, 200.0)),
             canvas.size,
         )
-        .expect("the list draws");
+        .expect("the list draws")
+        .expect("the list fits the frame");
 
     canvas.begin(CLEAR);
     canvas.renderer.texture(
@@ -1199,7 +1207,8 @@ fn a_listed_svg_lands_where_its_plane_does() {
         .expect("a display-list pass");
     let painted = pass
         .draw(&canvas.device, &canvas.queue, &list, &frame, canvas.size)
-        .expect("the list draws");
+        .expect("the list draws")
+        .expect("the list fits the frame");
     canvas.renderer.texture(
         painted.texture,
         painted.src,
@@ -1422,7 +1431,8 @@ fn a_listed_book_places_its_pages() {
         .expect("a display-list pass");
     let painted = pass
         .draw(&canvas.device, &canvas.queue, &list, &frame, canvas.size)
-        .expect("the list draws");
+        .expect("the list draws")
+        .expect("the list fits the frame");
     canvas.renderer.texture(
         painted.texture,
         painted.src,
@@ -1503,7 +1513,8 @@ fn a_listed_book_places_its_pages_below_one_base_unit() {
         .expect("a display-list pass");
     let painted = pass
         .draw(&canvas.device, &canvas.queue, &list, &frame, canvas.size)
-        .expect("the list draws");
+        .expect("the list draws")
+        .expect("the list fits the frame");
     canvas.renderer.texture(
         painted.texture,
         painted.src,
@@ -1643,7 +1654,8 @@ fn paint_list_at(
         .expect("a display-list pass");
     let painted = pass
         .draw(&canvas.device, &canvas.queue, list, &frame, canvas.size)
-        .expect("the list draws");
+        .expect("the list draws")
+        .expect("the list fits the frame");
     canvas.renderer.texture(
         painted.texture,
         painted.src,
@@ -1971,6 +1983,108 @@ fn dense_book() -> Vec<u8> {
         }
         out
     })
+}
+
+/// A page whose whole drawing is one path of twenty thousand curves.
+///
+/// A band keeps a primitive whole, and `vello` flattens it whole, so a path like
+/// this one starves the renderer's fixed allocators once the frame zooms in —
+/// and a frame it starves paints nothing at all, without an error.
+fn heavy_page() -> Vec<u8> {
+    pdf_with_box(1, [0, 0, 200, 200], |_| {
+        let mut out = String::from("1 0 0 rg\n0 0 200 200 re f\n0 0 1 rg\n0 100 m");
+        for step in 0..20_000 {
+            let x = (step % 40) as f32 * 5.0;
+            let _ = write!(
+                out,
+                " {a} {b} {c} {d} {e} {f} c",
+                a = x + 2.0,
+                b = 160.0,
+                c = x + 3.0,
+                d = 40.0,
+                e = x + 5.0,
+                f = 100.0,
+            );
+        }
+        let _ = writeln!(out, " h f");
+        out
+    })
+}
+
+/// A frame past `vello`'s flattening limit is refused instead of painted
+/// blank.
+///
+/// `vello` abandons a frame whose intermediate buffers run out, writes nothing
+/// to the target, and reports nothing (`Renderer::render_to_texture` is its
+/// non-robust path), so the pass has to know before it paints: it estimates the
+/// lines the frame would flatten (`BumpEstimator`) and answers `None`, which
+/// makes the view draw the plane texture and the region patch — the picture the
+/// source rasterizes at the window's own scale, with no such limit.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_frame_past_the_flatten_limit_is_refused() {
+    use vv_core::{
+        dim::{SurfaceSize, WindowSize, WindowVector},
+        region,
+    };
+
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("heavy.pdf");
+    std::fs::write(&path, heavy_page()).expect("write the pdf");
+    let surface = open_surface(&path).expect("the page opens");
+    let plane = surface.bounds(0).expect("the page measures");
+    let list = surface.display(0).expect("a list").expect("the page lists");
+    let frame = |scale: f32| region::Frame {
+        img: SurfaceSize::new(plane.w, plane.h),
+        win: WindowSize::new(256.0, 256.0),
+        pan: WindowVector::zero(),
+        scale,
+        angle: 0.0,
+    };
+
+    let mut canvas = canvas!(256, 256);
+    let mut pass = canvas
+        .renderer
+        .display_pass(&canvas.device)
+        .expect("a display-list pass");
+    assert!(
+        pass.draw(
+            &canvas.device,
+            &canvas.queue,
+            &list,
+            &frame(400.0),
+            canvas.size,
+        )
+        .expect("the pass answers")
+        .is_none(),
+        "a frame that cannot fit the renderer is refused, not painted blank"
+    );
+
+    // The same page at one to one is a frame the pass paints.
+    let near = pass
+        .draw(
+            &canvas.device,
+            &canvas.queue,
+            &list,
+            &frame(1.0),
+            canvas.size,
+        )
+        .expect("the pass answers")
+        .expect("the near frame fits the renderer");
+    canvas.begin(CLEAR);
+    canvas.renderer.texture(
+        near.texture,
+        near.src,
+        near.quad,
+        Color::WHITE,
+        Filter::Linear,
+    );
+    let pixels = canvas.print();
+    assert_eq!(
+        pixels.at(128, 128),
+        [255, 0, 0, 255],
+        "the paper of the page, from the list"
+    );
 }
 
 /// A book zoomed in past the point where its whole list fits `vello`'s

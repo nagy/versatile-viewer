@@ -42,6 +42,18 @@
 //! A clip, a layer and a marker always stay: the stack must keep its shape, and
 //! a clip carries no ink of its own.
 //!
+//! # The frame that does not fit
+//!
+//! A band bounds one document's worth of work, not one primitive's: a path holds
+//! whatever the producer wrote, and `vello` flattens it whole at the frame's
+//! scale. A page-spanning path of twenty thousand curves therefore starves the
+//! same allocators at a deep zoom, and by the same silent path (see above).
+//! [`Work`] is the count of lines that frame would flatten, in the tolerance law
+//! `vello` itself sizes its buffers with, so a frame that will not fit is refused
+//! with `Ok(None)` and the caller draws the raster it keeps for that plane
+//! instead, which the source rasterizes at the window's own scale and which has
+//! no such limit.
+//!
 //! # Image leaves
 //!
 //! A [`Primitive::Image`] carries pixels and not a texture, so this pass uploads
@@ -55,7 +67,7 @@ use derive_more::{Display, Error, From};
 use vello::{
     AaConfig, AaSupport, Glyph, RenderParams, Renderer as VelloRenderer, RendererOptions,
     Scene as Vello,
-    kurbo::{self, Affine, Shape},
+    kurbo::{self, Affine, PathEl, Shape},
     peniko::{
         self as peniko, Blob, Color as VelloColor, ColorStop, Extend, Fill, FontData, Gradient,
         GradientKind, ImageAlphaType, ImageBrush, ImageData, ImageFormat, LinearGradientPosition,
@@ -159,6 +171,11 @@ struct Base {
     plane: (f32, f32),
     /// The surface box it kept the primitives for, padded.
     band: kurbo::Rect,
+    /// What `vello` has to flatten for the primitives it kept, in surface units.
+    ///
+    /// It is counted once per band, and a frame only applies its own scale to it
+    /// instead of walking the paths again (see [`Work`]).
+    work: Work,
 }
 
 impl Base {
@@ -267,6 +284,10 @@ impl SceneView {
     /// [`Self::place_stale`]). The paint is the one expensive step of this pass
     /// and none of those frames changes a pixel of it.
     ///
+    /// A frame whose geometry would run past vello's fixed allocators answers
+    /// `Ok(None)`: nothing was painted, and the caller draws the raster it keeps
+    /// for that plane instead (see the module docstring).
+    ///
     /// # Errors
     ///
     /// Returns [`SceneError`] when vello refuses the frame, which a missing
@@ -278,7 +299,7 @@ impl SceneView {
         list: &Arc<[Primitive]>,
         frame: &region::Frame,
         size: (u32, u32),
-    ) -> Result<Painted<'_>, SceneError> {
+    ) -> Result<Option<Painted<'_>>, SceneError> {
         let to_window = to_window(frame);
         let moved = self.asked != Some(size);
         self.asked = Some(size);
@@ -291,7 +312,7 @@ impl SceneView {
                 && drawn.to_window == to_window
                 && Arc::ptr_eq(&drawn.list, list)
             {
-                return Ok(self.painted_whole());
+                return Ok(Some(self.painted_whole()));
             }
             // A window that moved since the last frame is still moving, so this
             // frame places the paint it has and leaves the paint of the settled
@@ -299,7 +320,7 @@ impl SceneView {
             // A list this pass never painted is painted: a new list is the one
             // thing a window drag cannot answer from the paint it has.
             if moved && drawn.size != size && Arc::ptr_eq(&drawn.list, list) {
-                return Ok(self.place_stale(drawn, to_window));
+                return Ok(Some(self.place_stale(drawn, to_window)));
             }
         }
         let plane = (frame.img.width, frame.img.height);
@@ -325,12 +346,29 @@ impl SceneView {
                 self.images.clear();
             }
             self.base.reset();
-            self.encode(list, plane, band);
+            let work = self.encode(list, plane, band);
             self.encoded = Some(Base {
                 list: Arc::clone(list),
                 plane,
                 band,
+                work,
             });
+        }
+        // The band lands at the frame's own scale, which is the linear part of
+        // the transform that places it.
+        let [xx, yx, _, _, _, _] = to_window.as_coeffs();
+        let scale = xx.hypot(yx);
+        // A frame past the budget is one vello paints *nothing* of, and it says
+        // so to nobody: refuse it here, where the caller can still show the
+        // plane, and forget the paint on screen so no later frame reuses it.
+        if self
+            .encoded
+            .as_ref()
+            .is_some_and(|base| base.work.too_heavy(scale))
+        {
+            self.drawn = None;
+            tracing::debug!(budget = LINE_BUDGET, "display list too heavy");
+            return Ok(None);
         }
         self.resize(device, size);
         self.framed.reset();
@@ -355,7 +393,7 @@ impl SceneView {
             to_window,
             size: self.size,
         });
-        Ok(self.painted_whole())
+        Ok(Some(self.painted_whole()))
     }
 
     /// The paint on screen as the whole window it covers.
@@ -392,8 +430,10 @@ impl SceneView {
     /// A primitive the band does not reach is dropped, because `vello` would
     /// pay for it in every frame: it flattens the curves of the whole encode and
     /// its bump allocators are fixed (see the module docstring).
-    fn encode(&mut self, list: &[Primitive], plane: (f32, f32), band: kurbo::Rect) {
+    fn encode(&mut self, list: &[Primitive], plane: (f32, f32), band: kurbo::Rect) -> Work {
+        let mut work = Work::default();
         for primitive in list.iter().filter(|primitive| hits(primitive, band)) {
+            count(&mut work, primitive);
             match primitive {
                 Primitive::Rect { rect, paint } => {
                     // A rect carries no transform, so both its shape and its
@@ -509,6 +549,7 @@ impl SceneView {
                 }
             }
         }
+        work
     }
 
     /// Take a window size, rebuilding the target when it moved.
@@ -709,6 +750,190 @@ fn bounds_of(primitive: &Primitive) -> Option<kurbo::Rect> {
 fn longest_axis(transform: &Affine) -> f64 {
     let [xx, yx, xy, yy, _, _] = transform.as_coeffs();
     xx.hypot(yx).max(xy.hypot(yy))
+}
+
+/// The most flattened lines one frame may ask `vello` for.
+///
+/// `vello_encoding::BufferSizes::new` fixes that buffer at `1 << 21` entries
+/// ("hand picked to accommodate the vello test scenes as well as paris-30k"),
+/// and a frame that runs past it is abandoned without an error, so this pass
+/// refuses one that would (see the module docstring).
+/// [`Work`] counts a shape the window clips as a whole, so it answers more than
+/// the renderer flattens: half of the real buffer is where a frame is handed to
+/// the raster path instead.
+const LINE_BUDGET: f64 = ((1u32 << 21) / 2) as f64;
+
+/// The reciprocal square root of the tolerance `vello` flattens to.
+///
+/// It is the tolerance `vello_encoding` sizes its own buffers with — 0.2 device
+/// pixels, so the factor of the line count below is `1 / sqrt(0.2)`.
+const RSQRT_OF_TOLERANCE: f64 = 2.236_067_977_5;
+
+/// `sqrt(n * (n - 1) / 8)` of Wang's formula, for each curve degree.
+const QUAD_DEGREE: f64 = 0.5;
+const CUBIC_DEGREE: f64 = 0.866_025_403_78;
+
+/// The floor `vello_encoding` puts under one curve, in lines.
+const LINES_PER_CURVE: f64 = 5.0;
+
+/// How many curves a glyph's outline stands for.
+///
+/// A run carries no outline, so the pass counts one em-sized curve per glyph
+/// several times over: a bound rather than a measurement, and one that grows
+/// with the zoom the way an outline does.
+const CURVES_PER_GLYPH: f64 = 40.0;
+
+/// What one band asks `vello` to flatten.
+///
+/// `vello` flattens in device units, and the lines a curve becomes grow with the
+/// square root of the scale it lands at — Wang's formula, which `vello_encoding`
+/// itself sizes its buffers with, and which overestimates the integral `vello`
+/// actually subdivides by. So the counts are kept in surface units and the frame
+/// applies its own square root, and a zoom or a pan costs no walk of the paths.
+#[derive(Clone, Copy, Debug, Default)]
+struct Work {
+    /// The segments that flatten to one line each, at any scale.
+    lines: f64,
+    /// The lines the curve segments become at one to one.
+    curves: f64,
+    /// The number of curve segments, which carry [`LINES_PER_CURVE`] each.
+    curve_count: f64,
+}
+
+impl Work {
+    /// The lines this work becomes when the band lands at `scale`.
+    #[must_use]
+    fn lines_at(&self, scale: f64) -> f64 {
+        if !(scale.is_finite() && scale > 0.0) {
+            return f64::INFINITY;
+        }
+        let curves = self.curves * scale.sqrt() * RSQRT_OF_TOLERANCE;
+        self.lines + curves.max(LINES_PER_CURVE * self.curve_count)
+    }
+
+    /// Whether `vello` cannot hold the band at `scale`.
+    #[must_use]
+    fn too_heavy(&self, scale: f64) -> bool {
+        self.lines_at(scale) > LINE_BUDGET
+    }
+
+    /// Add one curve, whose Wang bound at one to one is `lines` lines.
+    fn curve(&mut self, lines: f64) {
+        if lines.is_finite() && lines > 0.0 {
+            self.curves += lines;
+            self.curve_count += 1.0;
+        } else {
+            // A segment the bound cannot state still occupies the flatten pass.
+            self.lines += 1.0;
+        }
+    }
+}
+
+/// Add what `vello` flattens for `primitive` to `work`.
+///
+/// The counts land in surface units — a primitive's own transform is applied
+/// here — so a frame scales them without a second walk of the paths.
+fn count(work: &mut Work, primitive: &Primitive) {
+    match primitive {
+        // A rect carries no transform, so its four sides are surface units
+        // already, plus the close a fill adds.
+        Primitive::Rect { .. } => work.lines += 5.0,
+        Primitive::Path {
+            path,
+            transform,
+            stroke,
+            ..
+        } => {
+            let width = stroke.as_ref().map_or(0.0, |outline| outline.style.width);
+            count_path(work, path, Some(transform), width);
+        }
+        // A clip path is flattened like a fill, so it is counted like one.
+        Primitive::PushClip {
+            path, transform, ..
+        } => {
+            count_path(work, path, Some(transform), 0.0);
+        }
+        Primitive::Glyphs { run, transform, .. } => {
+            // A run carries no outline, so each glyph stands for
+            // [`CURVES_PER_GLYPH`] curves across its em box: a bound rather than
+            // a measurement, and one that grows with the zoom the way an
+            // outline does.
+            let em = f64::from(run.size) * longest_axis(transform);
+            let glyphs = run.glyphs.len() as f64;
+            let curves = glyphs * CURVES_PER_GLYPH;
+            work.curves += curves * CUBIC_DEGREE * em.sqrt();
+            work.curve_count += curves;
+        }
+        // A picture is a brush: it uploads and samples, and flattens nothing.
+        Primitive::Image { .. }
+        | Primitive::PushLayer { .. }
+        | Primitive::PopLayer
+        | Primitive::PopClip => {}
+    }
+}
+
+/// Add the segments of `path`, placed by `transform`, to `work`.
+///
+/// `width` is the stroke the path is outlined by, in the path's own units, and
+/// zero for a fill: a stroke is two offset curves of its centre line, and every
+/// vertex adds a join or a cap of its own width, which flattens like a curve
+/// spanning that width.
+fn count_path(work: &mut Work, path: &kurbo::BezPath, transform: Option<&Affine>, width: f64) {
+    let at = transform.copied();
+    let place = |point: kurbo::Point| match at {
+        Some(affine) => affine * point,
+        None => point,
+    };
+    let sides = if width > 0.0 { 2.0 } else { 1.0 };
+    let join = width * at.map_or(1.0, |affine| longest_axis(&affine));
+    let mut start: Option<kurbo::Point> = None;
+    let mut last: Option<kurbo::Point> = None;
+    let vertex = |work: &mut Work| {
+        work.lines += sides;
+        if width > 0.0 {
+            work.curve(QUAD_DEGREE * join.sqrt());
+        }
+    };
+    for element in path.elements() {
+        match *element {
+            PathEl::MoveTo(point) => {
+                if last.is_some() && start.is_some() {
+                    vertex(work);
+                }
+                start = Some(point);
+                last = Some(point);
+            }
+            PathEl::LineTo(point) => {
+                vertex(work);
+                last = Some(point);
+            }
+            PathEl::QuadTo(control, point) => {
+                let from = last.or(start).unwrap_or(point);
+                let deviation = (place(from).to_vec2() - place(control).to_vec2() * 2.0
+                    + place(point).to_vec2())
+                .hypot();
+                work.curve(sides * QUAD_DEGREE * deviation.max(0.0).sqrt());
+                last = Some(point);
+            }
+            PathEl::CurveTo(control_a, control_b, point) => {
+                let from = last.or(start).unwrap_or(point);
+                let first = (place(from).to_vec2() - place(control_a).to_vec2() * 2.0
+                    + place(control_b).to_vec2())
+                .hypot();
+                let second = (place(control_a).to_vec2() - place(control_b).to_vec2() * 2.0
+                    + place(point).to_vec2())
+                .hypot();
+                work.curve(sides * CUBIC_DEGREE * first.max(second).max(0.0).sqrt());
+                last = Some(point);
+            }
+            PathEl::ClosePath => {
+                if last.is_some() && start.is_some() {
+                    vertex(work);
+                }
+                last = start;
+            }
+        }
+    }
 }
 
 /// The one-color brush of a solid paint.
@@ -967,6 +1192,7 @@ mod tests {
             list: Arc::from(Vec::<Primitive>::new()),
             plane,
             band: band_of(visible),
+            work: Work::default(),
         };
         assert!(
             base.covers(visible),
@@ -1094,6 +1320,86 @@ mod tests {
                 "the stack stays whole: {primitive:?}"
             );
         }
+    }
+
+    /// A path of `curves` cubics, each spanning `reach` surface units, as a
+    /// producer that draws a coastline or a flattened export writes it.
+    fn wave(curves: usize, reach: f64) -> Primitive {
+        let mut path = kurbo::BezPath::new();
+        path.move_to((0.0, 0.0));
+        for step in 0..curves {
+            let x = step as f64 * reach / 4.0;
+            path.curve_to(
+                (x, reach),
+                (x + reach / 4.0, -reach),
+                (x + reach / 2.0, 0.0),
+            );
+        }
+        Primitive::Path {
+            path,
+            transform: Affine::IDENTITY,
+            fill: Some(solid()),
+            fill_rule: FillRule::NonZero,
+            stroke: None,
+        }
+    }
+
+    /// The estimate grows with the zoom for a curve and stays put for a
+    /// straight line, because a flatten pass divides a curve by the device
+    /// tolerance and a line needs no division at all.
+    #[test]
+    fn a_curve_costs_more_as_the_window_zooms() {
+        let mut straight = Work::default();
+        count(
+            &mut straight,
+            &Primitive::Path {
+                path: rect_path(kurbo::Rect::new(0.0, 0.0, 10.0, 10.0)),
+                transform: Affine::IDENTITY,
+                fill: Some(solid()),
+                fill_rule: FillRule::NonZero,
+                stroke: None,
+            },
+        );
+        let mut curved = Work::default();
+        count(&mut curved, &wave(100, 400.0));
+
+        assert_eq!(
+            straight.lines_at(1.0),
+            straight.lines_at(64.0),
+            "four sides flatten the same at any zoom"
+        );
+        assert!(
+            curved.lines_at(64.0) > curved.lines_at(1.0) * 2.0,
+            "a hundred curves of a deep zoom cost more than twice the lines"
+        );
+    }
+
+    /// A frame whose geometry would run past vello's lines buffer is refused
+    /// before it paints, and one that fits is not: `vello` answers *nothing* on
+    /// the first and reports nothing at all, so the caller must be told.
+    #[test]
+    fn a_heavy_band_is_refused() {
+        let mut light = Work::default();
+        count(&mut light, &wave(4, 10.0));
+        let mut heavy = Work::default();
+        // Two thousand curves across a page, the shape a flattened export hands
+        // over: a band keeps it whole, and the flatten pass divides it whole.
+        count(&mut heavy, &wave(2000, 400.0));
+
+        for scale in [1.0, 4.0, 16.0] {
+            assert!(
+                !light.too_heavy(scale),
+                "a handful of small curves paints at {scale}x"
+            );
+            assert!(
+                !heavy.too_heavy(scale),
+                "the page-spanning path still fits at {scale}x"
+            );
+        }
+        assert!(
+            heavy.too_heavy(64.0),
+            "a deep zoom of that path cannot fit the renderer"
+        );
     }
 
     /// A frame that names no drawable plane keeps everything, because a band it
