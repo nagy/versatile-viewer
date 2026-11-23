@@ -15,6 +15,14 @@
 //! layer sits below the renderer, so the leaf carries raw bytes and the renderer
 //! keeps the texture and its cache.
 //!
+//! # The list is in paint order
+//!
+//! [`Primitive::PushClip`] and [`Primitive::PushLayer`] open a scope that the
+//! matching `Pop` closes, the way a display list reads in every painter: a
+//! backend walks its tree once and appends, and the renderer replays. A clip and
+//! a layer nest in the same sequence, so no primitive carries an index into a
+//! side table.
+//!
 //! # Examples
 //!
 //! ```
@@ -35,44 +43,116 @@
 //! );
 //! ```
 
+use std::sync::Arc;
+
 use kurbo::{Affine, BezPath, Rect};
 
 use crate::{draw::Color, pixels::DecodedImage, region};
 
-/// How the pixels inside a primitive are coloured.
+/// Which side of a path a fill covers.
 ///
-/// One variant today, because every source that answers a list so far paints a
-/// solid. Gradients arrive with the PDF and SVG backends, and they land here as
-/// further arms rather than as a color field on every variant, so a shape never
-/// grows a second spelling of its paint.
+/// SVG carries this as `fill-rule`, and a glyph outline needs it, so the shape
+/// and the rule travel together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FillRule {
+    /// A point inside an odd number of subpaths is inside the shape.
+    NonZero,
+    /// A point inside an odd number of subpaths is filled, and an even one is
+    /// a hole.
+    EvenOdd,
+}
+
+/// One stop of a gradient ramp.
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Stop {
+    /// The position along the ramp, from 0 to 1.
+    pub offset: f32,
+    /// The color at that position, its alpha already applied.
+    pub color: Color,
+}
+
+/// What a gradient does past its last stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Spread {
+    /// The last color holds.
+    Pad,
+    /// The ramp starts again.
+    Repeat,
+    /// The ramp runs backwards.
+    RepeatMirror,
+}
+
+/// How the pixels inside a shape are coloured.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Paint {
     /// One color over the whole shape.
     Solid(Color),
+    /// A ramp from `from` to `to`, both in surface units.
+    Linear {
+        /// The start of the ramp.
+        from: (f64, f64),
+        /// The end of the ramp.
+        to: (f64, f64),
+        /// The stops, in increasing order of offset.
+        stops: Arc<[Stop]>,
+        /// What the ramp does past its last stop.
+        spread: Spread,
+    },
+    /// A ramp from an inner circle to an outer one, both in surface units.
+    Radial {
+        /// The center of the outer circle.
+        center: (f64, f64),
+        /// The radius of the outer circle.
+        radius: f64,
+        /// The center of the inner circle, which is the focus of the ramp.
+        focus: (f64, f64),
+        /// The radius of the inner circle, zero for a point focus.
+        focus_radius: f64,
+        /// The stops, in increasing order of offset.
+        stops: Arc<[Stop]>,
+        /// What the ramp does past its last stop.
+        spread: Spread,
+    },
 }
 
-/// One drawable element of a display list, in surface units.
+/// An outline drawn around a shape.
+///
+/// The style is `kurbo`'s, because it already carries the width, the caps, the
+/// joins, the miter limit and the dash array an SVG stroke names.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stroke {
+    /// The width, the caps, the joins and the dashes.
+    pub style: kurbo::Stroke,
+    /// The paint of the outline.
+    pub paint: Paint,
+}
+
+/// One drawable element of a display list, in surface units, in paint order.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Primitive {
     /// A filled rectangle.
     ///
-    /// The shape most documents spend their paper on, and the only one a
-    /// treemap needs.
+    /// The shape most documents spend their paper on, and the one a treemap
+    /// needs. It carries no transform, so a producer states where it lands
+    /// directly.
     Rect {
         /// The rectangle, in surface units.
         rect: Rect,
         /// The fill.
         paint: Paint,
     },
-    /// A filled path.
-    ///
-    /// A glyph set arrives as one of these until the text path lands, and a
-    /// vector file arrives as a sequence of them.
+    /// A filled and stroked path.
     Path {
-        /// The path, in surface units.
+        /// The path, in its own units.
         path: BezPath,
-        /// The fill.
-        paint: Paint,
+        /// Where the path lands in surface units.
+        transform: Affine,
+        /// The fill, or `None` for an outline alone.
+        fill: Option<Paint>,
+        /// Which side of the path the fill covers.
+        fill_rule: FillRule,
+        /// The outline, or `None` for a fill alone.
+        stroke: Option<Stroke>,
     },
     /// A picture placed in the plane.
     ///
@@ -85,6 +165,28 @@ pub enum Primitive {
         /// Where the top-left corner lands and how the picture is scaled.
         transform: Affine,
     },
+    /// Open a clip for everything up to the matching [`Self::PopClip`].
+    PushClip {
+        /// The clip shape, in its own units.
+        path: BezPath,
+        /// Where the shape lands in surface units.
+        transform: Affine,
+        /// Which side of the shape is kept.
+        fill_rule: FillRule,
+    },
+    /// Close the clip a [`Self::PushClip`] opened.
+    PopClip,
+    /// Open a transparency layer for everything up to the matching
+    /// [`Self::PopLayer`].
+    ///
+    /// A layer is what makes a group opacity composite as one, so two
+    /// overlapping shapes at half opacity never double their own alpha.
+    PushLayer {
+        /// The opacity of the whole layer, from 0 to 1.
+        alpha: f32,
+    },
+    /// Close the layer a [`Self::PushLayer`] opened.
+    PopLayer,
 }
 
 /// `crop` as an untagged `kurbo` rect.
@@ -178,5 +280,35 @@ mod tests {
             panic!("an image leaf");
         };
         assert_eq!(transform, Affine::translate((3.0, 4.0)));
+    }
+
+    #[test]
+    fn a_gradient_carries_its_stops_and_its_spread() {
+        let stops: Arc<[Stop]> = Arc::from(vec![
+            Stop {
+                offset: 0.0,
+                color: Color::new(0, 0, 0, 255),
+            },
+            Stop {
+                offset: 1.0,
+                color: Color::new(255, 255, 255, 255),
+            },
+        ]);
+        let paint = Paint::Linear {
+            from: (0.0, 0.0),
+            to: (10.0, 0.0),
+            stops: Arc::clone(&stops),
+            spread: Spread::Repeat,
+        };
+        let Paint::Linear {
+            stops: read,
+            spread,
+            ..
+        } = &paint
+        else {
+            panic!("a linear ramp");
+        };
+        assert_eq!(read.len(), 2);
+        assert_eq!(*spread, Spread::Repeat);
     }
 }

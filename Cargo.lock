@@ -3570,6 +3570,7 @@ dependencies = [
  "hayro",
  "image",
  "jxl-oxide",
+ "kurbo",
  "libc",
  "memmap2",
  "proptest",

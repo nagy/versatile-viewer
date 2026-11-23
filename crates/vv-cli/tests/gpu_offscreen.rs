@@ -762,6 +762,145 @@ fn treemap_fallback_matches_the_plane(
     );
 }
 
+/// A vector file draws from its list, and lands where its raster lands.
+///
+/// The document exercises the whole walk: a group transform, a ramp, a clip and
+/// a run of text, which `usvg` hands over as outlined glyphs. Three points pin
+/// the geometry, and the glyph band pins that the outlines landed somewhere
+/// rather than at the origin.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_listed_svg_lands_where_its_plane_does() {
+    use vv_core::{
+        dim::{SurfaceSize, WindowSize, WindowVector},
+        region,
+        scene::Primitive,
+    };
+
+    let document = r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200">
+        <defs>
+          <linearGradient id="g" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stop-color="#0000ff"/>
+            <stop offset="1" stop-color="#0000ff"/>
+          </linearGradient>
+          <clipPath id="c"><rect x="0" y="0" width="50" height="200"/></clipPath>
+        </defs>
+        <g transform="translate(20,20)"><rect width="80" height="80" fill="#ff0000"/></g>
+        <rect x="120" y="20" width="60" height="60" fill="url(#g)"/>
+        <g clip-path="url(#c)"><rect x="0" y="120" width="200" height="60" fill="#00ff00"/></g>
+        <text x="100" y="196" font-size="10" fill="#ffffff" text-anchor="middle">vv</text>
+      </svg>"##;
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("scene.svg");
+    std::fs::write(&path, document).expect("write the svg");
+    let surface = vv_source::surface::open_surface(&path).expect("the document opens");
+    let list = surface
+        .display(0)
+        .expect("a list")
+        .expect("a plain document lists");
+    assert!(
+        list.iter()
+            .any(|primitive| matches!(primitive, Primitive::PushClip { .. })),
+        "the clip rides the list"
+    );
+
+    let mut canvas = canvas!(200, 200);
+    canvas.begin(CLEAR);
+    // A vector file's plane is a base raster rather than the size the document
+    // declares, so the frame fits that plane onto the window and the declared
+    // coordinates land on the window pixels they name.
+    let plane = surface.bounds(0).expect("the plane measures").w;
+    let frame = region::Frame {
+        img: SurfaceSize::new(plane, plane),
+        win: WindowSize::new(200.0, 200.0),
+        pan: WindowVector::zero(),
+        scale: 200.0 / plane,
+        angle: 0.0,
+    };
+    let mut pass = canvas
+        .renderer
+        .display_pass(&canvas.device)
+        .expect("a display-list pass");
+    let texture = pass
+        .draw(&canvas.device, &canvas.queue, &list, &frame, canvas.size)
+        .expect("the list draws")
+        .clone();
+    let whole = dim::whole(200.0, 200.0);
+    canvas.renderer.texture(
+        &texture,
+        whole,
+        Quad::rect(whole),
+        Color::WHITE,
+        Filter::Linear,
+    );
+    let pixels = canvas.print();
+
+    // The group transform moved the square to 20..100.
+    assert_eq!(pixels.at(60, 60), [255, 0, 0, 255], "the square, moved");
+    assert_eq!(
+        pixels.at(10, 10),
+        [CLEAR.r, CLEAR.g, CLEAR.b, CLEAR.a],
+        "nothing paints outside it"
+    );
+    // The ramp is one color here, so the fill is checked, not the ramp.
+    assert_eq!(pixels.at(150, 50), [0, 0, 255, 255], "the ramp's rect");
+    // The clip keeps the left half of the green band and drops the right.
+    assert_eq!(pixels.at(30, 150), [0, 255, 0, 255], "inside the clip");
+    assert_eq!(
+        pixels.at(150, 150),
+        [CLEAR.r, CLEAR.g, CLEAR.b, CLEAR.a],
+        "outside the clip"
+    );
+    // The whole frame against the plane `resvg` paints of the same document: two
+    // painters disagree on every antialiased edge, so the budget is generous, and
+    // a list that landed somewhere else misses it by far.
+    // The comparison is font-neutral: a host with no fonts flattens the text to
+    // nothing in both painters.
+    let want = surface
+        .render(vv_source::surface::View::whole(0, 200.0 / plane))
+        .expect("the plane renders");
+    assert_eq!(
+        (want.width().raw(), want.height().raw()),
+        canvas.size,
+        "the plane paints at the window size"
+    );
+    let off = misses_the_pixels(&pixels, &want, canvas.size);
+    assert!(
+        off * 50 < 200 * 200,
+        "{off} of 40000 pixels miss the plane, so the list did not land on it"
+    );
+}
+
+/// How many pixels of `frame` disagree with the raster `want`.
+///
+/// A vector file paints no paper of its own, so the raster is transparent where
+/// the tree draws nothing and the frame shows the window color there.
+/// Partial alpha is an antialiased edge and answers to neither painter.
+fn misses_the_pixels(frame: &Pixels, want: &vv_source::DecodedImage, size: (u32, u32)) -> usize {
+    let clear = [CLEAR.r, CLEAR.g, CLEAR.b, CLEAR.a];
+    let mut off = 0;
+    for y in 0..size.1 as usize {
+        for x in 0..size.0 as usize {
+            let at = (y * size.0 as usize + x) * 4;
+            let painted = &want.as_rgba()[at..at + 4];
+            let expected = match painted[3] {
+                0 => clear,
+                255 => [painted[0], painted[1], painted[2], painted[3]],
+                _ => continue,
+            };
+            if frame
+                .at(x, y)
+                .iter()
+                .zip(&expected)
+                .any(|(a, b)| a.abs_diff(*b) > 24)
+            {
+                off += 1;
+            }
+        }
+    }
+    off
+}
+
 /// An SVG fills the pixel its rect names.
 #[test]
 #[ignore = "needs a Vulkan device"]

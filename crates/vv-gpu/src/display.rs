@@ -30,15 +30,19 @@ use std::{collections::HashMap, sync::Arc};
 use derive_more::{Display, Error, From};
 use vello::{
     AaConfig, AaSupport, RenderParams, Renderer as VelloRenderer, RendererOptions, Scene as Vello,
-    kurbo::Affine,
-    peniko::{Blob, Color as VelloColor, Fill, ImageAlphaType, ImageBrush, ImageData, ImageFormat},
+    kurbo::{self, Affine},
+    peniko::{
+        self as peniko, Blob, Color as VelloColor, ColorStop, Extend, Fill, Gradient, GradientKind,
+        ImageAlphaType, ImageBrush, ImageData, ImageFormat, LinearGradientPosition,
+        RadialGradientPosition,
+    },
 };
 
 use crate::{
     DecodedImage,
     draw::Color,
     region,
-    scene::{Paint, Primitive},
+    scene::{FillRule, Paint, Primitive, Spread, Stop},
     texture::{Texture, Uploader},
 };
 
@@ -142,12 +146,53 @@ impl SceneView {
         for primitive in list.iter() {
             match primitive {
                 Primitive::Rect { rect, paint } => {
-                    self.list
-                        .fill(Fill::NonZero, to_window, brush(*paint), None, rect);
+                    // A rect carries no transform, so both its shape and its
+                    // paint live in surface units.
+                    self.paint(Fill::NonZero, to_window, paint, None, rect);
                 }
-                Primitive::Path { path, paint } => {
-                    self.list
-                        .fill(Fill::NonZero, to_window, brush(*paint), None, path);
+                Primitive::Path {
+                    path,
+                    transform,
+                    fill,
+                    fill_rule,
+                    stroke,
+                } => {
+                    let placed = to_window * *transform;
+                    // A ramp is written in surface units and the shape in its
+                    // own, so the brush takes the inverse the shape applied.
+                    let paint_at = Some(transform.inverse());
+                    if let Some(paint) = fill {
+                        self.paint(vello_fill_rule(*fill_rule), placed, paint, paint_at, path);
+                    }
+                    if let Some(outline) = stroke {
+                        self.outline(outline, placed, paint_at, path);
+                    }
+                }
+                Primitive::PushClip {
+                    path,
+                    transform,
+                    fill_rule,
+                } => {
+                    self.list.push_clip_layer(
+                        vello_fill_rule(*fill_rule),
+                        to_window * *transform,
+                        path,
+                    );
+                }
+                Primitive::PopClip | Primitive::PopLayer => self.list.pop_layer(),
+                Primitive::PushLayer { alpha } => {
+                    // vello opens a layer only around a clip shape, so a plain
+                    // opacity layer clips to the whole target: every draw of
+                    // this pass is written in window pixels.
+                    let whole =
+                        kurbo::Rect::new(0.0, 0.0, f64::from(self.size.0), f64::from(self.size.1));
+                    self.list.push_layer(
+                        Fill::NonZero,
+                        peniko::Mix::Normal,
+                        *alpha,
+                        Affine::IDENTITY,
+                        &whole,
+                    );
                 }
                 Primitive::Image { pixels, transform } => {
                     let key = pixels.as_rgba().as_ptr() as usize;
@@ -242,9 +287,117 @@ pub fn to_window(frame: &region::Frame) -> Affine {
 }
 
 /// The one-color brush of a solid paint.
-fn brush(paint: Paint) -> VelloColor {
+/// The brush of a paint, whether a flat color or a ramp this call owns.
+enum Brush {
+    /// One color.
+    Solid(VelloColor),
+    /// A ramp, whose geometry vello reads through a brush transform.
+    Ramp(Gradient),
+}
+
+impl SceneView {
+    /// Fill `shape` with `paint`.
+    ///
+    /// `paint_at` maps the paint's own space onto the shape's, which is the
+    /// inverse of the shape transform because every ramp of this tree is
+    /// written in surface units.
+    fn paint(
+        &mut self,
+        style: Fill,
+        placed: Affine,
+        paint: &Paint,
+        paint_at: Option<Affine>,
+        shape: &impl kurbo::Shape,
+    ) {
+        match brush(paint) {
+            Brush::Solid(color) => self.list.fill(style, placed, color, None, shape),
+            Brush::Ramp(ramp) => self.list.fill(style, placed, &ramp, paint_at, shape),
+        }
+    }
+
+    /// Stroke `path` with the outline `outline` names.
+    fn outline(
+        &mut self,
+        outline: &crate::scene::Stroke,
+        placed: Affine,
+        paint_at: Option<Affine>,
+        path: &kurbo::BezPath,
+    ) {
+        match brush(&outline.paint) {
+            Brush::Solid(color) => self.list.stroke(&outline.style, placed, color, None, path),
+            Brush::Ramp(ramp) => self
+                .list
+                .stroke(&outline.style, placed, &ramp, paint_at, path),
+        }
+    }
+}
+
+/// The brush of `paint`.
+fn brush(paint: &Paint) -> Brush {
     match paint {
-        Paint::Solid(color) => vello_color(color),
+        Paint::Solid(color) => Brush::Solid(vello_color(*color)),
+        Paint::Linear {
+            from,
+            to,
+            stops,
+            spread,
+        } => Brush::Ramp(Gradient {
+            kind: GradientKind::Linear(LinearGradientPosition {
+                start: kurbo::Point::new(from.0, from.1),
+                end: kurbo::Point::new(to.0, to.1),
+            }),
+            extend: extend(*spread),
+            stops: ramp(stops),
+            ..Gradient::default()
+        }),
+        Paint::Radial {
+            center,
+            radius,
+            focus,
+            focus_radius,
+            stops,
+            spread,
+        } => Brush::Ramp(Gradient {
+            kind: GradientKind::Radial(RadialGradientPosition {
+                start_center: kurbo::Point::new(focus.0, focus.1),
+                start_radius: *focus_radius as f32,
+                end_center: kurbo::Point::new(center.0, center.1),
+                end_radius: *radius as f32,
+            }),
+            extend: extend(*spread),
+            stops: ramp(stops),
+            ..Gradient::default()
+        }),
+    }
+}
+
+/// The stops of a ramp, as vello reads them.
+fn ramp(stops: &[Stop]) -> peniko::ColorStops {
+    let mut out = peniko::ColorStops::new();
+    for stop in stops {
+        out.push(ColorStop {
+            offset: stop.offset,
+            color: vello_color(stop.color).into(),
+        });
+    }
+    out
+}
+
+/// What a ramp does past its last stop.
+const fn extend(spread: Spread) -> Extend {
+    match spread {
+        Spread::Pad => Extend::Pad,
+        Spread::Repeat => Extend::Repeat,
+        // A mirror is a reflect: the ramp runs backwards past its last stop.
+        Spread::RepeatMirror => Extend::Reflect,
+    }
+}
+
+/// The fill rule of a shape.
+const fn vello_fill_rule(rule: FillRule) -> Fill {
+    match rule {
+        FillRule::NonZero => Fill::NonZero,
+        FillRule::EvenOdd => Fill::EvenOdd,
     }
 }
 

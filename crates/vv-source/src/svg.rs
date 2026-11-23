@@ -70,6 +70,26 @@ pub struct Vector {
 }
 
 impl Vector {
+    /// The primitives of this document, or the feature that keeps it a raster.
+    ///
+    /// A list draws at any zoom, so a document that answers one needs no region
+    /// patch; the walk answers the first feature it cannot express and the
+    /// caller keeps the raster path.
+    pub(crate) fn primitives(
+        &self,
+    ) -> Result<Vec<crate::scene::Primitive>, crate::vector_scene::Unsupported> {
+        // The tree paints in declared units and the plane is a base raster, so
+        // the list carries the factor `render_region` applies to the same tree.
+        let space = kurbo::Affine::scale(f64::from(1.0 / self.declared_per_base()));
+        crate::vector_scene::primitives(&self.tree, space)
+    }
+
+    /// The parsed tree, for a test that reads it directly.
+    #[cfg(test)]
+    pub(crate) fn tree(&self) -> &usvg::Tree {
+        &self.tree
+    }
+
     /// The declared size, guarded against zero, negative and non-finite.
     fn declared_size(&self) -> Size {
         let size = self.tree.size();

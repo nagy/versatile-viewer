@@ -39,6 +39,7 @@ pub mod sign;
 pub mod surface;
 pub mod svg;
 pub mod treemap;
+mod vector_scene;
 
 // The layers below, named through this crate as well, so one `crate::dim` path
 // serves a module of this crate and a caller of it.

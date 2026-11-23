@@ -721,6 +721,25 @@ impl Surface for VectorSurface {
         Ok(None)
     }
 
+    fn display(&self, plane: usize) -> Result<Option<Arc<[Primitive]>>, SurfaceError> {
+        // A vector tree is one plane, and its parsed nodes are already the list:
+        // a group contributes its clip and its opacity, a path its fill and its
+        // outline, and a text node its own outlined glyphs.
+        if plane != 0 {
+            return Err(SurfaceError::Plane(plane));
+        }
+        match self.vector.primitives() {
+            Ok(list) => Ok(Some(Arc::from(list))),
+            Err(why) => {
+                // The document keeps the raster path, so its picture stays
+                // exactly what it was before this source could answer a list at
+                // all.
+                tracing::debug!(feature = why.name(), "svg display list");
+                Ok(None)
+            }
+        }
+    }
+
     // The tree paints at any scale, so a settled zoom pays for a sharper patch
     // of the same picture.
     fn can_refine(&self) -> bool {

@@ -88,6 +88,10 @@ libc = "0.2.191"
 # The key format belongs to the converter seam, so this crate hashes it and
 # hands `vv-cache` an opaque string.
 sha2 = "0.11.1"
+# The geometry a `scene` primitive names: the path of a vector leaf, the affine
+# that places it, and the stroke style of an outline. The same version `vv-core`
+# declares, and the one peniko wants, so the tree carries one `kurbo`.
+kurbo = "0.13.1"
 # The diagnostics facade. This layer emits events and names no output layer:
 # the binary owns the subscriber and the `RUST_LOG` filter.
 tracing = "0.1.44"
