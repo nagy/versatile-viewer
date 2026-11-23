@@ -232,8 +232,8 @@
           # The headless GPU paints ride the same derivation, on Mesa's lavapipe.
           # `cargo test --workspace` already links `gpu_offscreen`, so a second
           # drv would rebuild the seven members and one dev dependency only to
-          # run sixteen `#[ignore]`d tests: 83 s in the release profile and 10 s
-          # in dev.
+          # run the `#[ignore]`d paints: 83 s in the release profile and 10 s in
+          # dev.
           # lavapipe is a software Vulkan driver: it needs no GPU, no device node
           # and no display, so a build sandbox runs it.
           # The loader reads the ICD manifest that VK_DRIVER_FILES names, and the
@@ -333,6 +333,11 @@
             # linker, so `cargo run` finds the X11 libraries and `cargo build`
             # links as fast as a check does.
             RUSTFLAGS = "${rpathFlags} ${env.RUSTFLAGS}";
+            # The software Vulkan the checks run the `#[ignore]`d paints on, so
+            # the test command needs no store path, and `VV_GPU_REQUIRED` turns
+            # a host that answers no adapter into a failure instead of a skip.
+            VK_DRIVER_FILES = "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.x86_64.json";
+            VV_GPU_REQUIRED = "1";
           };
         };
     };

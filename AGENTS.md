@@ -37,12 +37,10 @@ The root `Cargo.toml` carries the metadata and the lint table every member inher
 - Run both gates when a change touches the build. `nix flake check` covers the tree, and `nix build .#default` proves the shipped binary, because the release link and the rpath fixup run there and nowhere else.
 - Run `nix build .#checks.default` for a fast loop over the test gate alone.
 - Run `nix fmt` to format the tree.
-- A local run of the GPU paints names the driver itself, because a host without one skips them and the run still passes:
+- The devshell exports the driver the checks run the `#[ignore]`d paints on — `VK_DRIVER_FILES` of `pkgs.mesa`'s lavapipe, and `VV_GPU_REQUIRED=1` — so one command runs them, and a host with no adapter fails instead of skipping every test:
   ```sh
-  export VK_DRIVER_FILES=$(nix build --no-link --print-out-paths nixpkgs#mesa)/share/vulkan/icd.d/lvp_icd.x86_64.json
-  VV_GPU_REQUIRED=1 cargo test -p vv-cli --test gpu_offscreen -- --ignored
+  cargo test -p vv-cli --test gpu_offscreen -- --ignored
   ```
-  `VV_GPU_REQUIRED` turns a missing adapter into a failure, so a run that was meant to prove the paints cannot pass by skipping them.
 - Run `nix build .#versatile-viewer-doc` to build the rustdoc HTML of every member.
 - The fast gates build in the `dev` profile and only the package builds in `release`.
   `devEnv` in `flake.nix` sets `CARGO_PROFILE = "dev"`, because crane answers `release` when that variable stays unset, and a test binary gains nothing from the cross-crate inlining that `[profile.release]` buys.

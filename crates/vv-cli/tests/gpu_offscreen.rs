@@ -3,17 +3,16 @@
 //!
 //! The default gate has no adapter, so every test here is `#[ignore]`, and the
 //! `checks.gpu` gate runs them on Mesa's lavapipe, a software Vulkan driver
-//! that needs no GPU and no display.
-//! A host runs the same tests by hand:
+//! that needs no GPU and no display. The devshell exports that driver, so one
+//! command runs the same paints there:
 //!
 //! ```sh
-//! export VK_DRIVER_FILES=$(nix build --no-link --print-out-paths nixpkgs#mesa)/share/vulkan/icd.d/lvp_icd.x86_64.json
 //! cargo test --test gpu_offscreen -- --ignored
 //! ```
 //!
-//! A test that finds no adapter prints one line and passes, so the same command
-//! is safe on a host without Vulkan, and `VV_GPU_REQUIRED` turns that skip into
-//! a failure for a gate that provides a driver of its own.
+//! A test that finds no adapter prints one line and passes, so a run outside
+//! the shell stays safe on a host without Vulkan, and `VV_GPU_REQUIRED`, which
+//! the shell and the gate set, turns that skip into a failure.
 //!
 //! # What the tests pin
 //!
