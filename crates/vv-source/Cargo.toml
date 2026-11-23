@@ -41,9 +41,12 @@ rayon = "1.12.0"
 # a diagram needs.
 # `svgz` accepts a gzip codestream.
 # The static subset only: no script, no animation, no `a` element.
-# `raster-images` stays off, so an embedded JPEG/WebP/GIF in an <image>
-# element does not render; an embedded PNG does, because the `png` crate is a
-# core dependency of usvg.
+# `raster-images` stays off, so the raster path of an embedded JPEG/WebP/GIF in
+# an <image> element draws nothing; an embedded PNG does, because the `png` crate
+# is a core dependency of usvg.
+# The display list is not bound by that: `vector_scene` decodes a picture leaf
+# through the `image` features above, so a listed document draws all four. A
+# document that answers no list keeps the raster path and keeps this gap.
 resvg = { version = "0.50.0", default-features = false, features = [
   "system-fonts",
   "svgz",

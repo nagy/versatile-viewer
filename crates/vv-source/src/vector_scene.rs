@@ -52,10 +52,6 @@ pub(crate) enum Unsupported {
     Pattern,
     /// A clip path this walk cannot describe as one shape.
     Clip,
-    /// A nested SVG document inside an `<image>`.
-    Nested,
-    /// An image whose bytes this build cannot decode.
-    Image,
 }
 
 impl Unsupported {
@@ -68,8 +64,6 @@ impl Unsupported {
             Self::Blend => "blend mode",
             Self::Pattern => "pattern",
             Self::Clip => "clip path",
-            Self::Nested => "nested svg",
-            Self::Image => "image format",
         }
     }
 }
@@ -213,9 +207,23 @@ fn image_of(
         return Ok(());
     }
     let bytes = match image.kind() {
-        usvg::ImageKind::PNG(data) | usvg::ImageKind::JPEG(data) => data,
-        usvg::ImageKind::GIF(_) | usvg::ImageKind::WEBP(_) => return Err(Unsupported::Image),
-        usvg::ImageKind::SVG(_) => return Err(Unsupported::Nested),
+        usvg::ImageKind::PNG(data)
+        | usvg::ImageKind::JPEG(data)
+        | usvg::ImageKind::GIF(data)
+        | usvg::ImageKind::WEBP(data) => data,
+        // A nested document is not a picture but a tree, so it is walked as one:
+        // its own root paints inside the box this `<image>` names, and `usvg`
+        // folded that box into `image_ts` (which maps the nested viewport onto
+        // the box) before it handed the tree over.
+        // A tree with a feature this list cannot express answers the same error
+        // from the walk below, and then the whole document keeps its raster.
+        usvg::ImageKind::SVG(tree) => {
+            let space = space * affine(image.abs_transform());
+            for node in tree.root().children() {
+                node_of(node, space, out)?;
+            }
+            return Ok(());
+        }
     };
     let Ok(decoded) = image::load_from_memory(bytes) else {
         // A picture that does not decode draws nothing, which is better than
@@ -496,6 +504,147 @@ mod tests {
         assert!(matches!(list[0], Primitive::PushClip { .. }));
         assert!(matches!(list[1], Primitive::Path { .. }));
         assert!(matches!(list[2], Primitive::PopClip));
+    }
+
+    /// A `data:` URI of `bytes`, percent-encoded.
+    ///
+    /// A picture reaches the parser through a data URI, and percent-encoding
+    /// keeps the bytes readable in this file instead of a base64 blob.
+    fn data_uri(mime: &str, bytes: &[u8]) -> String {
+        use std::fmt::Write as _;
+        let mut uri = format!("data:{mime},");
+        for byte in bytes {
+            write!(uri, "%{byte:02X}").expect("a string write");
+        }
+        uri
+    }
+
+    /// A red picture of two by two, encoded here so no test reads a fixture.
+    fn picture(encode: fn(&mut Vec<u8>)) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        encode(&mut bytes);
+        bytes
+    }
+
+    fn gif(bytes: &mut Vec<u8>) {
+        // The encoder trait is in scope for `encode`, which the GIF encoder
+        // names directly.
+        let mut encoder = image::codecs::gif::GifEncoder::new(&mut *bytes);
+        encoder
+            .encode(
+                &[255, 0, 0, 255].repeat(4),
+                2,
+                2,
+                image::ExtendedColorType::Rgba8,
+            )
+            .expect("a gif");
+    }
+
+    fn webp(bytes: &mut Vec<u8>) {
+        use image::ImageEncoder as _;
+        image::codecs::webp::WebPEncoder::new_lossless(&mut *bytes)
+            .write_image(
+                &[255, 0, 0, 255].repeat(4),
+                2,
+                2,
+                image::ExtendedColorType::Rgba8,
+            )
+            .expect("a webp");
+    }
+
+    /// A document that holds one picture of `mime` in a box of 10 by 10.
+    fn with_picture(mime: &str, bytes: &[u8]) -> String {
+        format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+                 <image href="{}" width="10" height="10"/>
+               </svg>"#,
+            data_uri(mime, bytes)
+        )
+    }
+
+    /// The picture of a one-leaf list, and the box it fills.
+    fn only_picture(list: &[Primitive]) -> (&DecodedImage, kurbo::Affine) {
+        assert_eq!(list.len(), 1, "one picture: {list:?}");
+        let Primitive::Image { pixels, transform } = &list[0] else {
+            panic!("a picture: {list:?}");
+        };
+        (pixels, *transform)
+    }
+
+    /// A GIF is a picture like a PNG, both to the decoder and to the list.
+    #[test]
+    fn an_embedded_gif_becomes_a_picture() {
+        let list = walk(&with_picture("image/gif", &picture(gif))).expect("a picture lists");
+        let (pixels, transform) = only_picture(&list);
+        assert_eq!((pixels.width().raw(), pixels.height().raw()), (2, 2));
+        assert_eq!(&pixels.as_rgba()[..4], [255, 0, 0, 255]);
+        // The box is 10 by 10 declared units and the picture is 2 by 2 pixels,
+        // so the pixels scale onto it.
+        let corner = transform * kurbo::Point::new(2.0, 2.0);
+        assert!(
+            (corner.x - 10.0).abs() < 1e-3 && (corner.y - 10.0).abs() < 1e-3,
+            "{corner:?}"
+        );
+    }
+
+    /// And so is a WebP, in both of its encodings.
+    #[test]
+    fn an_embedded_webp_becomes_a_picture() {
+        let list = walk(&with_picture("image/webp", &picture(webp))).expect("a picture lists");
+        let (pixels, _) = only_picture(&list);
+        assert_eq!(&pixels.as_rgba()[..4], [255, 0, 0, 255]);
+    }
+
+    /// A nested document is a tree, so it walks into the box its `<image>` names.
+    #[test]
+    fn a_nested_document_walks_into_its_box() {
+        let inner = r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+                         <rect width="10" height="10" fill="#0000ff"/>
+                       </svg>"##;
+        let document = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10">
+                 <image x="10" y="0" width="10" height="10" href="{}"/>
+               </svg>"#,
+            data_uri("image/svg+xml", inner.as_bytes())
+        );
+        let list = walk(&document).expect("a nested document lists");
+        assert_eq!(list.len(), 1, "the nested rect and nothing else: {list:?}");
+        let Primitive::Path {
+            transform, fill, ..
+        } = &list[0]
+        else {
+            panic!("the nested rect: {list:?}");
+        };
+        assert_eq!(*fill, Some(Paint::Solid(Color::new(0, 0, 255, 255))));
+        // The nested viewport fills the box, so its own corners land on the
+        // box's corners in the units of the document that holds it.
+        let corner = |x: f64, y: f64| *transform * kurbo::Point::new(x, y);
+        let (near, far) = (corner(0.0, 0.0), corner(10.0, 10.0));
+        assert!(
+            (near.x - 10.0).abs() < 1e-3 && near.y.abs() < 1e-3,
+            "{near:?}"
+        );
+        assert!(
+            (far.x - 20.0).abs() < 1e-3 && (far.y - 10.0).abs() < 1e-3,
+            "{far:?}"
+        );
+    }
+
+    /// A feature the list cannot express keeps the whole document a raster, even
+    /// when it sits one document down.
+    #[test]
+    fn a_nested_document_with_a_filter_answers_unsupported() {
+        let inner = r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+                         <defs><filter id="f"><feGaussianBlur stdDeviation="1"/></filter></defs>
+                         <rect width="10" height="10" fill="#fff" filter="url(#f)"/>
+                       </svg>"##;
+        let document = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+                 <image width="10" height="10" href="{}"/>
+               </svg>"#,
+            data_uri("image/svg+xml", inner.as_bytes())
+        );
+        assert_eq!(walk(&document), Err(Unsupported::Filter));
     }
 
     #[test]

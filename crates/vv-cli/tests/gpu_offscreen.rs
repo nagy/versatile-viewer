@@ -471,6 +471,83 @@ fn paint_plane(canvas: &mut Canvas, surface: &dyn vv_source::surface::Surface) -
     dest
 }
 
+/// A nested document inside an `<image>` walks into the box that names it.
+///
+/// A nested SVG is a tree and not a picture (see `vector_scene::image_of`), so
+/// the walk descends into it with the box composed into the space. A nested
+/// document that landed in declared units instead would draw the red square in
+/// the corner of the plane.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_nested_document_lands_in_its_box() {
+    use vv_core::{
+        dim::{SurfaceSize, WindowSize, WindowVector},
+        region,
+    };
+
+    // A `data:` URI of `bytes`, percent-encoded: a nested document reaches the
+    // parser that way, and percent-encoding keeps it readable here.
+    fn data_uri(mime: &str, bytes: &[u8]) -> String {
+        use std::fmt::Write as _;
+        let mut uri = format!("data:{mime},");
+        for byte in bytes {
+            write!(uri, "%{byte:02X}").expect("a string write");
+        }
+        uri
+    }
+
+    let inner = r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+                     <rect width="10" height="10" fill="#ff0000"/>
+                   </svg>"##;
+    let document = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200">
+             <rect width="200" height="200" fill="#0000ff"/>
+             <image x="100" y="0" width="100" height="200" href="{}"/>
+           </svg>"##,
+        data_uri("image/svg+xml", inner.as_bytes())
+    );
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("nested.svg");
+    std::fs::write(&path, document).expect("write the svg");
+    let surface = vv_source::surface::open_surface(&path).expect("the document opens");
+    let list = surface
+        .display(0)
+        .expect("a list")
+        .expect("a nested document lists");
+
+    let mut canvas = canvas!(200, 200);
+    canvas.begin(CLEAR);
+    let plane = surface.bounds(0).expect("the plane measures").w;
+    let frame = region::Frame {
+        img: SurfaceSize::new(plane, plane),
+        win: WindowSize::new(200.0, 200.0),
+        pan: WindowVector::zero(),
+        scale: 200.0 / plane,
+        angle: 0.0,
+    };
+    let mut pass = canvas
+        .renderer
+        .display_pass(&canvas.device)
+        .expect("a display-list pass");
+    let painted = pass
+        .draw(&canvas.device, &canvas.queue, &list, &frame, canvas.size)
+        .expect("the list draws");
+    canvas.renderer.texture(
+        painted.texture,
+        painted.src,
+        painted.quad,
+        Color::WHITE,
+        Filter::Linear,
+    );
+    let pixels = canvas.print();
+    assert_eq!(pixels.at(50, 100), [0, 0, 255, 255], "the outer document");
+    assert_eq!(
+        pixels.at(150, 100),
+        [255, 0, 0, 255],
+        "the nested document, inside its box"
+    );
+}
+
 /// A display list paints its rects and its pictures at any zoom.
 ///
 /// This is the seam itself: the list is written in surface units, the frame maps
