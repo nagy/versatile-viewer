@@ -1305,6 +1305,34 @@ mod tests {
         }
     }
 
+    /// Every label of a map names one face, so the display pass parses it once.
+    ///
+    /// A copy per label would copy the whole face per rectangle of the map, and
+    /// the pass caches the outlines it resolved by the bytes of the face, so one
+    /// shared `Arc` is what keeps a relaid map cheap.
+    #[test]
+    fn the_labels_of_a_map_share_one_face() {
+        let surface = TreemapSurface::from_tree(sample_tree());
+        let list = surface.display(0).expect("a list").expect("some");
+        let mut faces = list.iter().filter_map(|primitive| {
+            if let Primitive::Glyphs { run, .. } = primitive {
+                Some(std::sync::Arc::clone(&run.font))
+            } else {
+                None
+            }
+        });
+        let Some(first) = faces.next() else {
+            // A host with no fonts draws no label, so there is no face to share.
+            return;
+        };
+        for face in faces {
+            assert!(
+                Arc::ptr_eq(&first, &face),
+                "every label of a map names the same face"
+            );
+        }
+    }
+
     #[test]
     fn a_label_run_advances_from_its_center() {
         let Some((font, face)) = crate::svg::sans_serif_face() else {

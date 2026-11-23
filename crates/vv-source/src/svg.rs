@@ -309,7 +309,22 @@ pub(crate) fn fontdb() -> &'static Arc<fontdb::Database> {
 /// host's sans-serif through the same database an SVG parse reads.
 /// `None` on a host with no fonts, and then a label draws nothing: the shape it
 /// names is still there.
+///
+/// The bytes are read once and shared by every caller, so two things hold:
+/// a label run takes a clone of one `Arc` instead of a copy of the whole face,
+/// which is hundreds of kilobytes and would be copied per label of a map, and
+/// every run of one face names the same bytes, which is the key the display
+/// pass caches a parsed face by.
+///
+/// No owner can pass this down: a label is built by a walk that holds no
+/// context, and the face answers the same pair for the whole process.
 pub(crate) fn sans_serif_face() -> Option<(Arc<[u8]>, u32)> {
+    static FACE: OnceLock<Option<(Arc<[u8]>, u32)>> = OnceLock::new();
+    FACE.get_or_init(load_sans_serif).clone()
+}
+
+/// The one load behind [`sans_serif_face`].
+fn load_sans_serif() -> Option<(Arc<[u8]>, u32)> {
     let query = fontdb::Query {
         families: &[fontdb::Family::SansSerif],
         ..fontdb::Query::default()
@@ -556,6 +571,28 @@ mod tests {
 
     fn size(w: f32, h: f32) -> Size {
         Size { w, h }
+    }
+
+    /// The face a label is drawn with is read once and shared.
+    ///
+    /// A map labels every one of its rectangles, and a copy per label would copy
+    /// the whole face — hundreds of kilobytes — per label. The display pass also
+    /// caches the outlines it resolved by the bytes of the face, so one `Arc`
+    /// for the process is what keeps a relaid map from outlining every glyph
+    /// again.
+    #[test]
+    fn the_sans_serif_face_is_read_once() {
+        let Some((first, index)) = sans_serif_face() else {
+            // A host with no fonts draws no label, which is the documented
+            // answer, so there is no cache to check here.
+            return;
+        };
+        let (second, again) = sans_serif_face().expect("a host with a face has one");
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &second),
+            "every label names the same bytes"
+        );
+        assert_eq!(index, again, "and the same face of a collection");
     }
 
     #[test]
