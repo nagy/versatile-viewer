@@ -11,10 +11,10 @@ License: AGPL-3.0-or-later.
 ## Layout
 
 ```
-crates/vv-core/    dim draw region region_sel rotate tween keyrepeat push, the shared constants
-crates/vv-pixels/  DecodedImage, resample_rgba, cap_texture_side, rgba_from_samples, error, placeholder
+crates/vv-core/    dim draw pixels scene region region_sel rotate tween keyrepeat push, the shared constants
+crates/vv-pixels/  resample_rgba, cap_texture_side, rgba_from_samples, error, placeholder
 crates/vv-cache/   Cache, CacheError, CachedThumb, WRITE_BUDGET (thumbnails and converted answers)
-crates/vv-gpu/     gpu render texture
+crates/vv-gpu/     gpu render display texture
 crates/vv-source/  sign surface svg pdf book convert treemap decode
 crates/vv-view/    input zoomkeys push pane blurbg loader grid view viewer
 crates/vv-mcp/     mcp
@@ -55,6 +55,7 @@ The root `Cargo.toml` carries the metadata and the lint table every member inher
 ## Architecture
 
 A path becomes a `Surface`, a `Surface` renders a `View` (plane, optional crop, scale) into an RGBA buffer, a decode worker uploads that buffer as a texture, and the frame draws the textures as quads.
+A resolution-independent source may answer a `scene::Primitive` list instead, and then the GPU draws the primitives at the zoom the window shows (ADR 0007).
 
 ### Render
 
@@ -64,6 +65,13 @@ A path becomes a `Surface`, a `Surface` renders a `View` (plane, optional crop, 
 - `Gpu::new` registers a device-lost callback and the frame loop stops with the driver's reason. A recovery path is not written.
 - `MAX_TEXTURE_SIDE` is the decode policy, and `texture::Uploader` clamps every upload to the adapter, so a decoded size never depends on the host.
 - Every decode worker uploads its own texture through `texture::Uploader`, because `wgpu::Queue` is `Send + Sync`. Never move a pixel copy back to the main thread.
+- A source answers primitives or a raster, and `Surface::display` answers `None` by default so every backend keeps the raster path until it opts in.
+  The list holds `scene::Primitive` values in surface units and carries no scale and no region, so a zoom or a pan is a change of transform: the view builds the list once per plane and draws it every frame.
+- A source that answers `Some` from `display` is the list, so the view draws neither `view_tex` nor a region patch for it, and `refresh_plane` asks for the list of the new plane instead of painting the plane again.
+  Drawing both would double the alpha of an antialiased edge.
+- `TreemapSurface` is the only source that answers a list today. Its labels are `Primitive::Image` leaves rasterized through the SVG path, so no glyph machinery exists yet: a glyph run arrives with the text work, which is why `Primitive` carries no `Glyphs` variant.
+- `vv-gpu::display::SceneView` is the only vello code in the tree. It renders into a window-sized `Rgba8Unorm` target that the quad pipeline composites as one draw, and it uploads each image leaf once, keyed by the leaf's address, so the table clears when a different list arrives.
+- The scene type lives in `vv-core`, below both the sources and the renderer, so `Primitive::Image` carries `pixels::DecodedImage` and never a texture handle.
 - `Renderer::render_into` paints the batch into any texture view and `Renderer::flush` presents the swapchain. A host with no window passes a texture of its own, which is how the `#[ignore]`d offscreen paints read pixels back.
 - A captured drag grabs the pointer and reads raw device deltas. A free pointer reads the platform position. `Input::capture` (`crates/vv-view/src/input.rs`) owns that swap, so a hover point never drifts.
 - A lost focus forgets every held key and button and drops the grab, because the releases never arrive.
@@ -117,6 +125,7 @@ A path becomes a `Surface`, a `Surface` renders a `View` (plane, optional crop, 
 - All pixel resize goes through `resample_rgba` (`crates/vv-pixels/src/lib.rs`), the `fast_image_resize` SIMD path with Lanczos3. Do not call `image::imageops::resize` for a downscale, and keep the `rayon` feature of `fast_image_resize` off, so a resize never spawns nested workers inside a decode job.
 - Dispatch decode on sniffed content, never on the file name. The two exceptions are a path a converter rule claims and a `.treemap` path: neither carries content this viewer reads, so the extension is the only signal there is.
 - `DecodedImage` fields stay private. `new` and `from_exact` are the entrances, and `width`, `height`, `as_rgba` and `into_rgba` the ways out, so a wrong buffer never exists to check.
+  The type lives in `vv-core::pixels` and `vv-pixels` re-exports it, because a `scene::Primitive` names it from below the pixel layer, and `BufferError` is the container's own error rather than a decoder's.
 - A source is a `Surface`. A backend writes `render_whole`, and a backend with a region anchor (the vector tree, the PDF rasterizer) overrides `render` to pay only for the pixels the caller asked for. A region it cannot serve answers `SurfaceError::Unsupported` and never the whole plane.
 - A `.treemap` path opens `treemap::TreemapSurface`, which reads no byte of the file: the extension asks for the module's sample tree, and the content decides nothing. Its plane takes the shape of the window, so `Surface::frame_window` answers a new plane on a resize, the view re-fits it, and `ViewState::refresh_plane` repaints the whole-plane texture the region patch falls back to, because that texture carries the layout of the frame before it; every other source keeps the one size it reports.
 - A raster plane measures the capped size it renders, so `bounds` and the pixels of a scale-1.0 render agree.
@@ -149,7 +158,7 @@ A path becomes a `Surface`, a `Surface` renders a `View` (plane, optional crop, 
 - `proptest` covers the pure helpers of `region`, the grid layout, the visual selection and the selection step, the resize fit and the ramp. Property tests are dev-only and never gate a release build.
   The `region` proptests keep `failure_persistence` off, so no `proptest-regressions/` entry exists, and a saved case becomes a plain `#[test]` beside the strategies with its shrunk values written out.
 - The GPU paints are `#[ignore]`d, because a plain `cargo test` has no adapter. `checks.gpu` runs them on Mesa's lavapipe, which needs no GPU, no device node and no display.
-  They cover the clear, a fill, a source rect, straight alpha, a turn, the texel grid of a 1:1 patch, the SVG, PDF, converted-source and book planes end to end, and a pushed picture into a blank viewer.
+  They cover the clear, a fill, a source rect, straight alpha, a turn, the texel grid of a 1:1 patch, the SVG, PDF, converted-source and book planes end to end, a pushed picture into a blank viewer, and the treemap's own list drawn through vello over the plane its window names.
 - The MCP tests run in two layers: unit tests in `crates/vv-mcp/src/mcp.rs` over an in-memory duplex against a fake sink, and `crates/vv-cli/tests/mcp_stdio.rs` over the real stdin and stdout of a child process.
 - A behavior change ships a test beside the code it changes.
 

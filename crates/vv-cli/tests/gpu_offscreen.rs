@@ -571,14 +571,14 @@ fn a_treemap_leaves_no_background_pixel() {
     assert_eq!(strays, 0, "the window color shows nowhere in the frame");
 }
 
-/// A treemap that lays itself out again repaints its fallback picture.
+/// A treemap that lays itself out again draws the layout of the window it names.
 ///
-/// The launch renders the plane of the default frame, and a window of another
-/// shape makes the source lay the tree out again (see `Surface::frame_window`).
-/// The whole-plane texture of the launch measures the layout of the old frame,
-/// so a frame that falls back to it — a zoom out that outruns the region patch —
-/// would draw the two layouts side by side, which reads as a picture that jumps.
-/// The fallback picture therefore repaints for the plane the window names.
+/// The launch frames the default window, and a window of another shape makes the
+/// source lay the tree out again (see `Surface::frame_window`).
+/// A treemap answers a display list, so a frame draws that list over the plane
+/// the source reports now. Every pixel outside the zoomed patch is compared
+/// against a raster of the same plane, so the geometry of the list and the
+/// geometry of the SVG document that used to paint it have to agree.
 #[test]
 #[ignore = "needs a Vulkan device"]
 fn a_resized_treemap_repaints_its_fallback_picture() {
