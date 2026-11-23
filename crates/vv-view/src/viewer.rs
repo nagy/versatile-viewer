@@ -76,7 +76,7 @@ use crate::{
         ROTATE_DRAG_SPAN, ROTATE_DRAG_SPEED, Ramps, SPREAD_EASE_TIME, ViewState, ZOOM_ANCHOR_DRIFT,
         ZOOM_DRAG_SPAN, ZOOM_DRAG_SPEED, ZoomMode, aim_fill_pan, attach_blur_bg, draw_cell,
         draw_patch, draw_selection, draw_turned, keep_pivot, pan_drag_speed, patch_covers,
-        put_back_view, read_nav_mouse, selection_rect, show_entry, view_filter,
+        put_back_view, read_nav_mouse, same_plane, selection_rect, show_entry, view_filter,
     },
     zoomkeys::TypedKeys,
 };
@@ -601,6 +601,8 @@ impl Viewer {
                 blur_bg: BlurBg::from_env_if_enabled(),
                 source: None,
                 source_plane: 0,
+                loader_plane: None,
+                plane_stale: false,
                 open_box: None,
                 cell_box: None,
                 open_align: OpenAlign::Free,
@@ -1070,6 +1072,20 @@ impl Viewer {
         let resized = self.last_win != Some((win_w, win_h));
         self.last_win = Some((win_w, win_h));
 
+        // A source that lays itself out for the window (a treemap) takes the
+        // frame the window holds now, so the fit covers it edge to edge and the
+        // window color never shows between two rectangles.
+        // The call runs every frame, because a source reaches the view after the
+        // open that asked for it, and it answers `false` until its frame moves.
+        if self.st.mode == Mode::Image {
+            self.st.frame_window(Vec2::new(win_w, win_h));
+            // The base picture follows the plane once the window holds still, so
+            // a drag spawns one worker and not one per frame.
+            if !resized {
+                self.st.refresh_plane(&r.uploader());
+            }
+        }
+
         // Dynamic window title: follow the open image in image view.
         // Back to the launch title in the grid mode.
         // A host pane owns no title: its `WM_NAME` is not a decoration that a
@@ -1210,12 +1226,28 @@ impl Viewer {
             while let Some(msg) = self.st.loader.as_ref().and_then(Loader::try_recv) {
                 match msg {
                     Ok(DecodeMsg::Header { width, height }) => {
-                        // Dimensions known: fit down at once (the ease
-                        // block only runs from the next frame on).
-                        self.st.img = Size {
+                        let announced = Size {
                             w: width.as_f32(),
                             h: height.as_f32(),
                         };
+                        self.st.loader_plane = Some(announced);
+                        // A worker reads the plane when it starts, so the source
+                        // is the authority on one that follows the window: a
+                        // treemap that laid itself out again since the start
+                        // keeps the plane on screen, and the base picture of that
+                        // plane follows (see `ViewState::refresh_plane`).
+                        let current = self
+                            .st
+                            .source
+                            .as_ref()
+                            .and_then(|source| source.bounds(self.st.source_plane).ok());
+                        if current.is_some_and(|now| !same_plane(now, announced)) {
+                            self.st.plane_stale = true;
+                            continue;
+                        }
+                        // Dimensions known: fit down at once (the ease
+                        // block only runs from the next frame on).
+                        self.st.img = announced;
                         self.st.refit_open();
                     }
                     Ok(DecodeMsg::Preview { frame, blur, patch }) => {
@@ -1258,7 +1290,19 @@ impl Viewer {
                             };
                             self.st.refit_open();
                         }
-                        self.st.view_tex = Some(frame.upload(&r.uploader())?);
+                        // The worker rendered the plane the header named, so a
+                        // plane the source laid out again since then keeps the
+                        // texture it has and asks for the picture of its own
+                        // (a treemap, see `ViewState::refresh_plane`).
+                        let measures = self
+                            .st
+                            .loader_plane
+                            .is_none_or(|plane| same_plane(plane, self.st.img));
+                        if measures {
+                            self.st.view_tex = Some(frame.upload(&r.uploader())?);
+                        } else {
+                            self.st.plane_stale = true;
+                        }
                         attach_blur_bg(
                             &mut self.st.blur_bg,
                             &r.uploader(),

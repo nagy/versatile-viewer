@@ -287,6 +287,24 @@ pub struct ViewState {
     /// window shows.
     /// None for a raster format, which has no more detail to give.
     pub source: Option<Arc<dyn Surface>>,
+    /// The plane the running loader was started for, from its header, or `None`
+    /// while no loader announces one.
+    ///
+    /// A loader reads the plane at the moment it starts, so a source that laid
+    /// itself out again while the worker ran (a treemap) answers a plane the
+    /// worker never saw, and its frame would carry the layout of the frame
+    /// before it.
+    pub loader_plane: Option<Size>,
+    /// Whether the whole-plane texture on screen measures a plane the source
+    /// reports no more.
+    ///
+    /// A treemap lays itself out again for a new window (see
+    /// [`Surface::frame_window`]), so the texture of the old frame would draw
+    /// its layout beside the layout of this plane wherever the region patch
+    /// cannot reach the window.
+    /// [`Self::refresh_plane`] paints the plane again once the window holds
+    /// still, and clears this flag when it asks for the paint.
+    pub plane_stale: bool,
     /// The plane of the open source that the view shows.
     /// It is 0 for every source the viewer opens: a book stacks its spreads
     /// into one plane (see [`vv_view::book`]).
@@ -455,6 +473,9 @@ pub enum CropMsg {
     /// A paint that failed, so the view drops the pending flag and may ask
     /// again.
     Failed { generation: u64 },
+    /// A whole-plane texture of the plane the view frames now, so the base
+    /// picture follows a plane the source laid out again.
+    Base { generation: u64, texture: Texture },
 }
 
 impl ViewState {
@@ -679,12 +700,90 @@ impl ViewState {
     /// worker result still in flight.
     pub fn close_crop(&mut self) {
         self.source = None;
+        self.drop_patch();
+    }
+
+    /// Drop the patch on screen and every paint still in flight for it.
+    ///
+    /// The source, when it lays itself out for the window (a treemap), answers
+    /// a plane of another shape after a resize, and a patch of the old shape
+    /// would land on a plane that no longer exists.
+    /// The next quiet window then paints the plane the source reports now.
+    pub fn drop_patch(&mut self) {
         self.crop = None;
         self.crop_pending = false;
         self.crop_seen = None;
         self.crop_quiet_at = Instant::now();
         self.crop_gen = self.crop_gen.wrapping_add(1);
         self.close_prefetch();
+    }
+
+    /// Hand the window's frame to the open source, and re-measure the plane it
+    /// takes.
+    ///
+    /// A treemap lays itself out for the window it shows in (see
+    /// [`Surface::frame_window`]), so a resize leaves a plane of the old shape
+    /// and a fit that would letterbox it.
+    /// The source answers whether its plane moved, so a picture that has one
+    /// natural size costs a call and never a second header read.
+    /// The picture on screen stretches until the settled repaint lands, because
+    /// a layout per resize frame would parse and rasterize the whole tree per
+    /// frame.
+    pub fn frame_window(&mut self, win: Vec2) {
+        // The clone buys the borrow: the fields below write the view this call
+        // read the source from.
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        let Some(plane) = framed_plane(source.as_ref(), self.source_plane, win, self.img) else {
+            return;
+        };
+        self.img = plane;
+        self.plane_stale = true;
+        self.drop_patch();
+    }
+
+    /// Paint the whole plane again when the texture on screen measures an older
+    /// one.
+    ///
+    /// A treemap answers a plane of another shape for a new window (see
+    /// [`Surface::frame_window`]), and the texture of the old frame draws the
+    /// layout of that frame beside the layout of this plane.
+    /// A resize frame only records the new plane (see [`Self::frame_window`]),
+    /// so the caller runs this once the window stops moving: one worker per
+    /// settled window, and no worker per frame of a drag.
+    /// The paint is the whole plane at scale 1.0, which is the size the draw
+    /// maps it from, and a worker uploads it like every other decode.
+    pub fn refresh_plane(&mut self, uploader: &Uploader) {
+        if !self.plane_stale || self.crop_pending {
+            return;
+        }
+        let Some(source) = self.source.clone() else {
+            // A source that painted its plane and kept no handle cannot paint it
+            // again, so the texture on screen stays the best picture there is.
+            // No source of this viewer does that today: a plane that follows the
+            // window always answers `can_refine`.
+            self.plane_stale = false;
+            return;
+        };
+        // One paint per plane: a window that moves again sets the flag again,
+        // and its settled frame asks for the paint of the plane it lands on.
+        self.plane_stale = false;
+        let (generation, tx) = (self.crop_gen, self.crop_tx.clone());
+        let plane = self.source_plane;
+        let uploader = uploader.clone();
+        rayon::spawn(move || match source.render(View::whole(plane, 1.0)) {
+            Ok(image) => match uploader.image(&image) {
+                Ok(texture) => {
+                    let _ = tx.send(CropMsg::Base {
+                        generation,
+                        texture,
+                    });
+                }
+                Err(err) => tracing::warn!(err = %err, "plane paint"),
+            },
+            Err(err) => tracing::warn!(err = %err, "plane paint"),
+        });
     }
 
     /// Drop the prefetch of a spread step: the patch on screen, the aim a
@@ -882,6 +981,14 @@ impl ViewState {
                     self.crop_pending = false;
                     // The old patch drops here, so one patch lives at a time.
                     self.crop = Some(CropState { texture, patch });
+                }
+                CropMsg::Base {
+                    generation,
+                    texture,
+                } => {
+                    if generation == self.crop_gen {
+                        self.view_tex = Some(texture);
+                    }
                 }
                 CropMsg::Failed { generation } => {
                     if generation == self.crop_gen {
@@ -1356,6 +1463,22 @@ pub fn patch_covers(st: &ViewState, win_w: f32, win_h: f32) -> bool {
     region::patch_reaches_window(needed, crop.patch)
 }
 
+/// The plane a source takes for a window of `win`, or `None` when its plane does
+/// not follow the window.
+///
+/// A treemap lays itself out for the window it shows in (see
+/// [`Surface::frame_window`]), so a resize leaves the view holding a plane of
+/// the old shape and a fit that would letterbox it.
+/// A picture has one natural size, so it answers `None` and the view reads no
+/// header twice.
+fn framed_plane(source: &dyn Surface, plane: usize, win: Vec2, img: Size) -> Option<Size> {
+    if !source.frame_window(Size { w: win.x, h: win.y }) {
+        return None;
+    }
+    let next = source.bounds(plane).ok()?;
+    (!same_plane(next, img)).then_some(next)
+}
+
 /// Whether two sizes name the same plane, to within a pixel.
 ///
 /// The image view trusts the plane a grid cell reports while the decode
@@ -1628,6 +1751,44 @@ pub fn show_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_treemap_answers_the_plane_its_window_names() {
+        use vv_source::treemap::{TreemapSurface, sample_tree};
+
+        // A treemap divides the window itself, so its plane takes the window's
+        // shape and a fit of it leaves no background bar.
+        let source = TreemapSurface::from_tree(sample_tree());
+        let held = source.bounds(0).expect("the plane");
+        let win = Vec2::new(1920.0, 1080.0);
+        assert_eq!(
+            framed_plane(&source, 0, win, held),
+            Some(Size {
+                w: 1920.0,
+                h: 1080.0,
+            })
+        );
+        // The same window twice measures the same plane, so nothing repaints.
+        let landed = Size {
+            w: 1920.0,
+            h: 1080.0,
+        };
+        assert_eq!(framed_plane(&source, 0, win, landed), None);
+    }
+
+    #[test]
+    fn a_picture_keeps_its_plane_whatever_the_window() {
+        // A raster has one natural size, so a resize answers no new plane and
+        // the view reads no header twice.
+        let image =
+            DecodedImage::from_exact(dim::ImgW::new(4), dim::ImgH::new(4), vec![0_u8; 4 * 4 * 4]);
+        let source = vv_source::surface::MemorySurface::new(image);
+        let held = source.bounds(0).expect("the plane");
+        assert_eq!(
+            framed_plane(&source, 0, Vec2::new(1920.0, 1080.0), held),
+            None
+        );
+    }
 
     #[test]
     fn a_books_cell_picture_never_covers_its_plane() {

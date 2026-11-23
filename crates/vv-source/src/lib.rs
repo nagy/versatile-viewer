@@ -19,6 +19,8 @@
 //! [`open_surface`](surface::open_surface) sniffs the content with [`sign`]
 //! and picks the backend: a raster file, an SVG document, a PDF, or a path a
 //! converter rule claims.
+//! A `.treemap` path opens [`treemap`], which draws its own sample tree in the
+//! shape of the window rather than reading a document.
 //! [`open_book_surface`](surface::open_book_surface) wraps a plane set of two
 //! or more into [`book::BookSurface`], so a document shows as a book.
 //!
@@ -36,6 +38,7 @@ pub mod pdf;
 pub mod sign;
 pub mod surface;
 pub mod svg;
+pub mod treemap;
 
 // The layers below, named through this crate as well, so one `crate::dim` path
 // serves a module of this crate and a caller of it.

@@ -40,6 +40,15 @@ A Typst source converts through the [typst] CLI to a PDF. It then renders
 through that same path, so it shows as the same book and zooms sharply for the
 same reasons.
 
+A `.treemap` file shows a treemap. The file carries no data: any `.treemap`
+path draws the sample tree of `crates/vv-source/src/treemap.rs`, so the
+extension asks for a map rather than for a document to read. The layout is the
+squarified one of Bruls, Huizing and van Wijk, so a weight reads as an area.
+The plane takes the shape of the window, so the map covers every edge and no
+background shows between two rectangles. The rectangles paint as an SVG
+document through the same parsing and painting path a `.svg` file takes, so a
+label uses the host fonts and a zoom repaints the window at its own scale.
+
 A source of another format converts through an external program. The answer
 shows as one vector picture when it is an SVG document, and as the same book
 when it is a PDF. A rule names that program.
@@ -88,6 +97,10 @@ program of the rule and opens its answer. The content decides first, so a
 converter rule never takes a file this viewer can read. A format with no magic
 the viewer knows falls to its rule. A `.typ` source is plain text with no
 magic, so it needs a rule of its own.
+
+A `.treemap` path routes on its extension alone to `crates/vv-source/src/treemap.rs`. The content
+decides nothing there, because the file carries none: the backend draws the
+sample tree of the module.
 
 The `%PDF-` head of the answer becomes the PDF backend. Any other answer parses
 into the vector backend in `crates/vv-source/src/surface.rs`. The answer caches

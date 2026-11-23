@@ -1522,6 +1522,8 @@ fn step_selection(sel: usize, n: usize, step: usize, delta: i128) -> usize {
 /// format appears in the grid too.
 /// A PDF carries no image extension but opens as a page grid, so the filter
 /// accepts it too.
+/// A `.treemap` carries no content but opens as a map, so the filter accepts
+/// it beside the pictures of a directory.
 /// A format with no rule of its own stays out: the viewer names no converter,
 /// so a `.typ` source or a `.mmd` diagram lists only when a rule claims it.
 fn is_image_path(path: &Path) -> bool {
@@ -1554,6 +1556,7 @@ fn is_image_extension(path: &Path) -> bool {
                 | "svg"
                 | "svgz"
                 | "pdf"
+                | "treemap"
         )
     })
 }
@@ -2023,6 +2026,9 @@ mod tests {
         let empty = crate::convert::Converters::empty();
         assert!(!is_image_path_in(Path::new("diagram.mmd"), &empty));
         assert!(is_image_path_in(Path::new("photo.png"), &empty));
+        // A treemap carries no content of its own, so its extension lists it
+        // with no rule at all.
+        assert!(is_image_path_in(Path::new("map.treemap"), &empty));
     }
 
     #[test]

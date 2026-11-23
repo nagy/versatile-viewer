@@ -15,7 +15,7 @@ crates/vv-core/    dim draw region region_sel rotate tween keyrepeat push, the s
 crates/vv-pixels/  DecodedImage, resample_rgba, cap_texture_side, rgba_from_samples, error, placeholder
 crates/vv-cache/   Cache, CacheError, CachedThumb, WRITE_BUDGET (thumbnails and converted answers)
 crates/vv-gpu/     gpu render texture
-crates/vv-source/  sign surface svg pdf book convert decode
+crates/vv-source/  sign surface svg pdf book convert treemap decode
 crates/vv-view/    input zoomkeys push pane blurbg loader grid view viewer
 crates/vv-mcp/     mcp
 crates/vv-cli/     main.rs (bin vv), tests/, examples/
@@ -115,9 +115,10 @@ A path becomes a `Surface`, a `Surface` renders a `View` (plane, optional crop, 
 - Every decoder stays pure Rust: jxl-oxide for JPEG XL, the `image` crate for the common formats, resvg for SVG and SVGZ, and hayro for PDF. The flake carries no CMake, no clang and no bindgen.
 - Decode and every pixel resize stay off the main thread. Never add a main-thread resize, because a large image then freezes the window for seconds.
 - All pixel resize goes through `resample_rgba` (`crates/vv-pixels/src/lib.rs`), the `fast_image_resize` SIMD path with Lanczos3. Do not call `image::imageops::resize` for a downscale, and keep the `rayon` feature of `fast_image_resize` off, so a resize never spawns nested workers inside a decode job.
-- Dispatch decode on sniffed content, never on the file name.
+- Dispatch decode on sniffed content, never on the file name. The two exceptions are a path a converter rule claims and a `.treemap` path: neither carries content this viewer reads, so the extension is the only signal there is.
 - `DecodedImage` fields stay private. `new` and `from_exact` are the entrances, and `width`, `height`, `as_rgba` and `into_rgba` the ways out, so a wrong buffer never exists to check.
 - A source is a `Surface`. A backend writes `render_whole`, and a backend with a region anchor (the vector tree, the PDF rasterizer) overrides `render` to pay only for the pixels the caller asked for. A region it cannot serve answers `SurfaceError::Unsupported` and never the whole plane.
+- A `.treemap` path opens `treemap::TreemapSurface`, which reads no byte of the file: the extension asks for the module's sample tree, and the content decides nothing. Its plane takes the shape of the window, so `Surface::frame_window` answers a new plane on a resize, the view re-fits it, and `ViewState::refresh_plane` repaints the whole-plane texture the region patch falls back to, because that texture carries the layout of the frame before it; every other source keeps the one size it reports.
 - A raster plane measures the capped size it renders, so `bounds` and the pixels of a scale-1.0 render agree.
 - A document of two planes or more opens through `open_book_surface`, so the whole book is one plane and the loader, the fit, the pan, the turn and the region patch treat it as one tall picture. The grid keeps `open_surface`, so a cell shows page 0 and never a second page.
 - A format this viewer does not parse reaches a backend through a converter rule only. The converter module always compiles, because the SVG backend paints its answer, so no format engine links into the binary and a new format needs no rebuild.

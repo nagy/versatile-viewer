@@ -24,7 +24,9 @@
 //! - straight alpha, and a tint that scales it;
 //! - a turned quad, on the pixels its corners name;
 //! - the decoder-to-draw chain of an SVG, a PDF page and a converted source;
-//! - the transparent gutter of a book plane.
+//! - the transparent gutter of a book plane;
+//! - a treemap laid out for the window, which leaves no letterbox and no
+//!   background pixel, and its fallback picture after a re-layout.
 
 // The tests read and name window pixels as whole numbers, so a float rect
 // becomes a pixel index with one cast, and a dimension becomes an `f32`.
@@ -467,6 +469,210 @@ fn paint_plane(canvas: &mut Canvas, surface: &dyn vv_source::surface::Surface) -
         Filter::Linear,
     );
     dest
+}
+
+/// A treemap paints the window it was framed for, edge to edge.
+///
+/// The plane takes the shape of the window (see `Surface::frame_window`), so a
+/// fit maps it 1:1 onto the frame and no window color survives between two
+/// rectangles.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_treemap_leaves_no_background_pixel() {
+    use vv_source::{
+        surface::{Size, Surface},
+        treemap::{TreemapSurface, sample_tree},
+    };
+
+    let mut canvas = canvas!(240, 150);
+    let surface = TreemapSurface::from_tree(sample_tree());
+    let window = Size {
+        w: canvas.size.0 as f32,
+        h: canvas.size.1 as f32,
+    };
+    surface.frame_window(window);
+    let dest = paint_plane(&mut canvas, &surface);
+    // The frame is the plane shape, so the fit fills it exactly.
+    assert_eq!(
+        (dest.min_x(), dest.min_y(), dest.width(), dest.height()),
+        (0.0, 0.0, window.w, window.h),
+        "the plane covers the frame"
+    );
+    let pixels = canvas.print();
+    let clear = [CLEAR.r, CLEAR.g, CLEAR.b, CLEAR.a];
+    let strays = (0..canvas.size.1 as usize)
+        .flat_map(|y| (0..canvas.size.0 as usize).map(move |x| (x, y)))
+        .filter(|(x, y)| pixels.at(*x, *y) == clear)
+        .count();
+    assert_eq!(strays, 0, "the window color shows nowhere in the frame");
+}
+
+/// A treemap that lays itself out again repaints its fallback picture.
+///
+/// The launch renders the plane of the default frame, and a window of another
+/// shape makes the source lay the tree out again (see `Surface::frame_window`).
+/// The whole-plane texture of the launch measures the layout of the old frame,
+/// so a frame that falls back to it — a zoom out that outruns the region patch —
+/// would draw the two layouts side by side, which reads as a picture that jumps.
+/// The fallback picture therefore repaints for the plane the window names.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_resized_treemap_repaints_its_fallback_picture() {
+    let mut canvas = canvas!(1200, 800);
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("map.treemap");
+    // The bytes of a `.treemap` file decide nothing, so any file asks for the map.
+    std::fs::write(&path, "the tree lives in the code, not here\n").expect("write the file");
+    let launch = vv_view::viewer::Launch::open(&path, true).expect("the launch opens");
+    assert_eq!(
+        launch.window_size(),
+        (1280, 800),
+        "the launch frames the default window"
+    );
+    let mut viewer = vv_view::viewer::Viewer::new(
+        canvas.device.clone(),
+        canvas.queue.clone(),
+        FORMAT,
+        canvas.device.limits().max_texture_dimension_2d,
+        launch,
+        canvas.size,
+    );
+    let mut host = NullHost;
+    treemap_fallback_matches_the_plane(&mut canvas, &mut viewer, &mut host);
+}
+
+/// The same, for a map a grid cell opens.
+///
+/// A directory launch lists before it decodes, so a cell opens the map and the
+/// grid's own decode lands beside it.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_treemap_opened_from_the_grid_repaints_its_fallback_picture() {
+    let mut canvas = canvas!(1200, 800);
+    let dir = tempfile::tempdir().expect("a temp dir");
+    std::fs::write(dir.path().join("a.svg"), SMALL_SVG).expect("write the svg");
+    std::fs::write(dir.path().join("b.treemap"), "no bytes matter\n").expect("write the map");
+    let launch = vv_view::viewer::Launch::open(dir.path(), true).expect("the launch opens");
+    let mut viewer = vv_view::viewer::Viewer::new(
+        canvas.device.clone(),
+        canvas.queue.clone(),
+        FORMAT,
+        canvas.device.limits().max_texture_dimension_2d,
+        launch,
+        canvas.size,
+    );
+    let mut host = NullHost;
+    // Let the grid decode both cells, then open the map in the second one.
+    for _ in 0..60 {
+        shot_frame(&canvas, &mut viewer, &mut host, 0.016, true);
+    }
+    host.press(&mut viewer, winit::keyboard::KeyCode::ArrowRight);
+    host.press(&mut viewer, winit::keyboard::KeyCode::Enter);
+    treemap_fallback_matches_the_plane(&mut canvas, &mut viewer, &mut host);
+}
+
+/// A blue 16 px square, which is a grid cell beside a map.
+const SMALL_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="#0000ff"/></svg>"##;
+
+/// Run one frame of `viewer`, and optionally let the wall clock pass.
+///
+/// The region patch waits for the view to hold still, so a settle needs the wall
+/// clock and not only the frame time.
+fn shot_frame(
+    canvas: &Canvas,
+    viewer: &mut vv_view::viewer::Viewer,
+    host: &mut NullHost,
+    dt: f32,
+    pause: bool,
+) {
+    let view = canvas
+        .target
+        .create_view(&wgpu::TextureViewDescriptor::default());
+    viewer
+        .render(host, &view, canvas.size, dt)
+        .expect("the frame renders");
+    if pause {
+        std::thread::sleep(std::time::Duration::from_millis(12));
+    }
+}
+
+/// Settle the window, zoom in, return to the whole plane and read the pixels the
+/// region patch cannot reach.
+///
+/// The patch covers the middle of the window after a zoom in, so the pixels
+/// outside it come from the fallback picture alone.
+fn treemap_fallback_matches_the_plane(
+    canvas: &mut Canvas,
+    viewer: &mut vv_view::viewer::Viewer,
+    host: &mut NullHost,
+) {
+    use vv_source::{
+        surface::{Size, Surface},
+        treemap::{TreemapSurface, sample_tree},
+    };
+
+    // The window center is the zoom anchor, so the pan stays where `w` puts it.
+    let (win_w, win_h) = (canvas.size.0 as f32, canvas.size.1 as f32);
+    viewer.handle_event(
+        vv_view::viewer::Event::Pointer(Vec2::new(win_w / 2.0, win_h / 2.0)),
+        host,
+    );
+    // Settle the plane this window names: the patch covers the window and the
+    // fallback picture is painted for it.
+    for _ in 0..60 {
+        shot_frame(canvas, viewer, host, 0.016, true);
+    }
+    // Zoom in, so the patch on screen covers the middle of the plane only.
+    for _ in 0..6 {
+        viewer.handle_event(vv_view::viewer::Event::Wheel(1.0), host);
+        for _ in 0..8 {
+            shot_frame(canvas, viewer, host, 0.016, true);
+        }
+    }
+    for _ in 0..40 {
+        shot_frame(canvas, viewer, host, 0.016, true);
+    }
+    // Back to the whole plane: the patch no longer reaches the window, so the
+    // fallback picture paints the frame, and the quiet window has not elapsed.
+    host.press(viewer, winit::keyboard::KeyCode::KeyW);
+    for _ in 0..6 {
+        shot_frame(canvas, viewer, host, 0.1, false);
+    }
+    let pixels = canvas.read();
+
+    // What the plane of this window paints, which is what the fallback picture
+    // must hold.
+    let surface = TreemapSurface::from_tree(sample_tree());
+    surface.frame_window(Size { w: win_w, h: win_h });
+    let want = surface
+        .render(vv_source::surface::View::whole(0, 1.0))
+        .expect("the plane renders");
+    assert_eq!(
+        (want.width().raw(), want.height().raw()),
+        canvas.size,
+        "the plane measures the window"
+    );
+    let (inner_x, inner_y) = (300..900, 200..600);
+    let mut wrong = 0;
+    let mut checked = 0;
+    for y in 0..canvas.size.1 as usize {
+        for x in 0..canvas.size.0 as usize {
+            if inner_x.contains(&x) && inner_y.contains(&y) {
+                continue;
+            }
+            checked += 1;
+            let got = pixels.at(x, y);
+            let at = (y * canvas.size.0 as usize + x) * 4;
+            let wanted = &want.as_rgba()[at..at + 4];
+            if got.iter().zip(wanted).any(|(a, b)| a.abs_diff(*b) > 1) {
+                wrong += 1;
+            }
+        }
+    }
+    assert!(
+        wrong * 1000 < checked,
+        "{wrong} of {checked} pixels outside the patch miss the layout of this window"
+    );
 }
 
 /// An SVG fills the pixel its rect names.

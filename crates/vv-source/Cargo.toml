@@ -104,6 +104,9 @@ vv-pixels = { path = "../vv-pixels" }
 
 [dev-dependencies]
 tempfile = "3.27.0"
+# The squarified layout of `treemap.rs`: containment, no overlap and the area a
+# weight takes are properties of every weight list, not of one example.
+proptest = "1.12.0"
 
 [lints]
 workspace = true

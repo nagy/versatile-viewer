@@ -222,6 +222,23 @@ pub trait Surface: Send + Sync {
         false
     }
 
+    /// Take `win` as the frame of the plane, and answer whether the plane
+    /// changed.
+    ///
+    /// A treemap (see [`crate::treemap`]) divides the window itself into its
+    /// rectangles, so a plane of another shape would fit inside the window and
+    /// leave background bars, which is exactly the space a treemap means to
+    /// fill.
+    /// The image view hands its window size here on every frame it draws, then
+    /// reads [`Self::bounds`] again and repaints the region the window shows
+    /// once the window holds still.
+    /// A picture has one natural size whatever the window, so the default keeps
+    /// the plane it reports and answers `false`: the view then reads no header
+    /// twice for a resize.
+    fn frame_window(&self, _win: Size) -> bool {
+        false
+    }
+
     /// The part of `plane` that a fresh open frames, in surface units, or
     /// `None` to frame the whole plane.
     ///
@@ -303,6 +320,9 @@ pub enum SurfaceError {
 
 /// Sniff the file format and open the matching surface.
 ///
+/// A `.treemap` path routes on its extension alone to [`crate::treemap`], which
+/// reads no content: the file is a way to ask for a map, so no magic and no
+/// byte of it decides anything.
 /// A PDF routes on the `%PDF-` magic to the multi-plane PDF backend, so a
 /// misnamed file still opens.
 /// A path that a converter rule claims routes by extension to
@@ -326,6 +346,13 @@ pub enum SurfaceError {
 /// The function errors when the file cannot be read, or when the content is
 /// not a decodable image, PDF or vector file.
 pub fn open_surface(path: &Path) -> Result<Box<dyn Surface>, SurfaceError> {
+    // A treemap is a generator and not a format: the bytes of the file say
+    // nothing, so the extension is the one honest signal, exactly as it is for
+    // a converter rule (see `src/convert.rs`).
+    // The route reads no content, so it lands before every sniff.
+    if crate::treemap::claims(path) {
+        return Ok(Box::new(crate::treemap::TreemapSurface::open(path)?));
+    }
     // A PDF is a multi-plane surface (one plane per page).
     // The backend holds the hayro dependency in `pdf.rs`.
     if crate::pdf::is_pdf(path) {
@@ -789,6 +816,24 @@ mod tests {
         let path = dir.join(name);
         std::fs::write(&path, body).unwrap();
         path
+    }
+
+    #[test]
+    fn a_treemap_path_opens_the_map_backend() {
+        let dir = temp_dir();
+        let path = dir.path().join("map.treemap");
+        // The bytes say nothing: a `.treemap` file is a way to ask for a map.
+        std::fs::write(&path, "not a picture, not a document\n").unwrap();
+        let surface = open_surface(&path).expect("the map opens");
+        assert_eq!(surface.plane_count(), 1);
+        assert!(surface.can_refine(), "the layout paints at any scale");
+        // The plane follows the window, so a resize answers a new one.
+        let before = surface.bounds(0).unwrap();
+        assert!(surface.frame_window(Size {
+            w: 1920.0,
+            h: 1080.0
+        }));
+        assert_ne!(surface.bounds(0).unwrap(), before);
     }
 
     #[test]
