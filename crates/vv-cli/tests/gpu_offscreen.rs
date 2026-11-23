@@ -513,15 +513,13 @@ fn a_display_list_paints_its_rects_and_its_pictures() {
         .renderer
         .display_pass(&canvas.device)
         .expect("a display-list pass");
-    let texture = pass
+    let painted = pass
         .draw(&canvas.device, &canvas.queue, &list, &frame, canvas.size)
-        .expect("the list draws")
-        .clone();
-    let whole = dim::whole(win_w, win_h);
+        .expect("the list draws");
     canvas.renderer.texture(
-        &texture,
-        whole,
-        Quad::rect(whole),
+        painted.texture,
+        painted.src,
+        painted.quad,
         Color::WHITE,
         Filter::Linear,
     );
@@ -532,6 +530,93 @@ fn a_display_list_paints_its_rects_and_its_pictures() {
         out.at(190, 90),
         [CLEAR.r, CLEAR.g, CLEAR.b, CLEAR.a],
         "the transparent base leaves the clear color alone"
+    );
+}
+
+/// A window that resizes between two frames shows the picture where the new
+/// window puts it, from the paint the pass already has.
+///
+/// The pass reuses its last paint while the window is still moving (see
+/// `SceneView::draw`), so the frame of a window drag composites that paint
+/// scaled and moved, and the pixels have to land where a paint of the new window
+/// would have put them. A red half and a blue half of the plane tell the answers
+/// apart: a stretch that ignored the fit would still show both halves, and a
+/// picture that landed at another scale would not.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_resized_window_places_the_paint_it_has() {
+    use std::sync::Arc;
+
+    use vv_core::{
+        dim::{SurfaceSize, WindowSize, WindowVector},
+        region,
+        scene::{self, Paint, Primitive},
+    };
+
+    // The frame a plane of 200 x 100 fills at the scale of `win`.
+    let frame = |win: (f32, f32)| region::Frame {
+        img: SurfaceSize::new(200.0, 100.0),
+        win: WindowSize::new(win.0, win.1),
+        pan: WindowVector::zero(),
+        scale: (win.0 / 200.0).min(win.1 / 100.0),
+        angle: 0.0,
+    };
+
+    let mut canvas = canvas!(400, 200);
+    let list: Arc<[Primitive]> = Arc::from(vec![
+        Primitive::Rect {
+            rect: scene::rect_of(region::crop(0.0, 0.0, 100.0, 100.0)),
+            paint: Paint::Solid(Color::new(255, 0, 0, 255)),
+        },
+        Primitive::Rect {
+            rect: scene::rect_of(region::crop(100.0, 0.0, 100.0, 100.0)),
+            paint: Paint::Solid(Color::new(0, 0, 255, 255)),
+        },
+    ]);
+    let mut pass = canvas
+        .renderer
+        .display_pass(&canvas.device)
+        .expect("a display-list pass");
+    let _ = pass
+        .draw(
+            &canvas.device,
+            &canvas.queue,
+            &list,
+            &frame((200.0, 100.0)),
+            (200, 100),
+        )
+        .expect("the list draws");
+
+    // The window doubles, so the paint of the first frame covers the whole of
+    // it and the halves stay halves.
+    let painted = pass
+        .draw(
+            &canvas.device,
+            &canvas.queue,
+            &list,
+            &frame((400.0, 200.0)),
+            canvas.size,
+        )
+        .expect("the list draws");
+
+    canvas.begin(CLEAR);
+    canvas.renderer.texture(
+        painted.texture,
+        painted.src,
+        painted.quad,
+        Color::WHITE,
+        Filter::Linear,
+    );
+    let out = canvas.print();
+    assert_eq!(
+        out.at(100, 100),
+        [255, 0, 0, 255],
+        "the red half, at the left"
+    );
+    assert_eq!(
+        out.at(300, 100),
+        [0, 0, 255, 255],
+        "the blue half, at the right"
     );
 }
 
@@ -821,15 +906,13 @@ fn a_listed_svg_lands_where_its_plane_does() {
         .renderer
         .display_pass(&canvas.device)
         .expect("a display-list pass");
-    let texture = pass
+    let painted = pass
         .draw(&canvas.device, &canvas.queue, &list, &frame, canvas.size)
-        .expect("the list draws")
-        .clone();
-    let whole = dim::whole(200.0, 200.0);
+        .expect("the list draws");
     canvas.renderer.texture(
-        &texture,
-        whole,
-        Quad::rect(whole),
+        painted.texture,
+        painted.src,
+        painted.quad,
         Color::WHITE,
         Filter::Linear,
     );

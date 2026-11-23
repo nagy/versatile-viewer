@@ -1488,12 +1488,15 @@ pub(crate) fn draw_list(
         return false;
     };
     match view.draw(device, queue, list, frame, size) {
-        Ok(texture) => {
-            let whole = dim::whole(size.0 as f32, size.1 as f32);
+        Ok(painted) => {
+            // A frame the pass reused lands where the window it was painted for
+            // puts the same surface units (see `SceneView::draw`), so the draw
+            // takes the placement the pass answers instead of the whole
+            // window.
             r.texture(
-                texture,
-                whole,
-                Quad::rect(whole),
+                painted.texture,
+                painted.src,
+                painted.quad,
                 Color::WHITE,
                 Filter::Linear,
             );

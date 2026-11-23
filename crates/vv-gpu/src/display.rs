@@ -41,11 +41,19 @@ use vello::{
 
 use crate::{
     DecodedImage,
-    draw::Color,
+    dim::{self, Rect},
+    draw::{Color, Quad, Vec2},
     region,
     scene::{FillRule, Paint, Primitive, Spread, Stop},
     texture::{Texture, Uploader},
 };
+
+/// How many parsed faces the pass keeps.
+///
+/// A document names a handful of faces and a treemap names one, so the table
+/// stays small; a session that walks a directory of PDFs would otherwise pin
+/// the fonts of every document it ever showed.
+const FACES: usize = 8;
 
 /// The anti-aliasing a scene renders with.
 ///
@@ -78,10 +86,60 @@ pub struct SceneView {
     uploader: Uploader,
     /// The picture of each [`Primitive::Image`] leaf, keyed by its address.
     images: HashMap<usize, ImageBrush>,
-    /// The face of each [`Primitive::Glyphs`] run, keyed by its bytes.
-    fonts: HashMap<usize, FontData>,
-    /// The list `images` belongs to, as its first primitive's address.
-    owner: Option<usize>,
+    /// The parsed face of each [`Primitive::Glyphs`] run, keyed by its bytes.
+    ///
+    /// Each entry keeps the bytes it parsed, so the address it is keyed on
+    /// cannot be handed to another face while the entry lives.
+    /// The table also outlives the list that named it: a run carries its own
+    /// bytes, and every label of a map names one shared face for the process,
+    /// so a relaid map draws its labels without parsing the face again.
+    fonts: HashMap<usize, (Arc<[u8]>, FontData)>,
+    /// The frame `target` holds: its list, its transform and its size.
+    ///
+    /// A frame that asks for exactly this one draws the texture on screen
+    /// again instead of painting the list, because a paint parses and encodes
+    /// every primitive of it and the answer would be the same picture.
+    drawn: Option<Drawn>,
+    /// The window size the frame before this one asked for.
+    ///
+    /// A size that moved since then means the window itself is moving, and a
+    /// drag of a window changes it on every frame: the paint of each one would
+    /// re-encode the whole list, so the frame that finds a moved size reuses
+    /// the texture it has (see [`Self::place_stale`]) and the paint lands once
+    /// the size holds still.
+    asked: Option<(u32, u32)>,
+}
+
+/// The frame the target holds.
+#[derive(Clone)]
+struct Drawn {
+    /// The list it painted.
+    ///
+    /// The handle and not its address: a freed list hands its address to the
+    /// next allocation, and a reuse that read it as the same list would draw a
+    /// picture that is not there.
+    list: Arc<[Primitive]>,
+    /// The surface-to-window transform it painted with.
+    to_window: Affine,
+    /// The target size it painted at.
+    size: (u32, u32),
+}
+
+/// What one display pass answers: the texture to composite, the part of it the
+/// picture fills, and where that part lands.
+///
+/// A painted frame fills its texture and lands on the whole window. A frame
+/// that reused the paint of an earlier one answers that paint, scaled, turned
+/// and moved by the transform between the two windows, so a window drag shows a
+/// picture that sits where the drag put it and only lags in sharpness.
+#[derive(Clone, Copy)]
+pub struct Painted<'a> {
+    /// The rendered list.
+    pub texture: &'a Texture,
+    /// The part of `texture` the picture fills, in its own pixels.
+    pub src: Rect,
+    /// Where that part lands, in window pixels.
+    pub quad: Quad,
 }
 
 impl SceneView {
@@ -115,7 +173,8 @@ impl SceneView {
             uploader,
             images: HashMap::new(),
             fonts: HashMap::new(),
-            owner: None,
+            drawn: None,
+            asked: None,
         })
     }
 
@@ -123,6 +182,12 @@ impl SceneView {
     ///
     /// `frame` maps surface units onto the window, so the same list draws
     /// sharply at every zoom and under any turn.
+    ///
+    /// A frame that asks for the paint of the frame before it reuses that paint,
+    /// and a frame whose window moved since the last one reuses it too and
+    /// places it where the new window puts the same surface units (see
+    /// [`Self::place_stale`]). The paint is the one expensive step of this pass
+    /// and neither of those frames changes a pixel of it.
     ///
     /// # Errors
     ///
@@ -135,18 +200,43 @@ impl SceneView {
         list: &Arc<[Primitive]>,
         frame: &region::Frame,
         size: (u32, u32),
-    ) -> Result<&Texture, SceneError> {
-        self.resize(device, size);
-        let owner = list.as_ptr() as usize;
-        if self.owner != Some(owner) {
+    ) -> Result<Painted<'_>, SceneError> {
+        let to_window = to_window(frame);
+        let moved = self.asked != Some(size);
+        self.asked = Some(size);
+        if let Some(drawn) = &self.drawn {
+            // The same list under the same transform at the same size is the
+            // picture the target already holds: the draw composites it again
+            // and the pass does nothing.
+            if !moved
+                && drawn.size == size
+                && drawn.to_window == to_window
+                && Arc::ptr_eq(&drawn.list, list)
+            {
+                return Ok(self.painted_whole());
+            }
+            // A window that moved since the last frame is still moving, so this
+            // frame places the paint it has and leaves the paint of the settled
+            // size to the frame that finds the size at rest.
+            // A list this pass never painted is painted: a new list is the one
+            // thing a window drag cannot answer from the paint it has.
+            if moved && drawn.size != size && Arc::ptr_eq(&drawn.list, list) {
+                return Ok(self.place_stale(drawn, to_window));
+            }
+        }
+        if let Some(drawn) = &self.drawn
+            && !Arc::ptr_eq(&drawn.list, list)
+        {
             // Another list is another set of leaves, so the pictures of the
             // last one cannot be trusted and the addresses they were keyed on
             // may now mean something else.
+            // The faces stay: a run carries its bytes, so a face of this tree
+            // outlives the list that drew it, and vello caches the outlines of
+            // a face by its bytes. Dropping them would make the first frame of
+            // every relaid map outline every label again.
             self.images.clear();
-            self.fonts.clear();
-            self.owner = Some(owner);
         }
-        let to_window = to_window(frame);
+        self.resize(device, size);
         self.list.reset();
         self.encode(list, to_window);
         self.renderer.render_to_texture(
@@ -164,7 +254,37 @@ impl SceneView {
                 antialiasing_method: AA,
             },
         )?;
-        Ok(&self.texture)
+        self.drawn = Some(Drawn {
+            list: Arc::clone(list),
+            to_window,
+            size: self.size,
+        });
+        Ok(self.painted_whole())
+    }
+
+    /// The paint on screen as the whole window it covers.
+    fn painted_whole(&self) -> Painted<'_> {
+        let whole = dim::whole(self.size.0 as f32, self.size.1 as f32);
+        Painted {
+            texture: &self.texture,
+            src: whole,
+            quad: Quad::rect(whole),
+        }
+    }
+
+    /// The paint on screen placed where `to_window` puts the frame it painted.
+    ///
+    /// The paint of `drawn` covers the window of that frame, so the picture
+    /// lands where the mapping `to_window ∘ drawn.to_window⁻¹` puts it: a
+    /// window drag changes the fit scale, so that mapping is a scale, a turn and
+    /// a move, and the texture fills the rect it names.
+    fn place_stale(&self, drawn: &Drawn, to_window: Affine) -> Painted<'_> {
+        let (src, quad) = stale_place(drawn.size, drawn.to_window, to_window);
+        Painted {
+            texture: &self.texture,
+            src,
+            quad,
+        }
     }
 
     /// Encode every primitive of `list`, placed by `to_window`.
@@ -201,11 +321,20 @@ impl SceneView {
                 } => {
                     // The face is parsed once per run, keyed by its bytes, so a
                     // label never re-parses a font per frame.
+                    // The table outlives the list: a face comes from
+                    // `sans_serif_face`, one `Arc` for the process, so every
+                    // label of every map names the same bytes and vello keeps
+                    // the outlines it resolved for them.
                     let key = run.font.as_ptr() as usize;
-                    let font = self
-                        .fonts
-                        .entry(key)
-                        .or_insert_with(|| FontData::new(Blob::from(run.font.to_vec()), run.face));
+                    if self.fonts.len() >= FACES && !self.fonts.contains_key(&key) {
+                        self.fonts.clear();
+                    }
+                    let (_, font) = self.fonts.entry(key).or_insert_with(|| {
+                        (
+                            Arc::clone(&run.font),
+                            FontData::new(Blob::from(run.font.to_vec()), run.face),
+                        )
+                    });
                     let placed = to_window * *transform;
                     let glyphs = run.glyphs.iter().map(|glyph| Glyph {
                         id: glyph.id,
@@ -453,6 +582,44 @@ fn vello_color(color: Color) -> VelloColor {
     VelloColor::from_rgba8(color.r, color.g, color.b, color.a)
 }
 
+/// Where the paint of a frame lands in a window that another frame names.
+///
+/// The paint covers the window of `drawn_to_window`, and the picture of it is
+/// the one `to_window` puts in the same place, so the whole texture fills the
+/// rect that `to_window ∘ drawn_to_window⁻¹` names: its middle is the image of
+/// the old window's middle, and its scale and turn are the ones of that mapping.
+/// Both transforms belong to a frame with a drawable plane, so the mapping is a
+/// similarity and one rect beside one angle says it.
+#[must_use]
+fn stale_place(drawn_size: (u32, u32), drawn_to_window: Affine, to_window: Affine) -> (Rect, Quad) {
+    let (width, height) = (f64::from(drawn_size.0), f64::from(drawn_size.1));
+    let src = dim::whole(drawn_size.0 as f32, drawn_size.1 as f32);
+    let delta = to_window * drawn_to_window.inverse();
+    // The matrix of an affine is `[a c e; b d f]`, so this reads the picture's
+    // own x and y coefficients by the axis they move.
+    let [xx, yx, xy, yy, tx, ty] = delta.as_coeffs();
+    let scale = xx.hypot(yx);
+    let (scale, angle) = if scale.is_finite() && scale > 0.0 {
+        (scale, yx.atan2(xx).to_degrees() as f32)
+    } else {
+        // A degenerate mapping cannot place a picture, and the window it names
+        // shows nothing either: the paint lands where it was.
+        (1.0, 0.0)
+    };
+    let center = Vec2::new(
+        (xx * width / 2.0 + xy * height / 2.0 + tx) as f32,
+        (yx * width / 2.0 + yy * height / 2.0 + ty) as f32,
+    );
+    let (dest_w, dest_h) = ((width * scale) as f32, (height * scale) as f32);
+    let dest = dim::rect(
+        center.x - dest_w / 2.0,
+        center.y - dest_h / 2.0,
+        dest_w,
+        dest_h,
+    );
+    (src, Quad::turned(dest, center, angle))
+}
+
 /// The picture of an image leaf, as a brush a fill samples.
 ///
 /// The bytes stay straight alpha, which is the convention of the whole tree:
@@ -468,4 +635,100 @@ fn image_brush(pixels: &DecodedImage) -> ImageBrush {
         height,
     };
     ImageBrush::new(data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A frame that fits a plane of `img` into a window of `win`, unturned and
+    /// unpanned.
+    fn fit(win: (f32, f32), img: (f32, f32)) -> Affine {
+        to_window(&region::Frame {
+            img: dim::SurfaceSize::new(img.0, img.1),
+            win: dim::WindowSize::new(win.0, win.1),
+            pan: dim::WindowVector::new(0.0, 0.0),
+            scale: (win.0 / img.0).min(win.1 / img.1),
+            angle: 0.0,
+        })
+    }
+
+    /// The four corners of a window, in the order [`Quad::rect`] names them.
+    fn window_corners(size: (u32, u32)) -> [kurbo::Point; 4] {
+        let (w, h) = (f64::from(size.0), f64::from(size.1));
+        [
+            kurbo::Point::new(0.0, 0.0),
+            kurbo::Point::new(w, 0.0),
+            kurbo::Point::new(w, h),
+            kurbo::Point::new(0.0, h),
+        ]
+    }
+
+    /// A reused paint lands exactly where the mapping of the two windows puts
+    /// it, corner for corner.
+    ///
+    /// The pass answers one rect and one angle, so this pins the reading of the
+    /// similarity out of the affine: a sign, a corner order or a turn direction
+    /// that disagreed would land a corner somewhere else.
+    #[test]
+    fn a_reused_paint_follows_the_mapping_of_the_two_windows() {
+        let plane = (400.0, 300.0);
+        let cases = [
+            // The same window twice.
+            ((800.0, 600.0), (800.0, 600.0), 0.0),
+            // A window that grew on both axes.
+            ((800.0, 600.0), (1200.0, 900.0), 0.0),
+            // A turned one.
+            ((800.0, 600.0), (800.0, 600.0), 90.0),
+            // A grown and turned one.
+            ((900.0, 700.0), (1400.0, 1000.0), 30.0),
+            // A shrunk one.
+            ((900.0, 700.0), (500.0, 900.0), -15.0),
+        ];
+        for (from, to, angle) in cases {
+            let drawn = fit(from, plane);
+            let now = to_window(&region::Frame {
+                img: dim::SurfaceSize::new(plane.0, plane.1),
+                win: dim::WindowSize::new(to.0, to.1),
+                pan: dim::WindowVector::new(10.0, -20.0),
+                scale: (to.0 / plane.0).min(to.1 / plane.1),
+                angle,
+            });
+            let size = (from.0 as u32, from.1 as u32);
+            let (src, quad) = stale_place(size, drawn, now);
+            assert_eq!(
+                src,
+                dim::whole(from.0, from.1),
+                "the paint fills its own texture"
+            );
+            let delta = now * drawn.inverse();
+            for (got, corner) in quad.p.into_iter().zip(window_corners(size)) {
+                let want = delta * corner;
+                assert!(
+                    got.abs_diff_eq(Vec2::new(want.x as f32, want.y as f32), 0.01),
+                    "a corner of {from:?} -> {to:?} at {angle} deg landed at {got:?} instead of \
+                     ({:.2}, {:.2})",
+                    want.x,
+                    want.y
+                );
+            }
+        }
+    }
+
+    /// A window that doubles its size on the plane's fit covers the new window
+    /// with the old paint, so the paint is not letterboxed by its own growth.
+    #[test]
+    fn a_doubled_window_stretches_the_fit_over_it() {
+        let plane = (400.0, 300.0);
+        let drawn = fit((800.0, 600.0), plane);
+        let now = fit((1600.0, 1200.0), plane);
+        let (_, quad) = stale_place((800, 600), drawn, now);
+        let want = Quad::rect(dim::whole(1600.0, 1200.0));
+        for (got, want) in quad.p.into_iter().zip(want.p) {
+            assert!(
+                got.abs_diff_eq(want, 0.01),
+                "a corner landed at {got:?} instead of {want:?}"
+            );
+        }
+    }
 }
