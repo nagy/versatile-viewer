@@ -8,6 +8,11 @@ Amended later: `vv-mcp` names `vv-core`, because the answer vocabulary of a
 pushed picture (`push::Shown`, `push::Status`) is one pair of types that the
 view layer builds and the protocol layer reports.
 The crate therefore stands alone over `vv-core` and not over nothing.
+Amended by ADR 0007: `vv_pixels::DecodedImage` moves down into `vv-core`, so the
+leaf of a `scene::Primitive` can name it from below the pixel layer. It is a
+size pair and a byte buffer, both of which are already `vv-core` vocabulary, and
+`vv-pixels` re-exports it, so no call site learns a new path and this crate adds
+no dependency.
 
 ## Context
 
