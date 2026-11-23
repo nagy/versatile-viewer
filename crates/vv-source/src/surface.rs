@@ -729,7 +729,7 @@ impl Surface for VectorSurface {
             return Err(SurfaceError::Plane(plane));
         }
         match self.vector.primitives() {
-            Ok(list) => Ok(Some(Arc::from(list))),
+            Ok(list) => Ok(Some(list)),
             Err(why) => {
                 // The document keeps the raster path, so its picture stays
                 // exactly what it was before this source could answer a list at

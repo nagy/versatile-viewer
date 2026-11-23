@@ -67,9 +67,27 @@ const DEFAULT_SIDE: f32 = 100.0;
 #[derive(Debug)]
 pub struct Vector {
     tree: usvg::Tree,
+    /// The primitive list of this document, built by the first caller that asks
+    /// for one.
+    ///
+    /// The walk of a rendered text page costs milliseconds and the list draws at
+    /// every zoom, so it is built once. The answer is kept whole, so a document
+    /// that a list cannot express costs the walk up to the feature it names, and
+    /// a caller that asks again reads the same answer.
+    scene: OnceLock<Result<Arc<[crate::scene::Primitive]>, crate::vector_scene::Unsupported>>,
 }
 
 impl Vector {
+    /// Wrap a parsed tree.
+    ///
+    /// The list of it is built by the first caller that asks for one.
+    fn new(tree: usvg::Tree) -> Self {
+        Self {
+            tree,
+            scene: OnceLock::new(),
+        }
+    }
+
     /// The primitives of this document, or the feature that keeps it a raster.
     ///
     /// A list draws at any zoom, so a document that answers one needs no region
@@ -77,11 +95,13 @@ impl Vector {
     /// caller keeps the raster path.
     pub(crate) fn primitives(
         &self,
-    ) -> Result<Vec<crate::scene::Primitive>, crate::vector_scene::Unsupported> {
+    ) -> Result<Arc<[crate::scene::Primitive]>, crate::vector_scene::Unsupported> {
         // The tree paints in declared units and the plane is a base raster, so
         // the list carries the factor `render_region` applies to the same tree.
         let space = kurbo::Affine::scale(f64::from(1.0 / self.declared_per_base()));
-        crate::vector_scene::primitives(&self.tree, space)
+        self.scene
+            .get_or_init(|| crate::vector_scene::primitives(&self.tree, space).map(Arc::from))
+            .clone()
     }
 
     /// The parsed tree, for a test that reads it directly.
@@ -395,7 +415,7 @@ const fn is_gzip(bytes: &[u8]) -> bool {
 /// document structure.
 pub(crate) fn from_str(text: &str) -> Result<Vector, DecodeError> {
     let tree = usvg::Tree::from_str(text, &options()).map_err(|e| DecodeError::Svg(Box::new(e)))?;
-    Ok(Vector { tree })
+    Ok(Vector::new(tree))
 }
 
 /// Parse a file into a [`Vector`].
@@ -420,7 +440,7 @@ pub(crate) fn from_bytes(raw: &[u8]) -> Result<Vector, DecodeError> {
     let bytes = decompress(raw)?;
     let tree =
         usvg::Tree::from_data(&bytes, &options()).map_err(|e| DecodeError::Svg(Box::new(e)))?;
-    Ok(Vector { tree })
+    Ok(Vector::new(tree))
 }
 
 /// Measure a file without painting it.
@@ -442,7 +462,7 @@ pub(crate) fn measure(path: &Path) -> Result<(ImgW, ImgH), DecodeError> {
     };
     let tree =
         usvg::Tree::from_data(&bytes, &options).map_err(|e| DecodeError::Svg(Box::new(e)))?;
-    Ok(Vector { tree }.base_size())
+    Ok(Vector::new(tree).base_size())
 }
 
 /// Whether the file holds SVG content, decided on the head bytes.
@@ -733,6 +753,31 @@ mod tests {
         assert_eq!(
             (hit.thumb.width(), hit.thumb.height()),
             (ImgW::new(512), ImgH::new(256))
+        );
+    }
+
+    /// The list of a document is walked once, whatever asks for it.
+    ///
+    /// The walk of a rendered text page costs milliseconds, and the view asks
+    /// for the same plane more than once: the launch asks before the first frame
+    /// measures the plane, and an answer of the wrong plane asks again.
+    #[test]
+    fn the_list_of_a_document_is_walked_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("drawing.svg");
+        std::fs::write(
+            &path,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50">
+                <rect width="100" height="50" fill="#ff0000"/>
+            </svg>"##,
+        )
+        .expect("write");
+        let vector = parse(&path).expect("parse");
+        let first = vector.primitives().expect("a list");
+        let again = vector.primitives().expect("a list");
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &again),
+            "the walk of a document happens once"
         );
     }
 
