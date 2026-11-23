@@ -20,13 +20,27 @@
 //!
 //! # Encoding once
 //!
-//! A list carries no scale and no region, so the pass encodes it once in surface
+//! A list carries no scale and no region, so the pass encodes it in surface
 //! units and places the whole scene per frame with one [`Vello::append`], which
 //! multiplies the transform of every draw. A zoom or a pan therefore costs a copy
 //! of the encoded stream (about a fiftieth of the encode) and never another walk
 //! of the paths. `vello` reads the encoded curves and flattens them on the
 //! device during the render, so the placed list is exactly the picture a list
 //! encoded for that zoom would have drawn — not a magnified polyline.
+//!
+//! # The band
+//!
+//! The encode covers the window and no more (see [`band_of`]): a plane taller
+//! than the window, and a book is one plane of every page, carries work the
+//! frame never shows, and `vello` pays for all of it anyway — it flattens every
+//! encoded curve and its bump allocators are fixed sizes picked for a bench
+//! scene, so a book zoomed a few times overflows them and paints *nothing*, with
+//! no error to report.
+//! A frame therefore encodes the primitives whose boxes meet the window's own
+//! box in surface units, padded by [`BAND_MARGIN`] so a pan inside the band costs
+//! nothing, and a frame whose window has left the band re-encodes.
+//! A clip, a layer and a marker always stay: the stack must keep its shape, and
+//! a clip carries no ink of its own.
 //!
 //! # Image leaves
 //!
@@ -41,7 +55,7 @@ use derive_more::{Display, Error, From};
 use vello::{
     AaConfig, AaSupport, Glyph, RenderParams, Renderer as VelloRenderer, RendererOptions,
     Scene as Vello,
-    kurbo::{self, Affine},
+    kurbo::{self, Affine, Shape},
     peniko::{
         self as peniko, Blob, Color as VelloColor, ColorStop, Extend, Fill, FontData, Gradient,
         GradientKind, ImageAlphaType, ImageBrush, ImageData, ImageFormat, LinearGradientPosition,
@@ -84,15 +98,17 @@ pub enum SceneError {
 /// pictures of the list it draws.
 pub struct SceneView {
     renderer: VelloRenderer,
-    /// The list of the plane being drawn, encoded once in surface units.
+    /// The part of the list being drawn, encoded once in surface units.
     ///
-    /// A list carries no scale and no region, so its geometry never changes: it
-    /// encodes once and every frame places it with one [`Vello::append`], which
-    /// multiplies the transform of every draw and leaves the paths, the ramps
-    /// and the pictures alone. `vello` flattens a curve on the device during the
-    /// render, so a placed list is as sharp at a 10x zoom as one encoded for it.
+    /// A list carries no scale and no region, so its geometry never changes: the
+    /// band encodes once and every frame places it with one [`Vello::append`],
+    /// which multiplies the transform of every draw and leaves the paths, the
+    /// ramps and the pictures alone. `vello` flattens a curve on the device
+    /// during the render, so a placed list is as sharp at a 10x zoom as one
+    /// encoded for it.
     base: Vello,
-    /// What `base` holds: the list and the plane its layers are clipped to.
+    /// What `base` holds: the list, the plane its layers are clipped to, and the
+    /// surface box it kept the primitives for.
     encoded: Option<Base>,
     /// The scene of this frame: `base` placed by the frame's transform, reused
     /// so a frame allocates no scene.
@@ -130,7 +146,7 @@ pub struct SceneView {
     asked: Option<(u32, u32)>,
 }
 
-/// The list and the plane a [`SceneView::base`] holds.
+/// The list, the plane and the band a [`SceneView::base`] holds.
 #[derive(Clone)]
 struct Base {
     /// The list it encoded.
@@ -141,6 +157,8 @@ struct Base {
     /// encoded without a window, so the plane is the one shape that bounds it
     /// for every frame the list draws in.
     plane: (f32, f32),
+    /// The surface box it kept the primitives for, padded.
+    band: kurbo::Rect,
 }
 
 impl Base {
@@ -150,6 +168,17 @@ impl Base {
     /// long as the plane does, so the same handle is the same geometry.
     fn holds(&self, list: &Arc<[Primitive]>, plane: (f32, f32)) -> bool {
         self.plane == plane && Arc::ptr_eq(&self.list, list)
+    }
+
+    /// Whether the band holds every bit of the window `visible` names.
+    ///
+    /// A frame inside the band draws the encode it has; a frame that left it
+    /// needs the primitives it now shows, and only a fresh encode has them.
+    fn covers(&self, visible: kurbo::Rect) -> bool {
+        self.band.x0 <= visible.x0
+            && self.band.y0 <= visible.y0
+            && visible.x1 <= self.band.x1
+            && visible.y1 <= self.band.y1
     }
 }
 
@@ -274,10 +303,12 @@ impl SceneView {
             }
         }
         let plane = (frame.img.width, frame.img.height);
+        let visible = window_hull(to_window, size);
+        let band = band_of(visible);
         if !self
             .encoded
             .as_ref()
-            .is_some_and(|base| base.holds(list, plane))
+            .is_some_and(|base| base.holds(list, plane) && base.covers(visible))
         {
             if self
                 .encoded
@@ -294,10 +325,11 @@ impl SceneView {
                 self.images.clear();
             }
             self.base.reset();
-            self.encode(list, plane);
+            self.encode(list, plane, band);
             self.encoded = Some(Base {
                 list: Arc::clone(list),
                 plane,
+                band,
             });
         }
         self.resize(device, size);
@@ -351,13 +383,17 @@ impl SceneView {
         }
     }
 
-    /// Encode every primitive of `list` in surface units.
+    /// Encode the primitives of `list` whose ink reaches `band`, in surface
+    /// units.
     ///
-    /// Nothing here is placed by a window: the frame that draws the list places
+    /// Nothing here is placed by a window: the frame that draws the band places
     /// all of it at once (see [`Self::draw`]), so the geometry of a zoom or a pan
-    /// costs no encode.
-    fn encode(&mut self, list: &[Primitive], plane: (f32, f32)) {
-        for primitive in list {
+    /// inside the band costs no encode.
+    /// A primitive the band does not reach is dropped, because `vello` would
+    /// pay for it in every frame: it flattens the curves of the whole encode and
+    /// its bump allocators are fixed (see the module docstring).
+    fn encode(&mut self, list: &[Primitive], plane: (f32, f32), band: kurbo::Rect) {
+        for primitive in list.iter().filter(|primitive| hits(primitive, band)) {
             match primitive {
                 Primitive::Rect { rect, paint } => {
                     // A rect carries no transform, so both its shape and its
@@ -537,6 +573,142 @@ pub fn to_window(frame: &region::Frame) -> Affine {
         * Affine::rotate(f64::from(frame.angle).to_radians())
         * Affine::scale(scale)
         * Affine::translate((-w / 2.0, -h / 2.0))
+}
+
+/// How much of the window each side adds to the encoded band.
+///
+/// A pan or a nudge that stays inside the padding costs no encode, and a zoom
+/// that shrinks the window keeps drawing the band it already has.
+/// The margin is a fraction of the window, so a deep zoom pads a small box and
+/// a fit view pads a large one: the band tracks what a gesture is likely to
+/// show next, and never grows past the work of one and a half windows per side.
+const BAND_MARGIN: f64 = 0.5;
+
+/// The surface box the window `to_window` names.
+///
+/// The window's four corners mapped back through the frame, so a turn and a pan
+/// both land in the box as they read: a turned window covers the box its
+/// corners span, which is what a primitive must meet to be visible.
+/// A frame with no drawable plane answers a box that is not finite, and
+/// [`band_of`] then keeps everything.
+#[must_use]
+fn window_hull(to_window: Affine, size: (u32, u32)) -> kurbo::Rect {
+    let inverse = to_window.inverse();
+    let (w, h) = (f64::from(size.0), f64::from(size.1));
+    let corners =
+        [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)].map(|(x, y)| inverse * kurbo::Point::new(x, y));
+    let mut hull = kurbo::Rect::new(corners[0].x, corners[0].y, corners[0].x, corners[0].y);
+    for point in &corners[1..] {
+        hull = hull.union(kurbo::Rect::new(point.x, point.y, point.x, point.y));
+    }
+    hull
+}
+
+/// The band an encode keeps for the window `visible` names: that box, padded by
+/// [`BAND_MARGIN`] of its size on each side.
+///
+/// A box that is not finite (a frame whose scale is zero or NaN) answers a band
+/// that holds everything, because the frame is already unusable and dropping
+/// primitives would only add a second failure to it.
+#[must_use]
+fn band_of(visible: kurbo::Rect) -> kurbo::Rect {
+    let finite = visible.x0.is_finite()
+        && visible.y0.is_finite()
+        && visible.x1.is_finite()
+        && visible.y1.is_finite();
+    if !finite {
+        return kurbo::Rect::new(
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            f64::INFINITY,
+        );
+    }
+    visible.inflate(
+        visible.width() * BAND_MARGIN,
+        visible.height() * BAND_MARGIN,
+    )
+}
+
+/// Whether a primitive must enter the encode for `band`.
+///
+/// A clip, a layer and a marker carry no ink of their own and the stack must
+/// keep the order the producer wrote, so they always stay: dropping a
+/// `PushClip` would leave its `PopClip` to close a clip it never opened and
+/// move every primitive after it into another stack.
+#[must_use]
+fn hits(primitive: &Primitive, band: kurbo::Rect) -> bool {
+    match bounds_of(primitive) {
+        // The pass cannot state the box, so it keeps the primitive.
+        None => true,
+        // A shape of no area is one `vello` may still draw (a zero-width stroke
+        // is a hairline), so it never culls.
+        Some(bounds) if bounds.is_zero_area() => true,
+        Some(bounds) => !bounds.intersect(band).is_zero_area(),
+    }
+}
+
+/// The box a primitive paints inside, in surface units, or `None` when the pass
+/// must keep it.
+///
+/// The box is conservative on purpose: a glyph's own outline is not in the run,
+/// so a run's box is the hull of its origins padded by two ems and a stroked
+/// path's box reaches half its width past the centre line. A box that is too
+/// large only costs the encode of a primitive the frame does not show.
+#[must_use]
+fn bounds_of(primitive: &Primitive) -> Option<kurbo::Rect> {
+    match primitive {
+        Primitive::Rect { rect, .. } => Some(*rect),
+        Primitive::Path {
+            path,
+            transform,
+            stroke,
+            ..
+        } => {
+            let reach = stroke.as_ref().map_or(0.0, |outline| {
+                outline.style.width * longest_axis(transform) / 2.0
+            });
+            Some(
+                transform
+                    .transform_rect_bbox(path.bounding_box())
+                    .inflate(reach, reach),
+            )
+        }
+        Primitive::Glyphs { run, transform, .. } => {
+            let reach = f64::from(run.size) * longest_axis(transform) * 2.0;
+            let mut hull: Option<kurbo::Rect> = None;
+            for glyph in run.glyphs.iter() {
+                let origin = *transform * kurbo::Point::new(f64::from(glyph.x), f64::from(glyph.y));
+                let point = kurbo::Rect::new(origin.x, origin.y, origin.x, origin.y);
+                // The hull of the origins, and never a box that also holds the
+                // origin of the plane: a run that landed somewhere else would
+                // keep itself in every band.
+                hull = Some(hull.map_or(point, |hull| hull.union(point)));
+            }
+            Some(hull.unwrap_or(kurbo::Rect::ZERO).inflate(reach, reach))
+        }
+        Primitive::Image { pixels, transform } => {
+            let (w, h) = (
+                f64::from(pixels.width().raw()),
+                f64::from(pixels.height().raw()),
+            );
+            Some(transform.transform_rect_bbox(kurbo::Rect::new(0.0, 0.0, w, h)))
+        }
+        Primitive::PushClip { .. }
+        | Primitive::PopClip
+        | Primitive::PushLayer { .. }
+        | Primitive::PopLayer => None,
+    }
+}
+
+/// The longest axis a transform maps a unit vector onto.
+///
+/// A stroke width and an em are stated in the shape's own units, so a box that
+/// reaches for them has to ask the transform how far they land.
+#[must_use]
+fn longest_axis(transform: &Affine) -> f64 {
+    let [xx, yx, xy, yy, _, _] = transform.as_coeffs();
+    xx.hypot(yx).max(xy.hypot(yy))
 }
 
 /// The one-color brush of a solid paint.
@@ -747,6 +919,201 @@ fn image_brush(pixels: &DecodedImage) -> ImageBrush {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scene::{GlyphRun, PlacedGlyph, Stroke};
+
+    /// A solid paint, for the primitives the band tests build.
+    fn solid() -> Paint {
+        Paint::Solid(Color::WHITE)
+    }
+
+    /// A rect as a path, which is what a producer that places a rect by a
+    /// transform writes.
+    fn rect_path(rect: kurbo::Rect) -> kurbo::BezPath {
+        let mut path = kurbo::BezPath::new();
+        path.move_to(rect.origin());
+        path.line_to((rect.x1, rect.y0));
+        path.line_to((rect.x1, rect.y1));
+        path.line_to((rect.x0, rect.y1));
+        path.close_path();
+        path
+    }
+
+    /// A frame that shows a window of `win` over a plane of `plane` at `scale`,
+    /// panned by `pan` and turned by `angle`.
+    fn frame(plane: (f32, f32), win: (f32, f32), pan: (f32, f32), scale: f32) -> region::Frame {
+        region::Frame {
+            img: dim::SurfaceSize::new(plane.0, plane.1),
+            win: dim::WindowSize::new(win.0, win.1),
+            pan: dim::WindowVector::new(pan.0, pan.1),
+            scale,
+            angle: 0.0,
+        }
+    }
+
+    /// A band covers its own window and the pad around it, so a pan inside the
+    /// pad costs no encode and one that left it asks for a new one.
+    #[test]
+    fn a_band_holds_the_window_and_the_pan_around_it() {
+        let plane = (400.0, 8000.0);
+        let win = (800.0, 600.0);
+        let hull =
+            |pan_y| window_hull(to_window(&frame(plane, win, (0.0, pan_y), 8.0)), (800, 600));
+        let visible = hull(0.0);
+        assert!(
+            (visible.width() - 100.0).abs() < 1e-9 && (visible.height() - 75.0).abs() < 1e-9,
+            "a window of 800 by 600 at scale 8 covers 100 by 75 surface units: {visible:?}"
+        );
+        let base = Base {
+            list: Arc::from(Vec::<Primitive>::new()),
+            plane,
+            band: band_of(visible),
+        };
+        assert!(
+            base.covers(visible),
+            "a band covers the window it was made for"
+        );
+        assert!(
+            base.covers(hull(200.0)),
+            "the pad holds a pan of half a window"
+        );
+        assert!(
+            !base.covers(hull(1000.0)),
+            "a window that left the band is not covered"
+        );
+    }
+
+    /// A turned window covers the box its corners span, because that is what a
+    /// primitive has to meet to be visible.
+    #[test]
+    fn a_turned_window_covers_the_box_of_its_corners() {
+        let mut turned = frame((400.0, 8000.0), (800.0, 600.0), (0.0, 0.0), 8.0);
+        turned.angle = 90.0;
+        let hull = window_hull(to_window(&turned), (800, 600));
+        assert!(
+            (hull.width() - 75.0).abs() < 1e-9 && (hull.height() - 100.0).abs() < 1e-9,
+            "a quarter turn swaps the sides: {hull:?}"
+        );
+    }
+
+    /// The band keeps the ink it reaches and drops the rest, and it always keeps
+    /// a clip, a layer and their markers.
+    #[test]
+    fn a_band_keeps_the_primitives_it_reaches() {
+        let band = kurbo::Rect::new(0.0, 0.0, 100.0, 100.0);
+        let rect = |x: f64| Primitive::Rect {
+            rect: kurbo::Rect::new(x, 10.0, x + 20.0, 30.0),
+            paint: solid(),
+        };
+        assert!(hits(&rect(10.0), band), "a rect inside the band stays");
+        assert!(!hits(&rect(200.0), band), "a rect outside the band drops");
+        let flat = Primitive::Rect {
+            rect: kurbo::Rect::new(10.0, 10.0, 90.0, 10.0),
+            paint: solid(),
+        };
+        assert!(
+            hits(&flat, band),
+            "a shape of no area may still draw a hairline"
+        );
+
+        // A path carries its own transform, so its box is the one it lands in.
+        let path = |at: Affine, stroke: Option<Stroke>, fill: bool| Primitive::Path {
+            path: rect_path(kurbo::Rect::new(0.0, 0.0, 10.0, 10.0)),
+            transform: at,
+            fill: fill.then(solid),
+            fill_rule: FillRule::NonZero,
+            stroke,
+        };
+        assert!(hits(
+            &path(Affine::translate((50.0, 50.0)), None, true),
+            band
+        ));
+        assert!(
+            !hits(&path(Affine::translate((150.0, 50.0)), None, true), band),
+            "a path that landed outside the band drops"
+        );
+        // A stroke reaches half its width past the centre line.
+        let outline = |width| {
+            Some(Stroke {
+                style: kurbo::Stroke::new(width),
+                paint: solid(),
+            })
+        };
+        let hairline = path(Affine::translate((120.0, 50.0)), outline(1.0), false);
+        assert!(!hits(&hairline, band), "a hairline well outside is culled");
+        let wide = path(Affine::translate((120.0, 50.0)), outline(60.0), false);
+        assert!(hits(&wide, band), "a wide stroke reaches into the band");
+
+        // A picture lands by its own pixels.
+        let picture = |at: Affine| Primitive::Image {
+            pixels: DecodedImage::from_exact(dim::ImgW::new(10), dim::ImgH::new(10), vec![0; 400]),
+            transform: at,
+        };
+        assert!(hits(&picture(Affine::translate((50.0, 50.0))), band));
+        assert!(!hits(&picture(Affine::translate((500.0, 500.0))), band));
+
+        // A run states no outline, so its box pads two ems around its origins.
+        let run = |at: Affine| Primitive::Glyphs {
+            run: GlyphRun {
+                font: Arc::from(Vec::<u8>::new()),
+                face: 0,
+                size: 10.0,
+                glyphs: Arc::from(vec![
+                    PlacedGlyph {
+                        id: 0,
+                        x: 0.0,
+                        y: 0.0,
+                    },
+                    PlacedGlyph {
+                        id: 0,
+                        x: 50.0,
+                        y: 0.0,
+                    },
+                ]),
+            },
+            transform: at,
+            paint: solid(),
+        };
+        assert!(hits(&run(Affine::IDENTITY), band));
+        assert!(!hits(&run(Affine::translate((300.0, 0.0))), band));
+
+        // The stack stays whole: a clip carries no ink of its own, and a
+        // `PopClip` without its `PushClip` would close some other clip.
+        let stack = [
+            Primitive::PushClip {
+                path: rect_path(kurbo::Rect::new(0.0, 0.0, 10.0, 10.0)),
+                transform: Affine::IDENTITY,
+                fill_rule: FillRule::NonZero,
+            },
+            Primitive::PopClip,
+            Primitive::PushLayer { alpha: 0.5 },
+            Primitive::PopLayer,
+        ];
+        for primitive in stack {
+            assert!(
+                hits(&primitive, band),
+                "the stack stays whole: {primitive:?}"
+            );
+        }
+    }
+
+    /// A frame that names no drawable plane keeps everything, because a band it
+    /// cannot state would drop primitives a working frame shows.
+    #[test]
+    fn a_frame_with_no_window_keeps_everything() {
+        let hull = window_hull(
+            to_window(&frame((400.0, 800.0), (800.0, 600.0), (0.0, 0.0), 0.0)),
+            (800, 600),
+        );
+        let band = band_of(hull);
+        let far = Primitive::Rect {
+            rect: kurbo::Rect::new(1e6, 1e6, 2e6, 2e6),
+            paint: solid(),
+        };
+        assert!(
+            hits(&far, band),
+            "a band that is not finite holds everything"
+        );
+    }
 
     /// A frame that fits a plane of `img` into a window of `win`, unturned and
     /// unpanned.

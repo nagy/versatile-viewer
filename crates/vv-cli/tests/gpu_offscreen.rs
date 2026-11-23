@@ -1620,7 +1620,6 @@ fn paint_list_flat(
         region,
     };
 
-    canvas.begin(CLEAR);
     let frame = region::Frame {
         img: SurfaceSize::new(canvas.size.0 as f32, canvas.size.1 as f32),
         win: WindowSize::new(canvas.size.0 as f32, canvas.size.1 as f32),
@@ -1628,6 +1627,16 @@ fn paint_list_flat(
         scale: 1.0,
         angle: 0.0,
     };
+    paint_list_at(canvas, list, frame)
+}
+
+/// Paint a list into `canvas` under `frame`, and read it back.
+fn paint_list_at(
+    canvas: &mut Canvas,
+    list: &std::sync::Arc<[vv_source::scene::Primitive]>,
+    frame: vv_core::region::Frame,
+) -> Pixels {
+    canvas.begin(CLEAR);
     let mut pass = canvas
         .renderer
         .display_pass(&canvas.device)
@@ -1927,6 +1936,98 @@ fn pdf_bytes(objects: &[Vec<u8>]) -> Vec<u8> {
     );
     pdf.extend_from_slice(tail.as_bytes());
     pdf
+}
+
+/// A book of twenty pages: a red cover, and nineteen pages of wavy filled
+/// paths.
+///
+/// The curves are the work a flatten pass pays for, and each spans the whole
+/// page, so one encode of the whole book passes `vello`'s fixed allocators once
+/// the frame zooms in: the curves of the pages the window does not show are
+/// flattened all the same.
+fn dense_book() -> Vec<u8> {
+    pdf_with_box(20, [0, 0, 200, 200], |page| {
+        if page == 0 {
+            return "1 0 0 rg\n0 0 200 200 re f\n".to_owned();
+        }
+        let mut out = String::from("0 0 1 rg\n");
+        for wave in 0..50 {
+            let y = 2.0 + wave as f32 * 4.0;
+            let _ = write!(out, "0 {y} m");
+            for step in 0..40 {
+                let x = step as f32 * 5.0;
+                let _ = write!(
+                    out,
+                    " {a} {b} {c} {d} {e} {f} c",
+                    a = x + 2.0,
+                    b = y + 60.0,
+                    c = x + 3.0,
+                    d = y - 60.0,
+                    e = x + 5.0,
+                    f = y,
+                );
+            }
+            let _ = writeln!(out, " h f");
+        }
+        out
+    })
+}
+
+/// A book zoomed in past the point where its whole list fits `vello`'s
+/// allocators still paints the page the window shows.
+///
+/// `vello` flattens every encoded curve and its bump allocators hold a fixed
+/// number of lines, picked for a bench scene, so a book — one plane holding
+/// every page, so one list — paints *nothing at all* past a few zoom steps, and
+/// reports no error while it does. The pass keeps only the band the window
+/// reaches (see `vv_gpu::display`), so the cover paints here however many pages
+/// the book hides beside it.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_zoomed_book_paints_the_page_it_shows() {
+    use vv_core::{
+        dim::{SurfaceSize, WindowSize, WindowVector},
+        region,
+        scene::Primitive,
+    };
+
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("dense-book.pdf");
+    std::fs::write(&path, dense_book()).expect("write the pdf");
+    let surface = vv_source::surface::open_book_surface(&path).expect("a book");
+    let list = surface.display(0).expect("a list").expect("the book lists");
+    let plane = surface.bounds(0).expect("the book measures");
+    // A page's paper comes first in its own list, and a book places every page,
+    // so the first primitive of the book is the cover's paper: a rect of the page
+    // carried as a path, because a rect states no transform of its own.
+    let Primitive::Path { transform, .. } = &list[0] else {
+        panic!("the book's first primitive is the cover's paper: {list:?}");
+    };
+    let [xx, yx, xy, yy, tx, ty] = transform.as_coeffs();
+    // The page is 200 by 200, so this is where its middle lands in the plane.
+    let (center_x, center_y) = (xx * 100.0 + xy * 100.0 + tx, yx * 100.0 + yy * 100.0 + ty);
+
+    let scale = 64.0;
+    let frame = region::Frame {
+        img: SurfaceSize::new(plane.w, plane.h),
+        win: WindowSize::new(256.0, 256.0),
+        // The cover sits in its own slot of the book, so the pan is what puts it
+        // under the window: the window middle lands on a surface point when the
+        // pan carries that point away from the plane's own middle.
+        pan: WindowVector::new(
+            ((f64::from(plane.w) / 2.0 - center_x) * f64::from(scale)) as f32,
+            ((f64::from(plane.h) / 2.0 - center_y) * f64::from(scale)) as f32,
+        ),
+        scale,
+        angle: 0.0,
+    };
+    let mut canvas = canvas!(256, 256);
+    let pixels = paint_list_at(&mut canvas, &list, frame);
+    assert_eq!(
+        pixels.at(128, 128),
+        [255, 0, 0, 255],
+        "the cover paints at a zoom the whole book does not fit"
+    );
 }
 
 /// A PDF page paints its own paper under the drawing.
