@@ -75,7 +75,11 @@ impl Wid {
     }
 }
 
-/// Why an embedded pane cannot read the host window.
+/// Why an X11 window cannot be read.
+///
+/// The pane reads the geometry of the host window it fills, and
+/// [`crate::screen::OnScreen`] reads the map state of the window the viewer
+/// draws into, so one error names both.
 #[derive(Debug, Display, Error, From)]
 pub enum PaneError {
     /// The X display of `$DISPLAY` could not be reached.
@@ -84,9 +88,9 @@ pub enum PaneError {
     /// The connection to the X server failed.
     #[display("the X connection failed")]
     Connection(#[from] x11rb::errors::ConnectionError),
-    /// The X server rejected the geometry request, for example because the host
-    /// window is gone.
-    #[display("the host window answered no geometry")]
+    /// The X server rejected the request, for example because the window it
+    /// named is gone.
+    #[display("the X server rejected the request")]
     Reply(#[from] x11rb::errors::ReplyError),
 }
 

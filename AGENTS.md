@@ -16,7 +16,7 @@ crates/vv-pixels/  resample_rgba, cap_texture_side, rgba_from_samples, error, pl
 crates/vv-cache/   Cache, CacheError, CachedThumb, WRITE_BUDGET (thumbnails and converted answers)
 crates/vv-gpu/     gpu render display texture
 crates/vv-source/  sign surface svg vector_scene pdf pdf_scene book convert treemap decode
-crates/vv-view/    input zoomkeys push pane blurbg loader grid view viewer
+crates/vv-view/    input zoomkeys push pane screen blurbg loader grid view viewer
 crates/vv-mcp/     mcp
 crates/vv-cli/     main.rs (bin vv), tests/, examples/
 ```
@@ -100,6 +100,12 @@ A resolution-independent source may answer a `scene::Primitive` list instead, an
 - A lost focus forgets every held key and button and drops the grab, because the releases never arrive.
 - X replays every held key as a synthetic press when the window gains focus, so `Input::key` marks a synthetic press stale and it never enters the held set. A `viewer::Event::Key` carries the flag.
 - A frame is one method, `Viewer::frame`. `main.rs` keeps the window, the surface, the acquire, the present and the CLI, so no view code reads a raw `winit` event.
+- A window that is off screen paints nothing: `App::frame` asks `vv_view::screen::OnScreen` for the X map state and returns before it takes a swapchain image, so the rasterizer, the uploads, the prefetch, the loader drain and every ease stand still, and `HIDDEN_PAUSE` paces the loop that is left.
+- The map state is read and never waited for, because no event reports a hide: a window manager unmaps the window (a minimize and the workspace hide of `EXWM` alike), winit's X11 backend drops that `UnmapNotify`, and `EXWM` clears the window's event mask around its own unmap, so not even a `StructureNotifyMask` listener sees it.
+  A Vulkan surface carries no notion of occlusion either, so an unmapped window keeps completing presents at the display's refresh rate and the loop paced itself against a picture nobody saw.
+  `IsUnviewable` covers an embedded pane whose host window is unmapped, so one read serves both kinds, and `WindowEvent::Occluded` adds a window that another one covers whole while it stays mapped.
+- The read is one round trip: once per `MAP_POLL` while the window is on screen, and on every frame while it is not, so the frame that carries the `Expose` of a returning window reads the state that follows it and paints in that frame.
+  That frame runs with a `dt` of zero, so no ease jumps by the time nothing was drawn, and a display that cannot be read leaves the window on screen, because painting a picture nobody sees costs a frame where a stale visible one costs the user's trust in it.
 - The viewer carries no text layer. A failed grid cell shows an exclamation of two rectangles, and an empty directory draws nothing because the title carries the count.
 
 ### Diagnostics

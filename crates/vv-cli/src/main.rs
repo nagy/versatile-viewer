@@ -59,6 +59,7 @@ use vv_view::{
     input,
     pane::{PaneGeometry, Wid},
     push::{self, Push},
+    screen::OnScreen,
     viewer::{Event, Host, Launch, Viewer},
 };
 #[cfg(target_os = "linux")]
@@ -68,17 +69,20 @@ use winit::{
     event::{DeviceEvent, DeviceId, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::PhysicalKey,
+    raw_window_handle::{HasWindowHandle as _, RawWindowHandle},
     window::{CursorGrabMode, Window, WindowId},
 };
 
-/// How long a frame sleeps when the swapchain has no image for the window.
+/// How long a frame sleeps when the window is off screen.
 ///
-/// A hidden or occluded window still receives `RedrawRequested`, because the
+/// A window that paints nothing still receives `RedrawRequested`, because the
 /// loop asks for one after every frame. Fifo paces a visible window, and a
-/// skipped frame has nothing to pace, so without this pause the loop would spin
-/// on acquire errors and burn a core for a window nobody sees.
-/// Twenty wakeups a second keep the return of the window immediate.
-const OCCLUDED_PAUSE: Duration = Duration::from_millis(50);
+/// frame that paints nothing has nothing to pace, so without this pause the
+/// loop would read the map state and ask for another frame as fast as the core
+/// allows.
+/// Twenty wakeups a second cost one X round trip each and keep the return of
+/// the window immediate.
+const HIDDEN_PAUSE: Duration = Duration::from_millis(50);
 
 /// How long one tool call waits for its picture.
 ///
@@ -264,8 +268,8 @@ impl Host for WinitHost<'_> {
 /// Everything past the window and the device is a [`Viewer`], so the binary
 /// owns the platform and the library owns the picture.
 // The platform flags are independent by nature: the swapchain arrived, the
-// window is occluded, and two traces are on. Each one drives a different
-// decision, so one enum would only blur them.
+// window is hidden, and the X server calls one window fully obscured. Each one
+// drives a different decision, so one enum would only blur them.
 #[allow(clippy::struct_excessive_bools)]
 struct App {
     window: Option<Arc<Window>>,
@@ -290,9 +294,19 @@ struct App {
     last_frame: Instant,
     /// A failure that stopped the loop, returned from `main`.
     fatal: Option<anyhow::Error>,
-    /// The swapchain answered no image on the last frame, so the window is
-    /// hidden or occluded and the loop paces itself.
+    /// The swapchain answered no image on the last frame, so the loop paces
+    /// itself.
     occluded: bool,
+    /// The X map state of the window, or None when the display could not be
+    /// read, which then keeps painting: a picture that might be visible is
+    /// never left stale.
+    on_screen: Option<OnScreen>,
+    /// The last frame found the window off screen, so it painted nothing and
+    /// the loop paces itself.
+    hidden: bool,
+    /// The X server reported the window fully obscured, so no pixel of it
+    /// reaches the display although it stays mapped.
+    obscured: bool,
     /// The requests a tool call queued for the view.
     pushes: mpsc::Receiver<Push>,
 }
@@ -314,6 +328,9 @@ impl App {
             last_frame: Instant::now(),
             fatal: None,
             occluded: false,
+            on_screen: None,
+            hidden: false,
+            obscured: false,
             pushes,
         }
     }
@@ -358,11 +375,32 @@ impl App {
         // A tool call lands before the frame reads the view, so the picture it
         // pushed paints in this frame or the next.
         self.accept_pushes();
+        // The map state leads the frame, because a window that is off screen
+        // paints nothing: X keeps pacing a present to a window nobody mapped,
+        // so a frame here would rasterize, upload and composite a picture that
+        // no display shows, and every queue behind it would keep filling.
+        let shown = self.on_screen.as_mut().is_none_or(OnScreen::on_screen);
+        let was_hidden = std::mem::replace(&mut self.hidden, !shown || self.obscured);
+        if was_hidden != self.hidden {
+            // The one platform fact a support report asks about when a picture
+            // stops moving: nothing paints while the window is off screen.
+            tracing::debug!(off_screen = self.hidden, "window on screen");
+        }
+        if self.hidden {
+            // The clock stands still with the picture, so the frame that comes
+            // back starts where the last painted one left and no ease jumps by
+            // the time nothing was drawn.
+            return Ok(());
+        }
         // An embedded pane follows the size of the window it fills, before the
         // frame reads the window size.
         follow_pane(&mut self.pane_geometry, &window);
         let now = Instant::now();
-        let dt = now.duration_since(self.last_frame).as_secs_f32();
+        let dt = if was_hidden {
+            0.0
+        } else {
+            now.duration_since(self.last_frame).as_secs_f32()
+        };
         self.last_frame = now;
         let size = self.size;
         let (Some(gpu), Some(viewer)) = (self.gpu.as_mut(), self.viewer.as_mut()) else {
@@ -428,6 +466,24 @@ fn follow_pane(slot: &mut Option<PaneGeometry>, window: &Window) {
             tracing::warn!(err = %err, "pane geometry");
             *slot = None;
         }
+    }
+}
+
+/// The X11 window id of the window this process draws into.
+///
+/// The map state of that id is what tells a hidden window from a shown one
+/// (see [`OnScreen`]), and winit names the window only as a raw handle.
+// The handle enum names one variant per windowing system, and this build
+// creates an X11 window.
+#[allow(
+    clippy::wildcard_enum_match_arm,
+    reason = "`RawWindowHandle` names every windowing system: this build makes an X11 window"
+)]
+fn x11_window(window: &Window) -> Option<u32> {
+    match window.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Xlib(handle) => u32::try_from(handle.window).ok(),
+        RawWindowHandle::Xcb(handle) => Some(handle.window.get()),
+        _ => None,
     }
 }
 
@@ -513,6 +569,18 @@ impl ApplicationHandler for App {
                 }
             },
         };
+        // The map state of the window is the one signal a hide cannot
+        // swallow: a window manager unmaps it, and neither winit nor the
+        // swapchain says so (see `OnScreen`).
+        // A display that cannot be read leaves the frame loop painting, which
+        // is the picture it drew before this watcher existed.
+        self.on_screen = x11_window(&window).and_then(|id| match OnScreen::new(id) {
+            Ok(state) => Some(state),
+            Err(err) => {
+                tracing::warn!(err = %err, "window state");
+                None
+            }
+        });
         // The content scale is the one display fact a drag can read, and a
         // feel report needs it next to the travel the release reports.
         tracing::debug!(scale_factor = window.scale_factor(), "window");
@@ -534,10 +602,10 @@ impl ApplicationHandler for App {
                     if self.viewer.as_ref().is_some_and(Viewer::quit) {
                         event_loop.exit();
                     } else if let Some(window) = &self.window {
-                        // A hidden window skips every frame, so the loop sleeps
+                        // A hidden window paints nothing, so the loop sleeps
                         // instead of spinning on a picture nobody sees.
-                        if self.occluded {
-                            std::thread::sleep(OCCLUDED_PAUSE);
+                        if self.hidden || self.occluded {
+                            std::thread::sleep(HIDDEN_PAUSE);
                         }
                         // A continuous loop, like the ramps and the eases need:
                         // a held key or a running ease draws the next frame.
@@ -591,6 +659,9 @@ impl ApplicationHandler for App {
                 self.send(Event::Button { button, state });
             }
             WindowEvent::Focused(focused) => self.send(Event::Focus(focused)),
+            // The X server says the window covers no pixel of the screen: it
+            // stays mapped, and a window manager above it hides it whole.
+            WindowEvent::Occluded(obscured) => self.obscured = obscured,
             _ => {}
         }
     }

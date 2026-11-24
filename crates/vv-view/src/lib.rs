@@ -22,8 +22,9 @@
 //! and the viewer owns the picture.
 //! [`loader`] streams one plane of a source off the main thread, [`input`]
 //! holds the held keys, the frame edges and the pointer of one frame,
-//! [`push`] is the seam a caller outside the process draws through, and
-//! [`pane`] names the X11 window a host hands over with `--wid`.
+//! [`push`] is the seam a caller outside the process draws through,
+//! [`pane`] names the X11 window a host hands over with `--wid`, and
+//! [`screen`] reads whether the window is on screen at all.
 //!
 //! The module `view` stays private to this crate: [`viewer`] drives it, and no
 //! caller names a `ViewState` of its own.
@@ -37,6 +38,7 @@ pub mod input;
 pub mod loader;
 pub mod pane;
 pub mod push;
+pub mod screen;
 pub(crate) mod view;
 pub mod viewer;
 pub mod zoomkeys;
