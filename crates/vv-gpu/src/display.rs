@@ -133,6 +133,13 @@ pub struct SceneView {
     /// What `base` holds: the list, the plane its layers are clipped to, and the
     /// surface box it kept the primitives for.
     encoded: Option<Base>,
+    /// What every primitive of the list asks `vello` to flatten, kept for the
+    /// life of the list.
+    ///
+    /// A band change reads it instead of walking the paths again, and a book
+    /// changes its band three times on the way through one spread step (see
+    /// [`Counts`]).
+    counts: Option<Counts>,
     /// The scene of this frame: `base` placed by the frame's transform, reused
     /// so a frame allocates no scene.
     framed: Vello,
@@ -267,6 +274,7 @@ impl SceneView {
             renderer,
             base: Vello::new(),
             encoded: None,
+            counts: None,
             framed: Vello::new(),
             target,
             view,
@@ -342,7 +350,7 @@ impl SceneView {
             .as_ref()
             .is_some_and(|base| base.holds(list, plane) && base.covers(visible))
         {
-            self.rebase(list, plane, band);
+            self.keep(list, plane, band);
         }
         // The band lands at the frame's own scale, which is the linear part of
         // the transform that places it.
@@ -361,8 +369,8 @@ impl SceneView {
             // later frame lowers that bill on its own. Give the band up for the
             // box this frame shows when that box fits, so a refusal is a frame
             // and not the state the view stays in (see [`Self::tighten`]).
-            if let Some(work) = self.tighten(list, band, scale) {
-                self.keep(list, plane, band, work);
+            if self.tighten(list, band, scale) {
+                self.keep(list, plane, band);
             }
         }
         if self
@@ -429,17 +437,7 @@ impl SceneView {
     ///
     /// A base is the encode of one box, so a frame that outgrew it or shrank
     /// back into it hands its own box here (see [`Self::draw`]).
-    fn rebase(&mut self, list: &Arc<[Primitive]>, plane: (f32, f32), band: kurbo::Rect) {
-        let work = work_of(list, band);
-        self.keep(list, plane, band, work);
-    }
-
-    /// Keep the encode of `list` for `band`, whose flattening is `work`.
-    ///
-    /// The counts are the caller's because a frame that probes a box already
-    /// walked it, and walking a book's outlines a second time is the one cost
-    /// that makes giving up a band worth avoiding (see [`Self::tighten`]).
-    fn keep(&mut self, list: &Arc<[Primitive]>, plane: (f32, f32), band: kurbo::Rect, work: Work) {
+    fn keep(&mut self, list: &Arc<[Primitive]>, plane: (f32, f32), band: kurbo::Rect) {
         if self
             .encoded
             .as_ref()
@@ -455,7 +453,8 @@ impl SceneView {
             self.images.clear();
         }
         self.base.reset();
-        self.encode(list, plane, band);
+        let (kept, work) = self.survey(list, band);
+        self.encode(list, plane, &kept);
         self.encoded = Some(Base {
             list: Arc::clone(list),
             plane,
@@ -464,40 +463,52 @@ impl SceneView {
         });
     }
 
-    /// The work of the box this frame shows, when the band is worth giving up
-    /// for it.
+    /// The primitives of `list` whose ink reaches `band`, in list order, and
+    /// what together they ask `vello` to flatten.
+    ///
+    /// The counts of a list are kept, so only the primitives no band has
+    /// reached for are walked (see [`Counts`]).
+    fn survey(&mut self, list: &Arc<[Primitive]>, band: kurbo::Rect) -> (Vec<usize>, Work) {
+        let counts = match &mut self.counts {
+            Some(counts) if counts.holds(list) => counts,
+            room => room.insert(Counts::new(list)),
+        };
+        counts.survey(band)
+    }
+
+    /// Whether the box this frame shows is a box the pass should encode for.
     ///
     /// A base the frame outgrew is still the base of every frame that shrank back
     /// into it, and [`Work`] counts a primitive whole however little of it the
     /// window shows. So the band of a plane the window once held in one frame
     /// keeps that frame's bill for every zoom that follows, and it covers those
     /// frames, so no frame ever encodes again. This is the way out: count what the
-    /// box of *this* frame asks `vello` to flatten, and let the caller encode for
-    /// it when the renderer can hold it.
+    /// box of *this* frame asks `vello` to flatten, and encode for it when the
+    /// renderer can hold it.
     ///
-    /// The count is a walk of the list, cheaper than the encode it can save but
-    /// not free, so it is spent only where it can pay: a document's ink scales
-    /// with the area a band reaches, so a box the band shrank `shrunk` times
-    /// smaller than holds about the base's work over `shrunk`. A box whose bound
-    /// would still run past [`LINE_BUDGET`] is refused at once, which keeps a pan
-    /// while a frame is refused free instead of walking the same plane every
-    /// frame.
-    ///
-    /// `None` answers a frame to refuse: the box it shows cannot fit the renderer
-    /// either.
-    fn tighten(&self, list: &[Primitive], band: kurbo::Rect, scale: f64) -> Option<Work> {
-        let base = self.encoded.as_ref()?;
+    /// The first count of a primitive walks its path, so it is spent only where
+    /// it can pay: a document's ink scales with the area a band reaches, so a box
+    /// the band shrank `shrunk` times smaller than holds about the base's work
+    /// over `shrunk`. A box whose bound would still run past [`LINE_BUDGET`] is
+    /// refused at once, which keeps a pan while a frame is refused free of the
+    /// walk instead of paying it every frame. The counts that survive are the
+    /// ones a refusal did ask for, and the next box of that band reads them (see
+    /// [`Counts`]).
+    fn tighten(&mut self, list: &Arc<[Primitive]>, band: kurbo::Rect, scale: f64) -> bool {
+        let Some(base) = self.encoded.as_ref() else {
+            return false;
+        };
         let (had, wants) = (base.band.area(), band.area());
         // A band this frame already is, and a box of no area or no bound, hold
         // nothing a second walk could bound.
         if base.band == band || !(had.is_finite() && wants > 0.0) {
-            return None;
+            return false;
         }
         if base.work.lines_at(scale) / (had / wants) > LINE_BUDGET {
-            return None;
+            return false;
         }
-        let work = work_of(list, band);
-        (!work.too_heavy(scale)).then_some(work)
+        let (_, work) = self.survey(list, band);
+        !work.too_heavy(scale)
     }
 
     /// Encode the primitives of `list` whose ink reaches `band`, in surface
@@ -509,9 +520,9 @@ impl SceneView {
     /// A primitive the band does not reach is dropped, because `vello` would
     /// pay for it in every frame: it flattens the curves of the whole encode and
     /// its bump allocators are fixed (see the module docstring).
-    fn encode(&mut self, list: &[Primitive], plane: (f32, f32), band: kurbo::Rect) {
-        for primitive in list.iter().filter(|primitive| hits(primitive, band)) {
-            match primitive {
+    fn encode(&mut self, list: &[Primitive], plane: (f32, f32), kept: &[usize]) {
+        for &index in kept {
+            match &list[index] {
                 Primitive::Rect { rect, paint } => {
                     // A rect carries no transform, so both its shape and its
                     // paint live in surface units.
@@ -747,15 +758,17 @@ fn band_of(visible: kurbo::Rect) -> kurbo::Rect {
     )
 }
 
-/// Whether a primitive must enter the encode for `band`.
+/// Whether a primitive of `bounds` must enter the encode for `band`.
 ///
+/// `bounds` is [`bounds_of`]'s answer, kept beside the count in [`Counts`]
+/// because measuring it walks every element of the path.
 /// A clip, a layer and a marker carry no ink of their own and the stack must
 /// keep the order the producer wrote, so they always stay: dropping a
 /// `PushClip` would leave its `PopClip` to close a clip it never opened and
 /// move every primitive after it into another stack.
 #[must_use]
-fn hits(primitive: &Primitive, band: kurbo::Rect) -> bool {
-    match bounds_of(primitive) {
+fn reaches(bounds: Option<kurbo::Rect>, band: kurbo::Rect) -> bool {
+    match bounds {
         // The pass cannot state the box, so it keeps the primitive.
         None => true,
         // A shape of no area is one `vello` may still draw (a zero-width stroke
@@ -905,16 +918,121 @@ impl Work {
     }
 }
 
-/// What `vello` has to flatten for the primitives of `list` that reach `band`.
-///
-/// It is a pure function of the band and the list, so a frame probes a box
-/// without encoding it (see [`SceneView::tighten`]).
-fn work_of(list: &[Primitive], band: kurbo::Rect) -> Work {
-    let mut work = Work::default();
-    for primitive in list.iter().filter(|primitive| hits(primitive, band)) {
-        count(&mut work, primitive);
+impl std::ops::AddAssign for Work {
+    fn add_assign(&mut self, other: Self) {
+        self.lines += other.lines;
+        self.curves += other.curves;
+        self.curve_count += other.curve_count;
     }
-    work
+}
+
+/// What the pass has measured of one primitive.
+///
+/// The box and the count are pure functions of the primitive and its own
+/// transform, so they never change while the list lives. They are kept rather
+/// than measured again because measuring them walks every element of the path,
+/// and a book's page is one merged glyph-outline path of a hundred thousand
+/// curves: a spread step changes the band three times on its way, and a frame
+/// the band refuses probes a box of its own (see [`SceneView::tighten`]).
+#[derive(Clone, Copy, Default)]
+struct Counted {
+    /// The box the primitive's ink reaches ([`bounds_of`]), once a band has
+    /// reached for it.
+    reach: Reach,
+    /// What it asks `vello` to flatten ([`count`]), or `None` until a band keeps
+    /// it.
+    ///
+    /// A list measures every box on its first band, so the band can tell what
+    /// it reaches, but it counts only the ink it keeps: a frame that shows one
+    /// page of a book pays for that page and never for the whole document.
+    work: Option<Work>,
+}
+
+/// The box of one primitive, as far as the pass has got with it.
+#[derive(Clone, Copy, Default)]
+enum Reach {
+    /// No band has asked for it yet.
+    #[default]
+    Unmeasured,
+    /// [`bounds_of`]'s answer, and `None` for a primitive the pass keeps
+    /// whatever the band: a clip, a layer or a marker.
+    Measured(Option<kurbo::Rect>),
+}
+
+/// The counts of one list, one per primitive.
+///
+/// The list is the key, the rule [`Base`] and the image table follow: another
+/// list is another set of paths, and the counts of one say nothing about
+/// another.
+struct Counts {
+    /// The list every entry was counted from.
+    list: Arc<[Primitive]>,
+    /// One per primitive of `list`, in its order.
+    per: Vec<Counted>,
+}
+
+impl Counts {
+    /// Measure nothing yet of `list`: both halves are filled the first time a
+    /// band asks for them.
+    fn new(list: &Arc<[Primitive]>) -> Self {
+        Self {
+            list: Arc::clone(list),
+            per: vec![Counted::default(); list.len()],
+        }
+    }
+
+    /// Whether these are the counts of `list`.
+    fn holds(&self, list: &Arc<[Primitive]>) -> bool {
+        Arc::ptr_eq(&self.list, list)
+    }
+
+    /// The primitives whose ink reaches `band`, in list order, and what they
+    /// ask `vello` to flatten together.
+    fn survey(&mut self, band: kurbo::Rect) -> (Vec<usize>, Work) {
+        let Counts { list, per } = self;
+        let mut kept = Vec::new();
+        let mut work = Work::default();
+        for (index, (primitive, counted)) in list.iter().zip(per).enumerate() {
+            let bounds = match counted.reach {
+                Reach::Measured(bounds) => bounds,
+                Reach::Unmeasured => {
+                    let bounds = bounds_of(primitive);
+                    counted.reach = Reach::Measured(bounds);
+                    bounds
+                }
+            };
+            if !reaches(bounds, band) {
+                continue;
+            }
+            kept.push(index);
+            work += *counted.work.get_or_insert_with(|| {
+                let mut asks = Work::default();
+                count(&mut asks, primitive);
+                asks
+            });
+        }
+        (kept, work)
+    }
+
+    /// How many primitives are counted, which a test reads to prove that a
+    /// second survey of the same list counts nothing again.
+    #[cfg(test)]
+    fn counted(&self) -> usize {
+        self.per
+            .iter()
+            .filter(|counted| counted.work.is_some())
+            .count()
+    }
+
+    /// How many primitives are measured, which a test reads to prove that one
+    /// survey measures the boxes of the whole list and counts only its band.
+    #[cfg(test)]
+    fn measured(&self) -> usize {
+        self.per
+            .iter()
+            .filter(|counted| matches!(counted.reach, Reach::Measured(_)))
+            .count()
+    }
 }
 
 /// Add what `vello` flattens for `primitive` to `work`.
@@ -1239,6 +1357,14 @@ mod tests {
         Paint::Solid(Color::WHITE)
     }
 
+    /// Whether the band keeps `primitive`, measured as it comes.
+    ///
+    /// The pass reads the same answer off its kept counts; this is the walk
+    /// those counts stand in for.
+    fn hits(primitive: &Primitive, band: kurbo::Rect) -> bool {
+        reaches(bounds_of(primitive), band)
+    }
+
     /// A rect as a path, which is what a producer that places a rect by a
     /// transform writes.
     fn rect_path(rect: kurbo::Rect) -> kurbo::BezPath {
@@ -1488,6 +1614,132 @@ mod tests {
             heavy.too_heavy(64.0),
             "a deep zoom of that path cannot fit the renderer"
         );
+    }
+
+    /// What `list` asks `vello` to flatten for `band`, walked from scratch.
+    ///
+    /// The oracle the kept counts are checked against: the same two steps
+    /// [`Counts::survey`] takes, with nothing carried between calls.
+    fn walked(list: &[Primitive], band: kurbo::Rect) -> Work {
+        let mut work = Work::default();
+        for primitive in list.iter().filter(|p| reaches(bounds_of(p), band)) {
+            count(&mut work, primitive);
+        }
+        work
+    }
+
+    /// A page of a book: a wave of curves inside its own slot of the plane.
+    fn page(slot: usize, curves: usize) -> Primitive {
+        let mut primitive = wave(curves, 40.0);
+        if let Primitive::Path { transform, .. } = &mut primitive {
+            *transform = Affine::translate((0.0, f64::from(slot as u32) * 200.0));
+        }
+        primitive
+    }
+
+    /// A kept count answers what a walk of the same band answers, for every band
+    /// a glide and a zoom ask for.
+    ///
+    /// The cache is the whole of the spread step's cost: a band change used to
+    /// walk every path element of the band, and a book's page is one path of a
+    /// hundred thousand curves.
+    #[test]
+    fn a_kept_count_answers_what_a_walk_of_the_band_does() {
+        let list: Arc<[Primitive]> = Arc::from(vec![page(0, 400), page(1, 400), page(2, 400)]);
+        let mut counts = Counts::new(&list);
+        let bands = [
+            kurbo::Rect::new(-400.0, -300.0, 400.0, 300.0),
+            // A band of the second page alone.
+            kurbo::Rect::new(-400.0, 100.0, 400.0, 300.0),
+            // A band that reaches every page.
+            kurbo::Rect::new(-400.0, -300.0, 400.0, 900.0),
+            // A band that reaches nothing.
+            kurbo::Rect::new(-4000.0, -4000.0, -3000.0, -3000.0),
+            // The first band again, which the counts now answer from memory.
+            kurbo::Rect::new(-400.0, -300.0, 400.0, 300.0),
+        ];
+        for band in bands {
+            let (kept, work) = counts.survey(band);
+            // A tolerance and not an equality: the kept counts add a primitive's
+            // total, and the walk adds its curves one by one, so the two sums
+            // differ in the last bits.
+            let (kept_lines, walked_lines) =
+                (work.lines_at(1.0), walked(&list, band).lines_at(1.0));
+            assert!(
+                (kept_lines - walked_lines).abs() <= walked_lines * 1e-9,
+                "the kept count of {band:?} is the count a walk answers: {kept_lines} against \
+                 {walked_lines}"
+            );
+            assert!(
+                kept.iter()
+                    .all(|&index| reaches(bounds_of(&list[index]), band)),
+                "a kept primitive is one the band reaches, at {band:?}"
+            );
+            assert!(
+                (0..list.len())
+                    .all(|index| kept.contains(&index) == reaches(bounds_of(&list[index]), band)),
+                "every primitive the band reaches is kept, at {band:?}"
+            );
+        }
+        assert_eq!(
+            counts.counted(),
+            list.len(),
+            "each primitive is counted once and kept"
+        );
+        assert_eq!(
+            counts.measured(),
+            list.len(),
+            "every box of the list is measured once"
+        );
+    }
+
+    /// A band of one page measures the boxes of the whole list but counts only
+    /// the page it reaches, so the frame that opens a book spends its walk on
+    /// the ink it shows.
+    #[test]
+    fn a_band_counts_only_the_ink_it_reaches() {
+        let list: Arc<[Primitive]> = Arc::from(vec![page(0, 400), page(1, 400), page(2, 400)]);
+        let mut counts = Counts::new(&list);
+        let first_page = kurbo::Rect::new(-400.0, -100.0, 400.0, 100.0);
+        let (kept, _) = counts.survey(first_page);
+        assert_eq!(kept, vec![0], "the band keeps the page it shows");
+        assert_eq!(counts.counted(), 1, "and counts that page alone");
+        assert_eq!(counts.measured(), 3, "while it measured every box it asks");
+    }
+
+    /// A second survey of a band counts no path again, and another list starts
+    /// from nothing: the counts of one list say nothing about another.
+    #[test]
+    fn a_survey_counts_each_primitive_once() {
+        let list: Arc<[Primitive]> = Arc::from(vec![page(0, 40)]);
+        let mut counts = Counts::new(&list);
+        let band = kurbo::Rect::new(-400.0, -300.0, 400.0, 300.0);
+        assert_eq!(counts.counted(), 0, "a fresh list carries no count");
+        let (_, first) = counts.survey(band);
+        assert_eq!(
+            counts.counted(),
+            1,
+            "the band counted the primitive it kept"
+        );
+        let (_, again) = counts.survey(band);
+        assert_eq!(
+            first.lines_at(1.0),
+            again.lines_at(1.0),
+            "a second survey answers the work the first did"
+        );
+        assert_eq!(
+            counts.counted(),
+            1,
+            "the second survey counted no path a second time"
+        );
+
+        let other: Arc<[Primitive]> = Arc::from(vec![page(3, 40), page(4, 40)]);
+        assert!(
+            !counts.holds(&other),
+            "another list is another set of paths"
+        );
+        let fresh = Counts::new(&other);
+        assert_eq!(fresh.counted(), 0, "another list starts uncounted");
     }
 
     /// A frame that names no drawable plane keeps everything, because a band it
