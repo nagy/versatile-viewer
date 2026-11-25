@@ -609,6 +609,7 @@ impl Viewer {
                 source_plane: 0,
                 loader_plane: None,
                 plane_stale: false,
+                list_drawn: false,
                 open_box: None,
                 cell_box: None,
                 open_align: OpenAlign::Free,
@@ -2451,6 +2452,10 @@ impl Viewer {
                 ),
                 _ => false,
             };
+            // What this frame drew is what the next one may skip: a step then
+            // paints no raster patch on a worker, and a settle repaints none
+            // (see `ViewState::wants_patch`).
+            self.st.list_drawn = listed;
             // The region patch covers the window on its own with the sharp
             // pixels of the visible part, so the whole-image texture draws only
             // where the patch cannot reach: the frames of a resize or a pan

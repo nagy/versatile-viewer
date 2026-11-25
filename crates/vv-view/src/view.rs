@@ -306,6 +306,15 @@ pub struct ViewState {
     /// [`Self::refresh_plane`] paints the plane again once the window holds
     /// still, and clears this flag when it asks for the paint.
     pub plane_stale: bool,
+    /// Whether the frame before this one drew the display list of the open
+    /// source.
+    ///
+    /// A document that answers a list draws the whole picture from it, at any
+    /// zoom and sharper than a patch (see `crate::viewer`), so the region
+    /// patches have nothing to paint while it does.
+    /// The flag is what tells them so; the fallback of a frame the list refuses
+    /// lands after [`region::QUIET`] the moment it clears.
+    pub list_drawn: bool,
     /// The plane of the open source that the view shows.
     /// It is 0 for every source the viewer opens: a book stacks its spreads
     /// into one plane (see [`vv_view::book`]).
@@ -653,6 +662,19 @@ impl ViewState {
         true
     }
 
+    /// Whether the view paints region patches, or the display list draws the
+    /// picture itself.
+    ///
+    /// While the list draws, a spread step paints nothing on a worker and a
+    /// settle repaints no patch, which keeps a glide off the raster path — the
+    /// one moment the main thread is encoding the list for the band it left.
+    /// The raster is the fallback of a frame the list refuses, and it resumes as
+    /// soon as one clears the flag (see [`ViewState::list_drawn`]).
+    #[must_use]
+    fn wants_patch(&self) -> bool {
+        !self.list_drawn
+    }
+
     /// Paint the region a spread step lands on, so the sharp patch is ready
     /// when the glide arrives.
     ///
@@ -661,27 +683,14 @@ impl ViewState {
     /// The work runs on a decode worker (`rayon`), so the glide never waits on
     /// it, and the result lands in [`ViewState::prefetch`] instead of replacing
     /// the patch on screen.
-    /// A step that misses a spread calls nothing, because it moves nothing.
+    /// A step that misses a spread calls nothing, because it moves nothing, and
+    /// a document whose display list drew the frame before paints no patch here
+    /// at all (see [`Self::wants_patch`]).
     pub fn prefetch_spread(&mut self, win: Vec2, uploader: &Uploader) {
-        if self.source.is_none() || self.img.w <= 0.0 {
-            return;
-        }
-        let Some(scale) = self.view_scale else {
+        let (Some(patch), Some(source)) = (self.spread_patch(win), self.source.clone()) else {
             return;
         };
-        if !(scale.is_finite() && scale > 0.0) {
-            return;
-        }
-        let Some(source) = self.source.clone() else {
-            return;
-        };
-        // The same rect an ordinary paint would cover, so the landing frame
-        // adopts it without a second paint.
-        let aim = self.frame_at(win, self.target_pan, scale);
-        let patch = region::Patch::new(aim.crop(region::MARGIN), scale);
-        if patch.rect.is_empty() {
-            return;
-        }
+        let (scale, plane) = (patch.scale, self.source_plane);
         let id = self.next_prefetch_id();
         self.prefetch = Prefetch::Painting(Painting {
             patch,
@@ -689,7 +698,6 @@ impl ViewState {
             started: Instant::now(),
         });
         let (generation, tx) = (self.crop_gen, self.crop_tx.clone());
-        let plane = self.source_plane;
         let uploader = uploader.clone();
         rayon::spawn(move || {
             match source.render(View::region(plane, patch.rect, scale)) {
@@ -717,12 +725,33 @@ impl ViewState {
         });
     }
 
+    /// The patch a spread step asks a worker to paint, or `None` when the step
+    /// paints nothing.
+    ///
+    /// A view with no source, no plane or no scale paints nothing, and so does
+    /// one whose display list drew the frame before (see [`Self::wants_patch`]).
+    /// The rect is the one an ordinary paint would cover, so the landing frame
+    /// adopts it without a second paint.
+    fn spread_patch(&self, win: Vec2) -> Option<region::Patch> {
+        if !self.wants_patch() || self.source.is_none() || self.img.w <= 0.0 {
+            return None;
+        }
+        let scale = self.view_scale?;
+        if !(scale.is_finite() && scale > 0.0) {
+            return None;
+        }
+        let aim = self.frame_at(win, self.target_pan, scale);
+        let patch = region::Patch::new(aim.crop(region::MARGIN), scale);
+        (!patch.rect.is_empty()).then_some(patch)
+    }
+
     /// Drop the region state of the image that was open, and retire every
     /// worker result still in flight.
     pub fn close_crop(&mut self) {
         self.source = None;
         self.scene = None;
         self.scene_pending = false;
+        self.list_drawn = false;
         self.drop_patch();
     }
 
@@ -926,6 +955,11 @@ impl ViewState {
     /// patch that already covers the window replaces the one on screen here and
     /// skips the debounce and the paint.
     pub fn tick_crop(&mut self, now: Instant, win: Vec2, uploader: &Uploader) {
+        // A display list draws the whole picture, so no worker paints this one
+        // (see [`Self::wants_patch`]).
+        if !self.wants_patch() {
+            return;
+        }
         let Some(source) = self.source.as_ref() else {
             return;
         };
@@ -2308,6 +2342,7 @@ mod tests {
             source_plane: 0,
             loader_plane: None,
             plane_stale: false,
+            list_drawn: false,
             open_box: None,
             cell_box: None,
             open_align: OpenAlign::Free,
@@ -2336,6 +2371,41 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         false
+    }
+
+    /// A document whose display list drew the frame before asks no worker for a
+    /// region patch: the list is the picture, at any zoom and sharper than a
+    /// patch, so the raster is only the fallback of a frame the list refuses.
+    ///
+    /// The gate is what keeps a spread step off the raster path: the step
+    /// prefetches its landing patch at the press edge, which is the one moment
+    /// the main thread is encoding the list for the band it just left.
+    #[test]
+    fn a_listed_document_paints_no_patch() {
+        let mut st = view_state();
+        st.img = Size { w: 100.0, h: 50.0 };
+        st.view_scale = Some(1.0);
+        st.source = Some(Arc::new(Listed));
+        let win = Vec2::new(100.0, 50.0);
+        assert!(
+            st.spread_patch(win).is_some(),
+            "a source that has drawn no list prefetches its landing patch"
+        );
+        st.list_drawn = true;
+        assert!(
+            !st.wants_patch() && st.spread_patch(win).is_none(),
+            "a list that drew the frame asks no worker for a patch"
+        );
+        st.list_drawn = false;
+        assert!(
+            st.wants_patch() && st.spread_patch(win).is_some(),
+            "a frame the list refused falls back to the raster again"
+        );
+        // A source closed and reopened starts with no list drawn, so its first
+        // frame paints the patch it always painted.
+        st.list_drawn = true;
+        st.close_crop();
+        assert!(st.wants_patch(), "an open source has drawn no list yet");
     }
 
     #[test]
