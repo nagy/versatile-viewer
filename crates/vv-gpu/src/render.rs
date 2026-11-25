@@ -396,6 +396,9 @@ impl Renderer {
 
     /// The display-list pass, on this renderer's device, queue and textures.
     ///
+    /// The frame loop asks a worker for this instead (see `vv_view`'s
+    /// `draw_list`), so the door is for a host that draws no frames of its own.
+    ///
     /// # Errors
     ///
     /// Returns [`SceneError`] when vello refuses the device.

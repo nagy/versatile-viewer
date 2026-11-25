@@ -73,7 +73,7 @@ use crate::{
     texture::Texture,
     theme,
     view::{
-        BACKGROUND, CropState, EASE_TIME, Mode, NavKeys, OpenAlign, PAN_RATE, Prefetch,
+        BACKGROUND, CropState, EASE_TIME, ListPass, Mode, NavKeys, OpenAlign, PAN_RATE, Prefetch,
         ROTATE_DRAG_SPAN, ROTATE_DRAG_SPEED, Ramps, SPREAD_EASE_TIME, ViewState, ZOOM_ANCHOR_DRIFT,
         ZOOM_DRAG_SPAN, ZOOM_DRAG_SPEED, ZoomMode, aim_fill_pan, attach_blur_bg, draw_cell,
         draw_list, draw_patch, draw_selection, draw_turned, keep_pivot, pan_drag_speed,
@@ -475,11 +475,13 @@ pub struct Viewer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     renderer: Renderer,
-    /// The display-list pass, built the first time a source answers a list.
+    /// The display-list pass, and the build of one a worker is running.
     ///
-    /// Vello compiles its compute pipelines when it is built, which costs a
-    /// moment, so a run that shows only pictures never pays for it.
-    scene_pass: Option<crate::display::SceneView>,
+    /// Vello compiles its compute pipelines when the pass is built, which costs
+    /// a moment, so a run that shows only pictures never pays for it, and the
+    /// frame that first asks for one keeps its picture while the worker builds
+    /// (see `draw_list`).
+    scene_pass: ListPass,
 
     // --- what the viewer shows ---
     st: ViewState,
@@ -634,7 +636,7 @@ impl Viewer {
                 scene: None,
                 scene_pending: false,
             },
-            scene_pass: None,
+            scene_pass: ListPass::default(),
             grid: None,
             shows_grid: launch.shows_grid,
             input: Input::default(),
@@ -1020,6 +1022,17 @@ impl Viewer {
     #[must_use]
     pub const fn quit(&self) -> bool {
         self.quit
+    }
+
+    /// Whether the last frame drew the open source's display list.
+    ///
+    /// A source that answers primitives draws at any zoom, and the pass that
+    /// draws it is built on a worker the first time a list arrives: a frame
+    /// before it lands paints the raster instead (see `draw_list`), so a host
+    /// reads this to know which of the two the last frame showed.
+    #[must_use]
+    pub fn listed(&self) -> bool {
+        self.st.list_drawn
     }
 
     /// The title of the open picture, for a host that names its window.

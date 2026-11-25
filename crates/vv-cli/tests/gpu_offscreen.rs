@@ -25,7 +25,8 @@
 //! - the decoder-to-draw chain of an SVG, a PDF page and a converted source;
 //! - the transparent gutter of a book plane;
 //! - a treemap laid out for the window, which leaves no letterbox and no
-//!   background pixel, and its fallback picture after a re-layout.
+//!   background pixel, and its fallback picture after a re-layout;
+//! - the display-list pass a worker builds, whose first frames paint the plane.
 
 // The tests read and name window pixels as whole numbers, so a float rect
 // becomes a pixel index with one cast, and a dimension becomes an `f32`.
@@ -1454,6 +1455,86 @@ fn a_listed_svg_lands_where_its_plane_does() {
         off * 50 < 200 * 200,
         "{off} of 40000 pixels miss the plane, so the list did not land on it"
     );
+}
+
+/// A listed document paints its plane until the pass that draws its list lands.
+///
+/// `vello` compiles the pass's compute pipelines when it is built, which is a
+/// moment of work no frame can afford, so a worker builds it: the frame that
+/// asks for the pass paints the plane texture, and the frame that finds the
+/// pass installed draws the list. The two regimes show the same picture, which
+/// is what the two comparisons below pin.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_listed_document_paints_its_plane_until_the_pass_lands() {
+    let document = r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200">
+        <g transform="translate(20,20)"><rect width="80" height="80" fill="#ff0000"/></g>
+        <path d="M 120 20 L 180 20 L 150 80 Z" fill="#00ff00"/>
+      </svg>"##;
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("scene.svg");
+    std::fs::write(&path, document).expect("write the svg");
+    let launch = vv_view::viewer::Launch::open(&path, false).expect("the launch opens");
+    // The launch frames the plane a vector file renders at scale 1.0, so the
+    // window is that plane's own size and neither regime resamples it.
+    let (win_w, win_h) = launch.window_size();
+    let canvas = canvas!(win_w, win_h);
+    let mut viewer = vv_view::viewer::Viewer::new(
+        canvas.device.clone(),
+        canvas.queue.clone(),
+        FORMAT,
+        canvas.device.limits().max_texture_dimension_2d,
+        launch,
+        canvas.size,
+    );
+    assert!(!viewer.listed(), "a launch builds no display-list pass");
+    let mut host = NullHost;
+    // The launch asks a worker for the list, and a tiny document walks in a
+    // moment, so this wait is what puts the list in the first frame: the frame
+    // that asks for the pass must still paint the raster, and a pass built in
+    // the frame would draw the list here and leave `raster` empty below.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // The build starts in the frame that first holds a list and answers that
+    // frame with `false`, so at least one frame paints the plane texture: the
+    // one this loop keeps as the raster regime.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut raster = None;
+    let mut frames = 0;
+    let listed = loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the worker's display-list pass lands"
+        );
+        let pixels = shot_frame_read(&canvas, &mut viewer, &mut host);
+        frames += 1;
+        if viewer.listed() {
+            break pixels;
+        }
+        raster = Some(pixels);
+        std::thread::sleep(std::time::Duration::from_millis(4));
+    };
+    assert!(frames > 1, "the frame that asks for the pass draws no list");
+    let raster = raster.expect("a frame of the build drew the raster");
+
+    // The picture the plane paints of this document, which both regimes show.
+    let surface = open_surface(&path).expect("the document opens");
+    let want = surface
+        .render(View::whole(0, 1.0))
+        .expect("the plane renders");
+    assert_eq!(
+        (want.width().raw(), want.height().raw()),
+        canvas.size,
+        "the plane paints at the window size"
+    );
+    let total = canvas.size.0 as usize * canvas.size.1 as usize;
+    for (regime, pixels) in [("the raster", raster), ("the list", listed)] {
+        let off = misses_the_pixels(&pixels, &want, canvas.size);
+        assert!(
+            off * 50 < total,
+            "{off} of {total} pixels miss the plane in {regime}"
+        );
+    }
 }
 
 /// How many pixels of `frame` disagree with the raster `want`.

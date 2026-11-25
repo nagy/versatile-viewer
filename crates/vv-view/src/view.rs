@@ -28,7 +28,7 @@
 use std::{
     sync::{
         Arc,
-        mpsc::{Receiver, Sender},
+        mpsc::{self, Receiver, Sender},
     },
     time::{Duration, Instant},
 };
@@ -1504,16 +1504,142 @@ pub fn draw_patch(r: &mut Renderer, patch: &CropState, frame: &region::Frame, fi
     }
 }
 
+/// The display-list pass, and the build of one a worker is running.
+///
+/// `vello` compiles its compute pipelines when the pass is built, which is a
+/// moment of work no frame of this viewer can afford, so the first list a
+/// source answers asks a worker for the pass: the frames before it lands draw
+/// the plane texture and the region patch, and every frame after it draws the
+/// list (see [`draw_list`]).
+/// A run that shows only pictures never pays for the build, because no list
+/// ever arrives and nothing here asks.
+#[derive(Default)]
+pub(crate) struct ListPass {
+    /// The pass the last frame drew through, once a worker has built it.
+    ///
+    /// It lives for the session: the pass holds the pipelines and the
+    /// pictures of one list, and a new list re-encodes it (see
+    /// [`crate::display::SceneView::draw`]).
+    built: Option<crate::display::SceneView>,
+    /// The build a worker is running, or `None` while none is in flight.
+    ///
+    /// No pass and no build is what asks for the next one, and a build that
+    /// fails latches [`Self::failed`] instead.
+    building: Option<Receiver<Result<crate::display::SceneView, crate::display::SceneError>>>,
+    /// Set when a build failed, which keeps every later frame on the raster
+    /// path.
+    ///
+    /// Vello refuses a device for a feature or a limit it is missing, and no
+    /// later frame adds one, so the viewer reports it once rather than asking a
+    /// worker for a pass that cannot come.
+    failed: bool,
+}
+
+impl ListPass {
+    /// The pass to draw this frame with, asking a worker for one when there is
+    /// none.
+    ///
+    /// `None` answers the frame that asks, and every frame of a build still in
+    /// flight, which the caller draws from the raster path instead.
+    fn ready(
+        &mut self,
+        device: &wgpu::Device,
+        r: &Renderer,
+    ) -> Option<&mut crate::display::SceneView> {
+        if self.failed {
+            return None;
+        }
+        if let Some(building) = self.building.as_ref() {
+            match building.try_recv() {
+                Ok(Ok(built)) => {
+                    self.built = Some(built);
+                    self.building = None;
+                }
+                // The build that failed reported itself (see [`build_pass`]),
+                // and the viewer keeps the raster path it falls back to.
+                Ok(Err(_)) => {
+                    self.failed = true;
+                    self.building = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                // The worker died before it answered, so the frame paints the
+                // raster and names the loss instead of waiting for an answer
+                // that cannot come.
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    tracing::warn!("display list worker gone");
+                    self.failed = true;
+                    self.building = None;
+                }
+            }
+        }
+        if self.built.is_none() && self.building.is_none() {
+            self.building = Some(ask_for_pass(device, r.uploader()));
+        }
+        self.built.as_mut()
+    }
+}
+
+/// Ask a worker for a display-list pass, and answer the channel its build lands
+/// on.
+///
+/// A device and an uploader are `Send + Sync` handles, so the worker builds the
+/// pass against the same device the frames draw with.
+fn ask_for_pass(
+    device: &wgpu::Device,
+    uploader: Uploader,
+) -> Receiver<Result<crate::display::SceneView, crate::display::SceneError>> {
+    let (tx, rx) = mpsc::channel();
+    // The three clones buy the worker its own handles and its own end of the
+    // channel, because the frame keeps the ones it draws with either way.
+    let (worker_tx, worker_device, worker_uploader) =
+        (tx.clone(), device.clone(), uploader.clone());
+    let spawned = std::thread::Builder::new()
+        .name("vv-scene".to_owned())
+        .spawn(move || build_pass(&worker_device, worker_uploader, &worker_tx));
+    if let Err(err) = spawned {
+        // A host that cannot spare a thread still shows the list, and the
+        // build then costs the frame what it cost while it sat in one.
+        tracing::warn!(err = %err, "display list worker");
+        build_pass(device, uploader, &tx);
+    }
+    rx
+}
+
+/// Build one pass, report what it cost, and hand it to the frame loop.
+///
+/// The report rides `debug` because the build is the one step of a listed
+/// source that costs a moment, and the frame it no longer sits in is what a
+/// slow-frame report names.
+fn build_pass(
+    device: &wgpu::Device,
+    uploader: Uploader,
+    tx: &Sender<Result<crate::display::SceneView, crate::display::SceneError>>,
+) {
+    let started = Instant::now();
+    let built = crate::display::SceneView::new(device, uploader);
+    match &built {
+        Ok(_) => tracing::debug!(
+            ms = started.elapsed().as_secs_f64() * 1000.0,
+            "display list build"
+        ),
+        Err(err) => tracing::warn!(err = %err, "display list build"),
+    }
+    // A dropped receiver means the run ended while the build ran, and the pass
+    // goes with this answer.
+    let _ = tx.send(built);
+}
+
 /// Draw a display list over the window, and answer whether it drew.
 ///
 /// The list is written in surface units and `frame` maps them onto the window,
 /// so the primitives render at the zoom and the turn the window shows and the
 /// quad pipeline composites the one picture that comes out.
-/// The pass is built on the first list, because vello compiles its compute
-/// pipelines when it is built and a run that shows only pictures never pays for
-/// that.
+/// The pass is built by a worker on the first list, because vello compiles its
+/// compute pipelines when it is built and a run that shows only pictures never
+/// pays for that: the frame that asks, and every frame of the build, answer
+/// `false` and the caller paints the raster (see [`ListPass`]).
 pub(crate) fn draw_list(
-    pass: &mut Option<crate::display::SceneView>,
+    pass: &mut ListPass,
     r: &mut Renderer,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1521,16 +1647,7 @@ pub(crate) fn draw_list(
     frame: &region::Frame,
     size: (u32, u32),
 ) -> bool {
-    if pass.is_none() {
-        match r.display_pass(device) {
-            Ok(built) => *pass = Some(built),
-            Err(err) => {
-                tracing::warn!(err = %err, "display list");
-                return false;
-            }
-        }
-    }
-    let Some(view) = pass.as_mut() else {
+    let Some(view) = pass.ready(device, r) else {
         return false;
     };
     match view.draw(device, queue, list, frame, size) {

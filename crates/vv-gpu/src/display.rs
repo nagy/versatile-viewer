@@ -255,6 +255,9 @@ impl SceneView {
     /// `vello` compiles its compute pipelines here, which costs a moment, so a
     /// caller builds this the first time a source answers a list and never for
     /// a picture.
+    /// The pass is `Send` and the device is a shared handle, so a frame loop
+    /// asks a worker for one and the frames before it lands paint their raster
+    /// instead, the way `vv-view`'s frame body does.
     ///
     /// # Errors
     ///
