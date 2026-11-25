@@ -54,6 +54,17 @@
 //! instead, which the source rasterizes at the window's own scale and which has
 //! no such limit.
 //!
+//! A refusal gives up the band before it answers, when the box this frame shows
+//! is worth giving it up for ([`SceneView::tighten`]).
+//! A band outlives the frame that made it and still covers every frame the window
+//! later zooms into, while [`Work`] counts a primitive whole however little of it
+//! the window shows, so a plane the window once held in one frame would keep that
+//! frame's bill for every zoom that followed: the refusal would become permanent,
+//! and a zoom out and back in would leave the list for the raster for good.
+//! Counting the box of the refused frame says whether the renderer can hold the
+//! picture that frame actually shows, and a frame it can hold re-encodes for that
+//! box and paints.
+//!
 //! # Image leaves
 //!
 //! A [`Primitive::Image`] carries pixels and not a texture, so this pass uploads
@@ -331,28 +342,7 @@ impl SceneView {
             .as_ref()
             .is_some_and(|base| base.holds(list, plane) && base.covers(visible))
         {
-            if self
-                .encoded
-                .as_ref()
-                .is_some_and(|base| !Arc::ptr_eq(&base.list, list))
-            {
-                // Another list is another set of leaves, so the pictures of the
-                // last one cannot be trusted and the addresses they were keyed
-                // on may now mean something else.
-                // The faces stay: a run carries its bytes, so a face of this
-                // tree outlives the list that drew it, and vello caches the
-                // outlines of a face by its bytes. Dropping them would make the
-                // first frame of every relaid map outline every label again.
-                self.images.clear();
-            }
-            self.base.reset();
-            let work = self.encode(list, plane, band);
-            self.encoded = Some(Base {
-                list: Arc::clone(list),
-                plane,
-                band,
-                work,
-            });
+            self.rebase(list, plane, band);
         }
         // The band lands at the frame's own scale, which is the linear part of
         // the transform that places it.
@@ -361,6 +351,20 @@ impl SceneView {
         // A frame past the budget is one vello paints *nothing* of, and it says
         // so to nobody: refuse it here, where the caller can still show the
         // plane, and forget the paint on screen so no later frame reuses it.
+        if self
+            .encoded
+            .as_ref()
+            .is_some_and(|base| base.work.too_heavy(scale))
+        {
+            // A band the window outgrew keeps the work of everything it covered,
+            // so this frame asks the renderer for far more than it paints and no
+            // later frame lowers that bill on its own. Give the band up for the
+            // box this frame shows when that box fits, so a refusal is a frame
+            // and not the state the view stays in (see [`Self::tighten`]).
+            if let Some(work) = self.tighten(list, band, scale) {
+                self.keep(list, plane, band, work);
+            }
+        }
         if self
             .encoded
             .as_ref()
@@ -421,6 +425,81 @@ impl SceneView {
         }
     }
 
+    /// Encode `list` for `band` and keep it as the base every frame places.
+    ///
+    /// A base is the encode of one box, so a frame that outgrew it or shrank
+    /// back into it hands its own box here (see [`Self::draw`]).
+    fn rebase(&mut self, list: &Arc<[Primitive]>, plane: (f32, f32), band: kurbo::Rect) {
+        let work = work_of(list, band);
+        self.keep(list, plane, band, work);
+    }
+
+    /// Keep the encode of `list` for `band`, whose flattening is `work`.
+    ///
+    /// The counts are the caller's because a frame that probes a box already
+    /// walked it, and walking a book's outlines a second time is the one cost
+    /// that makes giving up a band worth avoiding (see [`Self::tighten`]).
+    fn keep(&mut self, list: &Arc<[Primitive]>, plane: (f32, f32), band: kurbo::Rect, work: Work) {
+        if self
+            .encoded
+            .as_ref()
+            .is_some_and(|base| !Arc::ptr_eq(&base.list, list))
+        {
+            // Another list is another set of leaves, so the pictures of the
+            // last one cannot be trusted and the addresses they were keyed
+            // on may now mean something else.
+            // The faces stay: a run carries its bytes, so a face of this
+            // tree outlives the list that drew it, and vello caches the
+            // outlines of a face by its bytes. Dropping them would make the
+            // first frame of every relaid map outline every label again.
+            self.images.clear();
+        }
+        self.base.reset();
+        self.encode(list, plane, band);
+        self.encoded = Some(Base {
+            list: Arc::clone(list),
+            plane,
+            band,
+            work,
+        });
+    }
+
+    /// The work of the box this frame shows, when the band is worth giving up
+    /// for it.
+    ///
+    /// A base the frame outgrew is still the base of every frame that shrank back
+    /// into it, and [`Work`] counts a primitive whole however little of it the
+    /// window shows. So the band of a plane the window once held in one frame
+    /// keeps that frame's bill for every zoom that follows, and it covers those
+    /// frames, so no frame ever encodes again. This is the way out: count what the
+    /// box of *this* frame asks `vello` to flatten, and let the caller encode for
+    /// it when the renderer can hold it.
+    ///
+    /// The count is a walk of the list, cheaper than the encode it can save but
+    /// not free, so it is spent only where it can pay: a document's ink scales
+    /// with the area a band reaches, so a box the band shrank `shrunk` times
+    /// smaller than holds about the base's work over `shrunk`. A box whose bound
+    /// would still run past [`LINE_BUDGET`] is refused at once, which keeps a pan
+    /// while a frame is refused free instead of walking the same plane every
+    /// frame.
+    ///
+    /// `None` answers a frame to refuse: the box it shows cannot fit the renderer
+    /// either.
+    fn tighten(&self, list: &[Primitive], band: kurbo::Rect, scale: f64) -> Option<Work> {
+        let base = self.encoded.as_ref()?;
+        let (had, wants) = (base.band.area(), band.area());
+        // A band this frame already is, and a box of no area or no bound, hold
+        // nothing a second walk could bound.
+        if base.band == band || !(had.is_finite() && wants > 0.0) {
+            return None;
+        }
+        if base.work.lines_at(scale) / (had / wants) > LINE_BUDGET {
+            return None;
+        }
+        let work = work_of(list, band);
+        (!work.too_heavy(scale)).then_some(work)
+    }
+
     /// Encode the primitives of `list` whose ink reaches `band`, in surface
     /// units.
     ///
@@ -430,10 +509,8 @@ impl SceneView {
     /// A primitive the band does not reach is dropped, because `vello` would
     /// pay for it in every frame: it flattens the curves of the whole encode and
     /// its bump allocators are fixed (see the module docstring).
-    fn encode(&mut self, list: &[Primitive], plane: (f32, f32), band: kurbo::Rect) -> Work {
-        let mut work = Work::default();
+    fn encode(&mut self, list: &[Primitive], plane: (f32, f32), band: kurbo::Rect) {
         for primitive in list.iter().filter(|primitive| hits(primitive, band)) {
-            count(&mut work, primitive);
             match primitive {
                 Primitive::Rect { rect, paint } => {
                     // A rect carries no transform, so both its shape and its
@@ -549,7 +626,6 @@ impl SceneView {
                 }
             }
         }
-        work
     }
 
     /// Take a window size, rebuilding the target when it moved.
@@ -827,6 +903,18 @@ impl Work {
             self.lines += 1.0;
         }
     }
+}
+
+/// What `vello` has to flatten for the primitives of `list` that reach `band`.
+///
+/// It is a pure function of the band and the list, so a frame probes a box
+/// without encoding it (see [`SceneView::tighten`]).
+fn work_of(list: &[Primitive], band: kurbo::Rect) -> Work {
+    let mut work = Work::default();
+    for primitive in list.iter().filter(|primitive| hits(primitive, band)) {
+        count(&mut work, primitive);
+    }
+    work
 }
 
 /// Add what `vello` flattens for `primitive` to `work`.

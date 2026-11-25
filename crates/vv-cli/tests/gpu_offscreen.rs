@@ -2678,3 +2678,115 @@ fn a_pushed_picture_lands_in_a_blank_viewer() {
     assert_eq!((status.grid, status.planes), (true, 0));
     assert_eq!(frame(&mut viewer).at(16, 16), [6, 0x23, 0x29, 0xff]);
 }
+
+/// The height of one page of [`heavy_plane`], in surface units.
+const PAGE_HEIGHT: f64 = 200.0;
+
+/// A plane of `pages` pages stacked, each a wave of `curves` segments inside
+/// its own slot.
+///
+/// A page's band is that page padded by half on every side, so it reaches half
+/// way into the slot below: a frame of one page counts the page and the one
+/// under it. The counts of this test are read that way.
+fn heavy_plane(pages: usize, curves: usize) -> std::sync::Arc<[vv_source::scene::Primitive]> {
+    use vv_core::{
+        draw::Color,
+        scene::{FillRule, Paint, Primitive},
+    };
+
+    let list: Vec<Primitive> = (0..pages)
+        .map(|page| {
+            let mid = page as f64 * PAGE_HEIGHT + PAGE_HEIGHT / 2.0;
+            let mut path = kurbo::BezPath::new();
+            path.move_to((0.0, mid));
+            for step in 0..curves {
+                let x = (step % 40) as f64 * 5.0;
+                // One amplitude for every curve, so a curve costs the same at
+                // every step and the work of a band follows the pages it
+                // reaches.
+                let up = if (step / 40) % 2 == 0 { 30.0 } else { -30.0 };
+                path.curve_to((x + 1.7, mid + up), (x + 3.3, mid - up), (x + 5.0, mid));
+            }
+            Primitive::Path {
+                path,
+                transform: kurbo::Affine::IDENTITY,
+                fill: Some(Paint::Solid(Color::new(255, 0, 0, 255))),
+                fill_rule: FillRule::NonZero,
+                stroke: None,
+            }
+        })
+        .collect();
+    list.into()
+}
+
+/// A band the window outgrew is given up, so a zoom back in paints the list
+/// again.
+///
+/// `Work` counts a primitive whole however little of it the window shows, and a
+/// band still covers every frame the window later zooms into, so the band of the
+/// whole plane answers a frame of one page with the work of all six pages: at the
+/// zoom of a page that bill is past `LINE_BUDGET`, and it stays past it for every
+/// frame after, because the band covers them and no frame encodes again. So the
+/// whole plane keeps the raster for good once the window has shown it in one
+/// frame, which is the zoom out and back in that stuck. A page band is a frame
+/// the renderer holds at that same zoom, so the band is the whole of the
+/// difference.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_zoom_back_in_answers_the_list_again() {
+    use vv_core::{
+        dim::{SurfaceSize, WindowSize, WindowVector},
+        region,
+    };
+
+    const PAGES: usize = 6;
+    let list = heavy_plane(PAGES, 15_000);
+    let plane = SurfaceSize::new(PAGE_HEIGHT as f32, (PAGES as f64 * PAGE_HEIGHT) as f32);
+    let page = |page: usize, scale: f32| region::Frame {
+        img: plane,
+        win: WindowSize::new(256.0, 256.0),
+        pan: WindowVector::new(
+            0.0,
+            -((page as f64 * PAGE_HEIGHT + PAGE_HEIGHT / 2.0) as f32 - plane.height / 2.0) * scale,
+        ),
+        scale,
+        angle: 0.0,
+    };
+    let whole = page(0, 256.0 / plane.height);
+    let one = page(0, 256.0 / PAGE_HEIGHT as f32);
+
+    let canvas = canvas!(256, 256);
+    let mut pass = canvas
+        .renderer
+        .display_pass(&canvas.device)
+        .expect("a display-list pass");
+
+    // Every page of the plane at once fits the renderer as the window leaves it,
+    // so this frame paints the list and keeps a band of the whole plane.
+    assert!(
+        pass.draw(&canvas.device, &canvas.queue, &list, &whole, canvas.size)
+            .expect("the pass answers")
+            .is_some(),
+        "the whole plane at the fit scale paints the list"
+    );
+
+    // A page of it is a frame the renderer holds on its own, and it is the frame
+    // a zoom back in draws: the band of the whole plane must not be what decides
+    // it.
+    assert!(
+        pass.draw(&canvas.device, &canvas.queue, &list, &one, canvas.size)
+            .expect("the pass answers")
+            .is_some(),
+        "a page of the plane the window zoomed into paints the list"
+    );
+
+    // And the plane at the fit scale is still a frame the pass paints, so the
+    // band a frame gives up is the band of the frame before it and never one the
+    // picture needs.
+    assert!(
+        pass.draw(&canvas.device, &canvas.queue, &list, &whole, canvas.size)
+            .expect("the pass answers")
+            .is_some(),
+        "a zoom back out paints the list it painted before"
+    );
+}

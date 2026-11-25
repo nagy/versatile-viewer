@@ -58,6 +58,9 @@ pollster = "1.0.2"
 # Those paints cover the SVG, PDF, converted and book planes, so the test names
 # the surface layer of its own.
 vv-source = { path = "../vv-source" }
+# The paint that stands a display list of its own builds the `kurbo` geometry a
+# `scene::Primitive` carries, so the test names that geometry itself.
+kurbo = "0.13.1"
 
 [lints]
 workspace = true
