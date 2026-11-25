@@ -2790,3 +2790,87 @@ fn a_zoom_back_in_answers_the_list_again() {
         "a zoom back out paints the list it painted before"
     );
 }
+
+/// A book opened from the grid never shows one page in the middle of the window.
+///
+/// A cell of a document holds page 0 and never the spread the image view shows,
+/// so the decode a cell waits for can never answer that view. Waiting for it
+/// anyway framed that page on its own — the cell's fit, in the middle of the
+/// window — and a frame later moved it into its slot of the spread, which is the
+/// jump a grid open used to show.
+/// This window is 1200 by 800 and the cover sits in the right slot, so the two
+/// framings are told apart by which side of the window holds the cover's red:
+/// centered, the left probe is red; in its slot, only the right one is.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_book_opened_from_the_grid_is_framed_before_its_page_lands() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    std::fs::write(
+        dir.path().join("a.pdf"),
+        pdf_with_box(3, [0, 0, 200, 280], |page| {
+            let ink = if page == 0 { "1 0 0" } else { "0 0 1" };
+            format!("{ink} rg\n0 0 200 280 re f\n")
+        }),
+    )
+    .expect("write the book");
+    std::fs::write(dir.path().join("b.svg"), SMALL_SVG).expect("write the svg");
+    let canvas = canvas!(1200, 800);
+    let open = || {
+        let launch = vv_view::viewer::Launch::open(dir.path(), true).expect("the launch opens");
+        vv_view::viewer::Viewer::new(
+            canvas.device.clone(),
+            canvas.queue.clone(),
+            FORMAT,
+            canvas.device.limits().max_texture_dimension_2d,
+            launch,
+            canvas.size,
+        )
+    };
+    let mut host = NullHost;
+
+    // A first launch that settles, so the cells hold the headers a warm launch
+    // has: the case a grid open waits on is a cell whose picture is on its way.
+    let mut viewer = open();
+    for _ in 0..60 {
+        shot_frame(&canvas, &mut viewer, &mut host, 0.016, true);
+    }
+    drop(viewer);
+
+    // The warm launch, entered while that cell is still queued.
+    let mut viewer = open();
+    for _ in 0..2 {
+        shot_frame(&canvas, &mut viewer, &mut host, 0.016, true);
+    }
+    host.press(&mut viewer, winit::keyboard::KeyCode::Enter);
+
+    let mut seen = false;
+    for _ in 0..90 {
+        let pixels = shot_frame_read(&canvas, &mut viewer, &mut host);
+        let (left, right) = (pixels.at(520, 400), pixels.at(900, 400));
+        let ink = |pixel: [u8; 4]| pixel[0] > 128 && pixel[2] < 64;
+        assert!(
+            !ink(left),
+            "the cover is never framed on its own: left of the spread is {left:?}"
+        );
+        seen |= ink(right);
+    }
+    assert!(
+        seen,
+        "the cover lands in the slot of its spread, right of the fold"
+    );
+}
+
+/// Run one frame of `viewer`, and read the target back.
+fn shot_frame_read(
+    canvas: &Canvas,
+    viewer: &mut vv_view::viewer::Viewer,
+    host: &mut NullHost,
+) -> Pixels {
+    let view = canvas
+        .target
+        .create_view(&wgpu::TextureViewDescriptor::default());
+    viewer
+        .render(host, &view, canvas.size, 0.016)
+        .expect("the frame renders");
+    canvas.read()
+}

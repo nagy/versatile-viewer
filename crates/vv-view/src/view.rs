@@ -1889,14 +1889,19 @@ pub fn show_entry(
             // The dimensions arrive with the header or the texture.
             st.img = Size { w: 0.0, h: 0.0 };
         }
-        st.loader = if queued || (thumb && !no_full) {
-            // A grid decode for this entry is in flight, or the entry has
-            // a thumb and the keep-set refill dispatched (or will dispatch)
-            // the missing full-res decode.
-            // Wait for the decode-landed takeover instead of decoding the
-            // file twice in a streaming worker.
-            // A document keeps no full-res texture, so its cell waits for
-            // nothing: the loader renders the book now.
+        // Whether this open waits for the cell's own decode: a picture waits,
+        // because the texture that decode makes *is* the picture, and the thumb
+        // holds the place until it lands.
+        // A document waits for nothing, because its cell holds page 0 alone
+        // while the view shows the whole book (see [`crate::book`]): a decode of
+        // that cell can never answer this view, and waiting for it would show
+        // that page in the middle of the window before a later frame moved it
+        // into the right slot of its spread, which is the jump a grid open used
+        // to show.
+        // The header alone says whether the file can be a document, so a cell
+        // that waits reads no more than it already has.
+        let waits = (queued || (thumb && !no_full)) && !source.may_be_a_book();
+        st.loader = if waits {
             None
         } else {
             // The placeholder takes the long side of the window, so a thumb

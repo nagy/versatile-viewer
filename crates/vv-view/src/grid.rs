@@ -126,6 +126,18 @@ impl EntrySource {
         Ok((surface, 0))
     }
 
+    /// Whether this file may arrive as a book instead of one picture.
+    ///
+    /// A book is one plane of many spreads (see [`crate::book`]), so only a
+    /// document makes one: a PDF, or a format a converter rule turns into one.
+    /// Every other file is a single plane.
+    /// The test reads the header and the rules, never the content, so a cell can
+    /// ask it before it decodes anything.
+    #[must_use]
+    pub fn may_be_a_book(&self) -> bool {
+        crate::pdf::is_pdf(self.path()) || crate::convert::claims(self.path())
+    }
+
     /// The file, opened the way the image view shows it: a document arrives
     /// as a book (see [`crate::book`]), so plane 0 holds every spread.
     ///
@@ -2214,5 +2226,35 @@ mod tests {
         assert_eq!(book.plane_count(), 1);
         assert_eq!(book.bounds(0).unwrap().w, 612.0 * 2.0 + crate::book::GUTTER);
         assert_eq!(book.bounds(0).unwrap().h, 792.0 * 2.0);
+    }
+
+    /// Only a document can arrive as a book, and the header says so before the
+    /// cell decodes anything: a cell asks this to know whether the picture it
+    /// holds is the one the image view shows.
+    #[test]
+    fn only_a_document_may_arrive_as_a_book() {
+        let dir = TempDir::new().unwrap();
+        let pdf = dir.path().join("doc.pdf");
+        std::fs::write(&pdf, crate::fixtures::TWO_PAGE_PDF).unwrap();
+        assert!(
+            EntrySource::new(pdf).may_be_a_book(),
+            "a PDF holds one plane per page"
+        );
+        let png = dir.path().join("a.png");
+        image::DynamicImage::new_rgb8(3, 2).save(&png).unwrap();
+        assert!(
+            !EntrySource::new(png).may_be_a_book(),
+            "a raster file is one plane"
+        );
+        let svg = dir.path().join("a.svg");
+        std::fs::write(
+            &svg,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"/>"#,
+        )
+        .unwrap();
+        assert!(
+            !EntrySource::new(svg).may_be_a_book(),
+            "a vector document paints one plane"
+        );
     }
 }
