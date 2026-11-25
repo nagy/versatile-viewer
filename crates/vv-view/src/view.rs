@@ -1950,7 +1950,14 @@ pub fn show_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::surface::SurfaceError;
+    use crate::{surface::SurfaceError, theme};
+
+    /// The theme's paper is the window background, so a recolored page runs to
+    /// the edge of the window without a letterbox of another shade.
+    #[test]
+    fn the_recolor_paper_is_the_window_background() {
+        assert_eq!(theme::THEME.paper, BACKGROUND);
+    }
 
     #[test]
     fn a_treemap_answers_the_plane_its_window_names() {

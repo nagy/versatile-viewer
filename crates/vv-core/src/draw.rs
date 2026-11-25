@@ -78,6 +78,39 @@ impl Color {
         Self { r, g, b, a }
     }
 
+    /// A color from a `#rrggbb` literal, read at compile time.
+    ///
+    /// The parse panics on anything else, and the one caller is a `const`, so a
+    /// malformed literal fails the build instead of drawing the wrong color.
+    /// A palette therefore reads as the hexadecimal it was picked in.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the text is not a `#` and six hexadecimal digits, which a
+    /// `const` caller turns into a build failure.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use vv_core::draw::Color;
+    /// assert_eq!(
+    ///     Color::from_hex("#062329"),
+    ///     Color::new(0x06, 0x23, 0x29, 255)
+    /// );
+    /// ```
+    #[must_use]
+    pub const fn from_hex(hex: &str) -> Self {
+        let digits = hex.as_bytes();
+        assert!(digits.len() == 7, "a color literal reads #rrggbb");
+        assert!(digits[0] == b'#', "a color literal starts with #");
+        Self::new(
+            hex_byte(digits[1], digits[2]),
+            hex_byte(digits[3], digits[4]),
+            hex_byte(digits[5], digits[6]),
+            255,
+        )
+    }
+
     /// Opaque white, which keeps a texture as it was decoded.
     pub const WHITE: Self = Self::new(255, 255, 255, 255);
     /// Opaque black, which hides what it covers.
@@ -259,6 +292,21 @@ impl Quad {
 #[allow(clippy::cast_possible_truncation)]
 const fn mul_channel(channel: u8, tint: u8) -> u8 {
     ((channel as u16 * tint as u16) / 255) as u8
+}
+
+/// The value of one hexadecimal digit.
+const fn hex_digit(digit: u8) -> u8 {
+    match digit {
+        b'0'..=b'9' => digit - b'0',
+        b'a'..=b'f' => digit - b'a' + 10,
+        b'A'..=b'F' => digit - b'A' + 10,
+        _ => panic!("a color literal holds hexadecimal digits"),
+    }
+}
+
+/// One channel from its two hexadecimal digits.
+const fn hex_byte(high: u8, low: u8) -> u8 {
+    hex_digit(high) * 16 + hex_digit(low)
 }
 
 #[cfg(test)]

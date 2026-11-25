@@ -71,6 +71,7 @@ use crate::{
     rotate,
     surface::{Crop, Size, Surface, View, open_book_surface, open_bytes, open_surface},
     texture::Texture,
+    theme,
     view::{
         BACKGROUND, CropState, EASE_TIME, Mode, NavKeys, OpenAlign, PAN_RATE, Prefetch,
         ROTATE_DRAG_SPAN, ROTATE_DRAG_SPEED, Ramps, SPREAD_EASE_TIME, ViewState, ZOOM_ANCHOR_DRIFT,
@@ -485,6 +486,13 @@ pub struct Viewer {
     grid: Option<Grid>,
     /// The pane draws no grid, so `ESC` and `Enter` never leave the image view.
     shows_grid: bool,
+    /// Whether `Shift+T` has recolored every picture.
+    ///
+    /// The theme is a shader uniform and never a pixel, so flipping this costs
+    /// one uniform write and no decode: the grid thumbnails, the blurred
+    /// background and the image view all change on the next frame (see
+    /// [`vv_core::theme`]).
+    recolor: bool,
 
     // --- input ---
     input: Input,
@@ -631,6 +639,7 @@ impl Viewer {
             shows_grid: launch.shows_grid,
             input: Input::default(),
             title_open_id: None,
+            recolor: false,
             quit: false,
             spread_armed: true,
             last_win: None,
@@ -814,6 +823,10 @@ impl Viewer {
         self.elapsed += f64::from(dt);
         self.renderer.begin(&self.queue, size);
         self.renderer.set_clear(BACKGROUND);
+        // The theme is one uniform, written only when the flag moved, so a
+        // frame that changed nothing costs nothing.
+        self.renderer
+            .set_theme(&self.queue, self.recolor.then_some(theme::THEME));
         let result = self.frame(host, size, dt);
         self.renderer.render_into(&self.device, &self.queue, target);
         // The frame edges belong to one frame: the held state and the pointer
@@ -1372,6 +1385,15 @@ impl Viewer {
         };
         let shift_speed = shift_mult as f32;
 
+        // Shift+T recolors every picture: the grid thumbnails, the blurred
+        // background, the plane and its patch, and the display list all read
+        // one theme, which the quad shader applies as it composites.
+        // The plain `t` stays the fit toggle, so the two never collide.
+        if shift && self.input.is_key_pressed(KeyCode::KeyT) {
+            self.recolor = !self.recolor;
+            tracing::debug!(on = self.recolor, "recolor toggled");
+        }
+
         if self.st.mode == Mode::Grid {
             // A blank launch holds no grid, so the pane stays inert until a
             // push lands a picture.
@@ -1875,9 +1897,11 @@ impl Viewer {
                     ZoomMode::FitWidth
                 };
                 self.st.target_pan = Vec2::ZERO;
-            } else if self.input.is_key_pressed(KeyCode::KeyT) || f_zoom {
+            } else if (self.input.is_key_pressed(KeyCode::KeyT) && !shift) || f_zoom {
                 // t: two-state toggle, whole image visible (fit-all) against
                 // window completely covered (fill).
+                // Shift+T is the recolor toggle and lands above, so the two
+                // readings of one key never fight.
                 // This stays distinct for any image and window combination,
                 // unlike a fit-width/fit-height cycle.
                 // f (f_zoom) always zooms in: it only reaches here when the

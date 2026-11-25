@@ -27,6 +27,7 @@
 //! transform and never rebuilds.
 //! [`region`] holds the visible-region geometry of the image view, and
 //! [`region_sel`] the selection the `v` hold drags over it.
+//! [`theme`] holds the two colors a recolored picture maps onto.
 //! [`rotate`] holds the rotation angle behind the `r` hold.
 //! [`keyrepeat`] repeats a held key at the X rate, and [`tween`] ramps one for
 //! a continuous motion.
@@ -45,6 +46,7 @@ pub mod region;
 pub mod region_sel;
 pub mod rotate;
 pub mod scene;
+pub mod theme;
 pub mod tween;
 
 use crate::draw::Color;

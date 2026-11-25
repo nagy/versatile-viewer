@@ -75,6 +75,7 @@ use crate::{
     render::Renderer,
     surface::{Surface, SurfaceError, View, open_book_surface, open_surface},
     texture::{Filter, Ready, Texture, Uploader},
+    theme::PLATE,
 };
 
 /// The source of a grid cell: a file on disk, opened (and sniffed) lazily at
@@ -1451,6 +1452,11 @@ impl Grid {
         // A visual selection dims every cell outside it, so the selected set
         // stands out. Plain cursor marking dims nothing.
         let dim_others = visual.is_some();
+        // A recolored page's paper is the window background, which is also what
+        // the gaps between cells show, so a themed cell needs a plate to end
+        // against: without one, two white pages side by side read as one dark
+        // field and the grid shows no cell at all.
+        let themed = r.theme().is_some();
         for (i, e) in self.entries.iter().enumerate() {
             let col = i % cols;
             let row = i / cols;
@@ -1468,6 +1474,11 @@ impl Grid {
             } else {
                 Color::WHITE
             };
+            if themed {
+                // The plate takes the cell's tint, so a cell outside a visual
+                // selection dims its frame as well as its picture.
+                r.fill_rect(dim::rect(cx, cy, cw, ch), PLATE.tint(tint));
+            }
             if let Some(tex) = e.cell.thumb() {
                 // The thumb texture keeps the aspect ratio of the image.
                 // The square cell shows its center crop (draw-time crop, so a

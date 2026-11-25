@@ -262,6 +262,7 @@ container, pane).
 |`W` / `Shift+W`      |—                           |fit-down / fit-all             |
 |`e` / `Shift+E`      |—                           |fit width / fit height         |
 |`t`                  |—                           |toggle fit-all / fill          |
+|`Shift+T`            |recolor every thumbnail     |recolor the picture            |
 |`a`                  |—                           |toggle smooth / pixelated filter|
 |`f`                  |open cell under cursor      |fill-zoom at cursor / zoom out / back to grid (hold: pan)|
 |`Shift+f` (hold)     |—                           |free zoom by mouse travel: up zooms in, down zooms out (continuous)|
@@ -297,6 +298,23 @@ move it: the rect keeps its size and its edges stop at the picture border.
 A `v` press and release without travel drops the region, unless the press
 landed inside it, which commits nothing. `Esc` drops the region too, and stays
 in the image view until the second press.
+
+`Shift+T` recolors every picture: the grid thumbnails, the blurred background
+and the image view alike. A page drawn on white paper with black ink becomes
+tan ink on a dark blue-green page, and a color between the two keeps its hue
+as its lightness travels, so a chart's red line and its legend stay readable.
+The same key turns it back. Nothing decodes or uploads again either way: the
+map runs in the fragment stage as each picture is composited, so the toggle is
+one uniform write and the next frame, and the thumbnail cache keeps plain
+pixels.
+
+The two colors are `THEME` in `crates/vv-core/src/theme.rs`: `paper` is what
+white becomes and `ink` what black becomes, and the paper is the window
+background itself, so a recolored page fills the window with no shade of
+another color at its edge. In the grid each cell draws a plate a shade off the
+page (`theme::PLATE`), because a page that ends in the background would
+otherwise leave no cell boundary to see. The map is the reference one Zathura
+runs, so a page reads the same in both.
 
 A PDF opens as a book, and so does any source a converter answers with a PDF.
 The cover page sits alone, the pages then pair up, and every spread stacks in

@@ -40,6 +40,7 @@ use std::fmt::Write as _;
 use vv_core::{
     dim::{self, Rect},
     draw::{Color, Quad, Turn, Vec2},
+    theme::THEME,
 };
 use vv_gpu::{render::Renderer, texture::Filter};
 use vv_source::surface::{View, open_surface};
@@ -377,6 +378,208 @@ fn a_texture_keeps_its_texels_at_one_to_one() {
     assert_eq!(pixels.at(6, 1), [0, 255, 0, 255], "the green texel");
     assert_eq!(pixels.at(1, 6), [0, 0, 255, 255], "the blue texel");
     assert_eq!(pixels.at(6, 6), [255, 255, 255, 255], "the white texel");
+}
+
+/// A channel within `slack` of `want`, which a float round trip in the shader
+/// needs at the last bit.
+fn close(got: [u8; 4], want: [u8; 4], slack: u8) -> bool {
+    got.iter()
+        .zip(want.iter())
+        .all(|(got, want)| got.abs_diff(*want) <= slack)
+}
+
+/// The recolor theme maps a black pixel onto the ink and a white one onto the
+/// paper.
+///
+/// The map runs in the fragment stage, on the pixels the quad samples, so this
+/// is the whole feature as a picture sees it: no decoder and no cache entry
+/// carries a recolored byte, and `Shift+T` is the same draw with the uniform
+/// written.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_recolored_picture_maps_black_onto_the_ink() {
+    let mut canvas = canvas!(4, 2);
+    // A two-by-one texture: black on the left, white on the right.
+    let rgba = [0, 0, 0, 255, 255, 255, 255, 255];
+    let texture = canvas.renderer.upload_rgba(&rgba, 2, 1).expect("upload");
+    canvas.begin(Color::BLACK);
+    canvas.renderer.set_theme(&canvas.queue, Some(THEME));
+    canvas.renderer.texture_pro(
+        &texture,
+        dim::rect(0.0, 0.0, 2.0, 1.0),
+        dim::rect(0.0, 0.0, 4.0, 2.0),
+        Turn::NONE,
+        Color::WHITE,
+        Filter::Nearest,
+    );
+    let pixels = canvas.print();
+    assert!(
+        close(pixels.at(0, 0), THEME.ink.to_bytes(), 1),
+        "black is the ink: {:?}",
+        pixels.at(0, 0)
+    );
+    assert!(
+        close(pixels.at(3, 0), THEME.paper.to_bytes(), 1),
+        "white is the paper: {:?}",
+        pixels.at(3, 0)
+    );
+}
+
+/// A colored pixel keeps its own hue, so a chart or a figure still reads.
+///
+/// Without that the red line of a plot and the blue one beside it would both
+/// turn one shade of the paper, and the legend would say nothing.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_recolored_red_pixel_stays_red() {
+    let mut canvas = canvas!(2, 1);
+    let rgba = [255, 0, 0, 255, 0, 0, 255, 255];
+    let texture = canvas.renderer.upload_rgba(&rgba, 2, 1).expect("upload");
+    canvas.begin(Color::BLACK);
+    canvas.renderer.set_theme(&canvas.queue, Some(THEME));
+    canvas.renderer.texture_pro(
+        &texture,
+        dim::rect(0.0, 0.0, 2.0, 1.0),
+        dim::rect(0.0, 0.0, 2.0, 1.0),
+        Turn::NONE,
+        Color::WHITE,
+        Filter::Nearest,
+    );
+    let pixels = canvas.print();
+    let [red, green, blue, _] = pixels.at(0, 0);
+    assert!(red > green && red > blue, "red stays reddest: {red:?}");
+    let [red, green, blue, _] = pixels.at(1, 0);
+    assert!(blue > red && blue > green, "blue stays bluest: {blue:?}");
+}
+
+/// A fill is a coat of color and not a picture, so the theme leaves it alone.
+///
+/// A veil band, a selection border and a grid gap are fills: recoloring them
+/// would turn the dimming veil into the paper and hide the region selection.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_veil_keeps_its_color_while_the_theme_is_on() {
+    let mut canvas = canvas!(4, 4);
+    canvas.begin(Color::BLACK);
+    canvas.renderer.set_theme(&canvas.queue, Some(THEME));
+    canvas
+        .renderer
+        .fill_rect(dim::rect(0.0, 0.0, 4.0, 4.0), Color::WHITE);
+    let pixels = canvas.print();
+    assert_eq!(pixels.at(1, 1), [255, 255, 255, 255]);
+}
+
+/// The theme is on the frame and not on the texture, so a frame that turns it
+/// back off paints the same picture plain.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_second_frame_can_turn_the_theme_off_again() {
+    let mut canvas = canvas!(2, 1);
+    let rgba = [255, 255, 255, 255, 0, 0, 0, 255];
+    let texture = canvas.renderer.upload_rgba(&rgba, 2, 1).expect("upload");
+    canvas.begin(Color::BLACK);
+    canvas.renderer.set_theme(&canvas.queue, Some(THEME));
+    canvas.renderer.texture_pro(
+        &texture,
+        dim::rect(0.0, 0.0, 2.0, 1.0),
+        dim::rect(0.0, 0.0, 2.0, 1.0),
+        Turn::NONE,
+        Color::WHITE,
+        Filter::Nearest,
+    );
+    let pixels = canvas.print();
+    assert!(close(pixels.at(0, 0), THEME.paper.to_bytes(), 1));
+    canvas.begin(Color::BLACK);
+    canvas.renderer.set_theme(&canvas.queue, None);
+    canvas.renderer.texture_pro(
+        &texture,
+        dim::rect(0.0, 0.0, 2.0, 1.0),
+        dim::rect(0.0, 0.0, 2.0, 1.0),
+        Turn::NONE,
+        Color::WHITE,
+        Filter::Nearest,
+    );
+    let pixels = canvas.print();
+    assert_eq!(pixels.at(0, 0), [255, 255, 255, 255], "the plain white");
+    assert_eq!(pixels.at(1, 0), [0, 0, 0, 255], "the plain black");
+}
+
+/// A dimmed cell stays dimmed, because the map runs before the tint.
+///
+/// The grid multiplies a cell outside the selection with the dim tint, and a
+/// map applied after that product would pull the cell back to full paper.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn the_tint_lands_after_the_map() {
+    let mut canvas = canvas!(2, 1);
+    let rgba = [255, 255, 255, 255, 255, 255, 255, 255];
+    let texture = canvas.renderer.upload_rgba(&rgba, 2, 1).expect("upload");
+    canvas.begin(Color::BLACK);
+    canvas.renderer.set_theme(&canvas.queue, Some(THEME));
+    let dim = Color::new(
+        vv_core::DIM_LEVEL,
+        vv_core::DIM_LEVEL,
+        vv_core::DIM_LEVEL,
+        255,
+    );
+    canvas.renderer.texture_pro(
+        &texture,
+        dim::rect(0.0, 0.0, 2.0, 1.0),
+        dim::rect(0.0, 0.0, 2.0, 1.0),
+        Turn::NONE,
+        dim,
+        Filter::Nearest,
+    );
+    let pixels = canvas.print();
+    let [red, green, blue, _] = pixels.at(0, 0);
+    assert!(
+        red < THEME.paper.r && green < THEME.paper.g && blue < THEME.paper.b,
+        "the dimmed cell is darker than the paper: {:?}",
+        pixels.at(0, 0)
+    );
+}
+
+/// The lightness adjustment is the other curve, and it lands on the shader.
+///
+/// It pulls the middle of the range toward the ink and keeps the ends, which
+/// makes a grey rule or a grey glyph bolder on the page and flattens the middle
+/// of a photograph. The default theme leaves it off, so this is the branch a
+/// page never takes unless someone asks.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn the_lightness_adjustment_bends_the_middle_of_the_range() {
+    let mut canvas = canvas!(4, 4);
+    // One mid-grey texel, which is where the two curves disagree most.
+    let texture = canvas
+        .renderer
+        .upload_rgba(&[128, 128, 128, 255], 1, 1)
+        .expect("upload");
+    let mut paint = |theme: Option<vv_core::theme::Theme>| {
+        canvas.begin(Color::BLACK);
+        canvas.renderer.set_theme(&canvas.queue, theme);
+        canvas.renderer.texture_pro(
+            &texture,
+            dim::rect(0.0, 0.0, 1.0, 1.0),
+            dim::rect(0.0, 0.0, 4.0, 4.0),
+            Turn::NONE,
+            Color::WHITE,
+            Filter::Nearest,
+        );
+        let [r, g, b, _] = canvas.print().at(2, 2);
+        u32::from(r) + u32::from(g) + u32::from(b)
+    };
+    let plain = paint(None);
+    let straight = paint(Some(THEME));
+    let bent = paint(Some(THEME.with_adjust_lightness(true)));
+    assert_eq!(
+        plain,
+        3 * 128,
+        "a theme that is off keeps the decoded bytes"
+    );
+    assert!(
+        bent > straight,
+        "the bent curve travels toward the ink: {bent} vs {straight}"
+    );
 }
 
 /// A source rect selects the part of the texture the draw asks for.
@@ -2162,6 +2365,38 @@ fn a_pdf_page_paints_its_content() {
     assert_eq!(a, 255, "the page covers the window");
 }
 
+/// A recolored PDF page maps its black onto the ink and its paper onto the
+/// theme.
+///
+/// The raster path clears the page to white paper and draws the content on it,
+/// so the two ends of a page are exactly the two ends of the map, and this is
+/// the paint the `Shift+T` toggle shows.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_recolored_pdf_page_maps_its_black_and_its_paper() {
+    let mut canvas = canvas!(32, 32);
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("half.pdf");
+    // A 64-wide page whose left half is a black rect, on white paper.
+    std::fs::write(&path, pdf_with(1, "0 0 0 rg\n0 0 32 64 re f\n", "")).expect("write the pdf");
+    canvas.renderer.set_theme(&canvas.queue, Some(THEME));
+    let dest = paint_surface(&mut canvas, &path);
+    let pixels = canvas.print();
+    let y = (dest.min_y() + dest.height() / 2.0) as usize;
+    let black = ((dest.min_x() + dest.width() * 0.25) as usize, y);
+    let paper = ((dest.min_x() + dest.width() * 0.75) as usize, y);
+    assert!(
+        close(pixels.at(black.0, black.1), THEME.ink.to_bytes(), 2),
+        "the black half is the ink: {:?}",
+        pixels.at(black.0, black.1)
+    );
+    assert!(
+        close(pixels.at(paper.0, paper.1), THEME.paper.to_bytes(), 2),
+        "the white half is the paper: {:?}",
+        pixels.at(paper.0, paper.1)
+    );
+}
+
 /// A patch lands on its texels, and a fractional position blends them.
 ///
 /// The viewer's `patch_dest` snaps a patch onto whole window pixels for exactly
@@ -2582,6 +2817,240 @@ fn a_viewer_paints_into_a_host_texture() {
         host.titles
     );
     assert!(!viewer.quit(), "nothing asked the viewer to exit");
+}
+
+/// How many pixels of the frame are exactly `color`.
+fn count(pixels: &Pixels, color: Color) -> usize {
+    let want = color.to_bytes();
+    (0..pixels.height)
+        .flat_map(|y| (0..pixels.width).map(move |x| (x, y)))
+        .filter(|(x, y)| pixels.at(*x, *y) == want)
+        .count()
+}
+
+/// A themed grid plates its cells, because a recolored page ends where the
+/// window background begins.
+///
+/// A grid cell draws no backdrop: the gaps between cells are the clear color.
+/// A theme's paper is that same color, so a wall of white pages would recolor
+/// into one continuous dark field with no cell in it. The plate is the cell's
+/// own shade, and it appears only while the theme is on.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_themed_grid_plates_its_cells() {
+    /// The square the grid fills while a cell is still decoding.
+    const PENDING: Color = Color::new(28, 28, 28, 255);
+    let Some(canvas) = Canvas::new(256, 256) else {
+        skip_without_adapter();
+        return;
+    };
+    let dir = tempfile::tempdir().expect("a temp dir");
+    for name in ["a.svg", "b.svg"] {
+        std::fs::write(
+            dir.path().join(name),
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="#ffffff"/></svg>"##,
+        )
+        .expect("write the svg");
+    }
+    let launch = vv_view::viewer::Launch::open(dir.path(), true).expect("the launch opens");
+    let mut viewer = vv_view::viewer::Viewer::new(
+        canvas.device.clone(),
+        canvas.queue.clone(),
+        FORMAT,
+        canvas.device.limits().max_texture_dimension_2d,
+        launch,
+        canvas.size,
+    );
+    let mut host = QuietHost;
+    let plate = vv_core::theme::PLATE;
+
+    // The plain grid, once every thumbnail has landed: white pages, and no
+    // plate anywhere, because white paper already ends a cell.
+    let mut plain = None;
+    for _ in 0..240 {
+        let view = canvas
+            .target
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        viewer
+            .render(&mut host, &view, canvas.size, 0.016)
+            .expect("the frame renders");
+        let pixels = canvas.read();
+        if count(&pixels, PENDING) == 0 && count(&pixels, Color::WHITE) > 0 {
+            plain = Some(pixels);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
+    let plain = plain.expect("the thumbnails land");
+    let plain_white = count(&plain, Color::WHITE);
+    assert_eq!(count(&plain, plate), 0, "a plain grid draws no plate");
+
+    // The same grid under the theme: every cell has a band of its own, the
+    // pages are no longer white, and the background is still the background.
+    press(&mut viewer, winit::keyboard::KeyCode::ShiftLeft);
+    press(&mut viewer, winit::keyboard::KeyCode::KeyT);
+    let mut themed = None;
+    for _ in 0..240 {
+        let view = canvas
+            .target
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        viewer
+            .render(&mut host, &view, canvas.size, 0.016)
+            .expect("the frame renders");
+        let pixels = canvas.read();
+        if count(&pixels, plate) > 0 {
+            themed = Some(pixels);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
+    let themed = themed.expect("the themed grid draws its plates");
+    assert!(
+        count(&themed, plate) > 1000,
+        "each cell carries a band, not a speck: {}",
+        count(&themed, plate)
+    );
+    assert!(
+        count(&themed, Color::WHITE) < plain_white / 2,
+        "the pages are no longer white: {} of {plain_white}",
+        count(&themed, Color::WHITE)
+    );
+    assert!(
+        count(&themed, CLEAR) > 0,
+        "the paper and the gaps between cells are still the background"
+    );
+}
+
+/// A host that answers the four window calls and records nothing but the
+/// titles, for a test that drives the viewer itself.
+struct QuietHost;
+
+impl vv_view::viewer::Host for QuietHost {
+    fn set_title(&mut self, _title: &str) {}
+    fn grab_pointer(&mut self) {}
+    fn release_pointer(&mut self) {}
+    fn place_pointer(&mut self, _at: Vec2) {}
+}
+
+/// Press one key through the viewer's own input path.
+fn press(viewer: &mut vv_view::viewer::Viewer, key: winit::keyboard::KeyCode) {
+    viewer.handle_event(
+        vv_view::viewer::Event::Key {
+            key,
+            state: winit::event::ElementState::Pressed,
+            repeat: false,
+            synthetic: false,
+            text: None,
+        },
+        &mut QuietHost,
+    );
+}
+
+/// `Shift+T` recolors the picture the image view shows, and turns it back.
+///
+/// The theme is a uniform the fragment stage reads, so neither frame decodes
+/// anything again: the second paint shows the same texture through the other
+/// uniform, which is the whole point of the toggle living in the shader.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn shift_t_recolors_the_picture_and_turns_it_back() {
+    let Some(canvas) = Canvas::new(32, 32) else {
+        skip_without_adapter();
+        return;
+    };
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("white.svg");
+    std::fs::write(
+        &path,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="#ffffff"/></svg>"##,
+    )
+    .expect("write the svg");
+    let launch = vv_view::viewer::Launch::open(&path, true).expect("the launch opens");
+    let mut viewer = vv_view::viewer::Viewer::new(
+        canvas.device.clone(),
+        canvas.queue.clone(),
+        FORMAT,
+        canvas.device.limits().max_texture_dimension_2d,
+        launch,
+        canvas.size,
+    );
+    let mut host = QuietHost;
+
+    // Wait out the decode, then read the plain picture.
+    let mut painted = None;
+    for _ in 0..240 {
+        let view = canvas
+            .target
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        viewer
+            .render(&mut host, &view, canvas.size, 0.016)
+            .expect("the frame renders");
+        let pixels = canvas.read();
+        if close(pixels.at(16, 16), [255, 255, 255, 255], 2) {
+            painted = Some(pixels);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
+    let plain = painted.expect("the white picture lands");
+
+    // Shift+T, then one frame for the key and one for the uniform it wrote.
+    press(&mut viewer, winit::keyboard::KeyCode::ShiftLeft);
+    press(&mut viewer, winit::keyboard::KeyCode::KeyT);
+    for _ in 0..2 {
+        let view = canvas
+            .target
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        viewer
+            .render(&mut host, &view, canvas.size, 0.016)
+            .expect("the frame renders");
+    }
+    let recolored = canvas.read();
+    assert!(
+        close(recolored.at(16, 16), THEME.paper.to_bytes(), 2),
+        "white paper is the theme paper: {:?} (was {:?})",
+        recolored.at(16, 16),
+        plain.at(16, 16)
+    );
+
+    // The keys go up, then `Shift+T` again: the same texture, plain.
+    for key in [
+        winit::keyboard::KeyCode::ShiftLeft,
+        winit::keyboard::KeyCode::KeyT,
+    ] {
+        viewer.handle_event(
+            vv_view::viewer::Event::Key {
+                key,
+                state: winit::event::ElementState::Released,
+                repeat: false,
+                synthetic: false,
+                text: None,
+            },
+            &mut host,
+        );
+    }
+    let view = canvas
+        .target
+        .create_view(&wgpu::TextureViewDescriptor::default());
+    viewer
+        .render(&mut host, &view, canvas.size, 0.016)
+        .expect("the frame renders");
+    press(&mut viewer, winit::keyboard::KeyCode::ShiftLeft);
+    press(&mut viewer, winit::keyboard::KeyCode::KeyT);
+    for _ in 0..2 {
+        let view = canvas
+            .target
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        viewer
+            .render(&mut host, &view, canvas.size, 0.016)
+            .expect("the frame renders");
+    }
+    let back = canvas.read();
+    assert!(
+        close(back.at(16, 16), [255, 255, 255, 255], 2),
+        "the theme is off again: {:?}",
+        back.at(16, 16)
+    );
 }
 
 /// A picture that arrives from outside the process paints in a blank viewer.

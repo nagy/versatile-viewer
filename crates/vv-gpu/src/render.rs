@@ -33,6 +33,7 @@
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
+use vv_core::theme::Theme;
 
 use crate::{
     dim::Rect,
@@ -46,16 +47,58 @@ use crate::{
 /// The buffer grows on demand, so this is the first allocation and not a cap.
 const START_INSTANCES: u32 = 1024;
 
+/// The `picture` flag of a quad the theme maps.
+const PICTURE: f32 = 1.0;
+
+/// The `picture` flag of a quad the theme leaves alone.
+const PLAIN: f32 = 0.0;
+
+/// How many floats the shader's `Theme` struct holds: its ink, its paper and its
+/// flags, three `vec4f` each.
+///
+/// `NO_THEME` and [`theme_uniform`] carry it, and the bind group layout names
+/// the same size as its `min_binding_size`, so a fourth `vec4f` in the shader
+/// fails the pipeline instead of the first frame that recolors.
+const THEME_FLOATS: usize = 12;
+
+/// The color the theme map runs on when no theme is on, which is never read.
+const NO_THEME: [f32; THEME_FLOATS] = [0.0; THEME_FLOATS];
+
 /// The one shader of the viewer.
 ///
-/// A float `vec2f` per corner keeps the instance at 64 bytes and every
+/// A float `vec2f` per corner keeps the instance at 68 bytes and every
 /// attribute inside its alignment.
+///
+/// The fragment stage maps a picture through the recolor theme when the frame
+/// asks for it (see [`vv_core::theme`]): black lands on the ink, white on the
+/// paper, and a color between them keeps its hue as its lightness travels.
+/// The map runs here, on the pixels the quad samples, so no decoder, no resize
+/// and no cache entry ever carries a recolored byte: the toggle is one uniform
+/// write and the next frame repaints.
 const SHADER: &str = r"
 struct Globals {
     viewport: vec4f,
 };
 
+struct Theme {
+    // rgb are the channels, and a is their weighted lightness, which the CPU
+    // computes once so the map does not remultiply it per fragment.
+    ink: vec4f,
+    paper: vec4f,
+    // x is on or off, y is the lightness adjustment.
+    flags: vec4f,
+};
+
 @group(0) @binding(0) var<uniform> globals: Globals;
+@group(0) @binding(1) var<uniform> theme: Theme;
+
+// The weights of the lightness, which must sum to one.
+const LUMA = vec3f(0.30, 0.59, 0.11);
+// The width below which a hue counts as grey, and below which the span
+// between the two lightnesses counts as none.
+// It also absorbs the f32 residue of LUMA summing to one, which is what lands a
+// black pixel on the ink exactly instead of a bit beside it.
+const EPS = 0.0000001;
 
 struct QuadInstance {
     @location(0) p0: vec2f,
@@ -64,12 +107,14 @@ struct QuadInstance {
     @location(3) p3: vec2f,
     @location(4) src: vec4f,
     @location(5) tint: vec4f,
+    @location(6) picture: f32,
 };
 
 struct VOut {
     @builtin(position) clip: vec4f,
     @location(0) uv: vec2f,
     @location(1) tint: vec4f,
+    @location(2) @interpolate(flat) picture: f32,
 };
 
 @vertex
@@ -91,7 +136,71 @@ fn vmain(@builtin(vertex_index) index: u32, inst: QuadInstance) -> VOut {
     );
     out.uv = mix(inst.src.xy, inst.src.zw, corners[corner]);
     out.tint = inst.tint;
+    out.picture = inst.picture;
     return out;
+}
+
+// How far a color may walk along `h` before it leaves the RGB cube, in the
+// equal-lightness plane at `l` and then rescaled to the span `l1..l2`.
+//
+// The rescale forces the answer to zero at both ends of the span, so the paper
+// and the ink stay the exact colors the theme names instead of drifting toward
+// the boundary of the cube.
+fn colorumax(h: vec3f, l: f32, l1: f32, l2: f32) -> f32 {
+    if (abs(h.x) <= EPS && abs(h.y) <= EPS && abs(h.z) <= EPS) {
+        return 0.0;
+    }
+    // A theme whose two colors share a lightness has no span to remap: the
+    // division below would answer an infinity, and a pixel whose lightness sits
+    // exactly on that theme divides zero by zero. Neither is a color a target
+    // can show, and `Theme` keeps its colors public, so the shader refuses the
+    // span here. Such a theme flattens the picture to one lightness instead.
+    if (abs(l2 - l1) <= EPS) {
+        return 0.0;
+    }
+    let lv = (l - l1) / (l2 - l1);
+    var u = 1e30;
+    var v = 1e30;
+    for (var k = 0; k < 3; k++) {
+        let c = h[k];
+        if (c > EPS) {
+            u = min(abs((1.0 - l) / c), u);
+            v = min(abs((1.0 - lv) / c), v);
+        } else if (c < -EPS) {
+            u = min(abs(l / c), u);
+            v = min(abs(lv / c), v);
+        }
+    }
+    return min(u, abs(l2 - l1) * v);
+}
+
+// One color through the map: lightness between the two, hue kept.
+//
+// `toward_ink` is how black a pixel is and `toward_paper` how white, which the
+// theme's own chroma rides in on: without that term a black pixel keeps the
+// lightness of the ink but not its color, and a grey page would recolor to grey
+// instead of to the theme.
+fn recolor(rgb: vec3f) -> vec3f {
+    let ink_luma = theme.ink.a;
+    let paper_luma = theme.paper.a;
+    let ink_chroma = theme.ink.rgb - vec3f(ink_luma);
+    let paper_chroma = theme.paper.rgb - vec3f(paper_luma);
+    let toward_ink = 1.0 - max(max(rgb.r, rgb.g), rgb.b);
+    let toward_paper = min(min(rgb.r, rgb.g), rgb.b);
+
+    let l = dot(rgb, LUMA);
+    let h = rgb - vec3f(l);
+    let u = colorumax(h, l, 0.0, 1.0);
+    let s = select(0.0, 1.0 / u, abs(u) > EPS);
+    var lightness = l;
+    if (theme.flags.y > 0.5) {
+        // The ends keep their contrast and the middle travels toward the ink.
+        let flat = l * l * l * l;
+        lightness = (l - flat) * (s * 0.5) + flat;
+    }
+    lightness = lightness * (paper_luma - ink_luma) + ink_luma;
+    let walk = s * colorumax(h, lightness, ink_luma, paper_luma);
+    return toward_ink * ink_chroma + toward_paper * paper_chroma + vec3f(lightness) + walk * h;
 }
 
 @group(1) @binding(0) var tex_sampler: sampler;
@@ -100,11 +209,18 @@ fn vmain(@builtin(vertex_index) index: u32, inst: QuadInstance) -> VOut {
 @fragment
 fn fmain(in: VOut) -> @location(0) vec4f {
     // Straight alpha in, straight alpha out: the blend state does the rest.
-    return textureSample(tex, tex_sampler, in.uv) * in.tint;
+    var color = textureSample(tex, tex_sampler, in.uv);
+    // A picture is mapped before the tint, so a dimmed grid cell stays dimmed:
+    // the map would otherwise pull the veil back to the paper.
+    if (in.picture > 0.5 && theme.flags.x > 0.5) {
+        color = vec4f(recolor(color.rgb), color.a);
+    }
+    return color * in.tint;
 }
 ";
 
-/// One quad: four window-space corners, a source rect and a tint.
+/// One quad: four window-space corners, a source rect, a tint and whether the
+/// quad is a picture.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 pub struct QuadInstance {
@@ -114,20 +230,32 @@ pub struct QuadInstance {
     pub src: [f32; 4],
     /// The straight-alpha multiplier, `[r, g, b, a]`.
     pub tint: [f32; 4],
+    /// One for a picture, which the recolor theme maps, and zero for a coat of
+    /// color over it.
+    pub picture: f32,
 }
 
 impl QuadInstance {
     /// A solid quad over the one-by-one white texture.
+    ///
+    /// A fill is a color and not a picture, so the theme leaves it alone: a
+    /// veil band, a selection border and a grid gap keep the shade the view
+    /// asked for.
     #[must_use]
     pub fn solid(quad: Quad, color: Color) -> Self {
         Self {
             p: quad.p.map(|point| [point.x, point.y]),
             src: [0.0, 0.0, 1.0, 1.0],
             tint: color.to_f32(),
+            picture: PLAIN,
         }
     }
 
     /// A textured quad over `src` pixels of a texture of `dims`.
+    ///
+    /// Every texture the viewer draws is a picture (a plane, a region patch, a
+    /// grid cell, the blurred background or the display list's own target), so
+    /// a textured quad is what the recolor theme maps.
     #[must_use]
     pub fn textured(quad: Quad, src: Rect, dims: (u32, u32), tint: Color) -> Self {
         let (width, height) = (f64::from(dims.0.max(1)), f64::from(dims.1.max(1)));
@@ -140,15 +268,16 @@ impl QuadInstance {
                 (f64::from(src.max_y()) / height) as f32,
             ],
             tint: tint.to_f32(),
+            picture: PICTURE,
         }
     }
 
-    /// The six attributes, with their offsets written out.
+    /// The seven attributes, with their offsets written out.
     ///
     /// The offsets are explicit because the shader reads them by location and
     /// the CPU writes them by field. The test below pins them to the real
     /// struct offsets, so a field reorder cannot silently shift a value.
-    const ATTRIBS: [wgpu::VertexAttribute; 6] = [
+    const ATTRIBS: [wgpu::VertexAttribute; 7] = [
         wgpu::VertexAttribute {
             format: wgpu::VertexFormat::Float32x2,
             offset: 0,
@@ -179,6 +308,11 @@ impl QuadInstance {
             offset: 48,
             shader_location: 5,
         },
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32,
+            offset: 64,
+            shader_location: 6,
+        },
     ];
 
     /// The instance buffer layout.
@@ -198,11 +332,16 @@ struct DrawCall {
     len: u32,
 }
 
-/// The pipeline, its viewport uniform, the shared textures and one frame's
-/// batch.
+/// The pipeline, its viewport and theme uniforms, the shared textures and one
+/// frame's batch.
 pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
     globals: wgpu::Buffer,
+    /// The two colors a recolored picture maps onto, and the flags beside them.
+    theme_uniform: wgpu::Buffer,
+    /// The theme the buffer holds, so a frame that changes nothing writes
+    /// nothing.
+    theme: Option<Theme>,
     globals_group: wgpu::BindGroup,
     uploader: Uploader,
     /// The one-by-one white texture behind a solid fill.
@@ -232,7 +371,7 @@ impl Renderer {
         let texture_layout = texture_layout(device);
         let uploader = Uploader::new(device, queue, adapter_side, texture_layout.clone());
         let white = uploader.white();
-        let (globals, globals_layout, globals_group) = globals(device);
+        let (globals, theme_uniform, globals_layout, globals_group) = globals(device);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vv shader"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -241,6 +380,8 @@ impl Renderer {
         Self {
             pipeline: pipeline(device, format, &shader, &layout),
             globals,
+            theme_uniform,
+            theme: None,
             globals_group,
             uploader,
             white,
@@ -269,6 +410,16 @@ impl Renderer {
     #[must_use]
     pub fn uploader(&self) -> Uploader {
         self.uploader.clone()
+    }
+
+    /// The theme the frame recolors pictures through, if one is on.
+    ///
+    /// The grid reads it to plate its cells: a recolored page's paper is the
+    /// window background, so the cell needs a shade of its own to end against
+    /// (see [`vv_core::theme::PLATE`]).
+    #[must_use]
+    pub fn theme(&self) -> Option<Theme> {
+        self.theme
     }
 
     /// Upload a decoded picture on the calling thread.
@@ -326,6 +477,30 @@ impl Renderer {
     /// gaps never disagree.
     pub fn set_clear(&mut self, color: Color) {
         self.clear = color;
+    }
+
+    /// Recolor every picture the next frames draw, or stop recoloring them.
+    ///
+    /// The map runs in the fragment stage on the pixels a quad samples, so no
+    /// texture, no decode and no cache entry carries a recolored byte: turning
+    /// this on is one uniform write and the next frame shows it, and turning it
+    /// off is the same write again.
+    /// A fill is not a picture, so every coat of color the views draw keeps the
+    /// color it asked for: a veil band, a selection border and a failed cell's
+    /// plate.
+    /// A grid cell whose thumbnail is a recolored page needs a plate of its own,
+    /// because a paper that is the window background would otherwise run into
+    /// the gap beside it (see [`vv_core::theme::PLATE`]).
+    pub fn set_theme(&mut self, queue: &wgpu::Queue, theme: Option<Theme>) {
+        if self.theme == theme {
+            return;
+        }
+        self.theme = theme;
+        let uniform = match theme {
+            Some(theme) => theme_uniform(theme),
+            None => NO_THEME,
+        };
+        queue.write_buffer(&self.theme_uniform, 0, bytemuck::cast_slice(&uniform));
     }
 
     /// Draw a solid axis-aligned rectangle.
@@ -556,36 +731,86 @@ impl Renderer {
     }
 }
 
-/// The viewport uniform, its layout and its bind group.
-fn globals(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::BindGroupLayout, wgpu::BindGroup) {
+/// The viewport and theme uniforms, their shared layout and their bind group.
+fn globals(
+    device: &wgpu::Device,
+) -> (
+    wgpu::Buffer,
+    wgpu::Buffer,
+    wgpu::BindGroupLayout,
+    wgpu::BindGroup,
+) {
     use wgpu::util::DeviceExt as _;
     let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("vv viewport"),
         contents: bytemuck::cast_slice(&[0.0_f32, 0.0, 0.0, 0.0]),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
+    let theme = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("vv theme"),
+        contents: bytemuck::cast_slice(&NO_THEME),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("vv globals"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                // The one `vec4f` of the shader's `Globals`, so a wider struct
+                // fails the pipeline instead of reading past the buffer.
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(16),
+                },
+                count: None,
             },
-            count: None,
-        }],
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                // The three `vec4f` of the shader's `Theme`.
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(
+                        4 * THEME_FLOATS as wgpu::BufferAddress,
+                    ),
+                },
+                count: None,
+            },
+        ],
     });
     let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("vv globals"),
         layout: &layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: buffer.as_entire_binding(),
-        }],
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: theme.as_entire_binding(),
+            },
+        ],
     });
-    (buffer, layout, group)
+    (buffer, theme, layout, group)
+}
+
+/// The theme as the shader takes it: the ink, the paper, then the flags.
+///
+/// The lightness of each color rides its fourth channel, and the flags say the
+/// map is on and whether it bends the lightness curve (see
+/// [`Theme::adjust_lightness`]).
+fn theme_uniform(theme: Theme) -> [f32; THEME_FLOATS] {
+    let ink = theme.ink_uniform();
+    let paper = theme.paper_uniform();
+    let adjust = if theme.adjust_lightness { 1.0 } else { 0.0 };
+    [
+        ink[0], ink[1], ink[2], ink[3], paper[0], paper[1], paper[2], paper[3], 1.0, adjust, 0.0,
+        0.0,
+    ]
 }
 
 /// The texture layout: one sampler, one texture view.
@@ -703,8 +928,8 @@ mod tests {
 
     /// The instance stride keeps every attribute inside its alignment.
     #[test]
-    fn the_instance_stride_is_sixty_four_bytes() {
-        assert_eq!(std::mem::size_of::<QuadInstance>(), 64);
+    fn the_instance_stride_is_sixty_eight_bytes() {
+        assert_eq!(std::mem::size_of::<QuadInstance>(), 68);
     }
 
     /// Every attribute offset names the field it claims to.
@@ -722,8 +947,39 @@ mod tests {
             std::mem::offset_of!(QuadInstance, p) as u64 + 24,
             std::mem::offset_of!(QuadInstance, src) as u64,
             std::mem::offset_of!(QuadInstance, tint) as u64,
+            std::mem::offset_of!(QuadInstance, picture) as u64,
         ];
         assert_eq!(offsets, fields);
+    }
+
+    /// A picture is what the theme maps, and a fill is not.
+    #[test]
+    fn the_picture_flag_tells_a_photo_from_a_veil() {
+        let quad = Quad::rect(dim::rect(0.0, 0.0, 10.0, 20.0));
+        let picture =
+            QuadInstance::textured(quad, dim::rect(0.0, 0.0, 1.0, 1.0), (1, 1), Color::WHITE);
+        assert_eq!(picture.picture, PICTURE);
+        let veil = QuadInstance::solid(quad, Color::BLACK);
+        assert_eq!(veil.picture, PLAIN);
+    }
+
+    /// The theme uniform carries the two lightnesses and the flags.
+    #[test]
+    fn the_theme_uniform_carries_the_lightnesses() {
+        let uniform = theme_uniform(vv_core::theme::THEME);
+        let paper = vv_core::theme::THEME.paper_uniform();
+        let ink = vv_core::theme::THEME.ink_uniform();
+        assert_eq!(uniform[..4], ink);
+        assert_eq!(uniform[4..8], paper);
+        assert_eq!(uniform[8], 1.0);
+        assert_eq!(
+            uniform[9],
+            if vv_core::theme::ADJUST_LIGHTNESS {
+                1.0
+            } else {
+                0.0
+            }
+        );
     }
 
     /// A textured instance normalizes its source rect to the texture.
