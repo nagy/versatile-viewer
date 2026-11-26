@@ -204,14 +204,67 @@ impl Scene {
         // by version and not by whichever field this tree happens to read
         // before it.
         let header: Header = serde_json::from_slice(data)?;
-        if !(OLDEST..=VERSION).contains(&header.version) {
-            return Err(SceneError::Version {
-                found: header.version,
-                oldest: OLDEST,
-                newest: VERSION,
-            });
+        Self::check_version(header.version)?;
+        Self::checked(serde_json::from_slice(data)?)
+    }
+
+    /// Read a document that arrived as a JSON value into the plane and the list
+    /// it describes.
+    ///
+    /// This is the entrance of a document a protocol carried, where the reader
+    /// already holds the fields and the bytes of the same document exist only
+    /// on the writer's side.
+    ///
+    /// # Errors
+    ///
+    /// Returns every error [`Self::from_bytes`] answers, and they mean the same
+    /// thing: the version is read out of the value on its own, so a document of
+    /// another shape is refused by version rather than by whichever field this
+    /// tree reaches first.
+    pub fn from_value(document: serde_json::Value) -> Result<Self, SceneError> {
+        // The one field is copied out, so the list is never cloned to read a
+        // number. A document that states no version at all falls through to the
+        // shape's own error, which names the field it is missing.
+        if let Some(found) = document.get("version").and_then(serde_json::Value::as_u64) {
+            Self::check_version(u32::try_from(found).unwrap_or(u32::MAX))?;
         }
-        let doc: SceneDoc = serde_json::from_slice(data)?;
+        Self::checked(serde_json::from_value(document)?)
+    }
+
+    /// Read the scene document at `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SceneError::Open`] when the file cannot be read, and every
+    /// error [`Self::from_bytes`] answers.
+    pub fn read(path: &std::path::Path) -> Result<Self, SceneError> {
+        Self::from_bytes(&std::fs::read(path)?)
+    }
+
+    /// Refuse a document whose version this tree does not read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SceneError::Version`] when `found` is outside [`OLDEST`] to
+    /// [`VERSION`].
+    fn check_version(found: u32) -> Result<(), SceneError> {
+        if (OLDEST..=VERSION).contains(&found) {
+            return Ok(());
+        }
+        Err(SceneError::Version {
+            found,
+            oldest: OLDEST,
+            newest: VERSION,
+        })
+    }
+
+    /// Build the plane and the list of a document whose version already read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SceneError::Plane`] when the extent it names cannot be framed
+    /// and [`SceneError::Viewport`] when the box it names cannot be.
+    fn checked(doc: SceneDoc) -> Result<Self, SceneError> {
         let plane = Size {
             w: doc.plane.width,
             h: doc.plane.height,
@@ -252,16 +305,6 @@ impl Scene {
             viewport,
             primitives: Arc::from(doc.primitives),
         })
-    }
-
-    /// Read the scene document at `path`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SceneError::Open`] when the file cannot be read, and every
-    /// error [`Self::from_bytes`] answers.
-    pub fn read(path: &std::path::Path) -> Result<Self, SceneError> {
-        Self::from_bytes(&std::fs::read(path)?)
     }
 }
 
@@ -345,6 +388,42 @@ mod tests {
         let scene = Scene::read(&path).expect("the document reads");
         let bytes = Scene::from_bytes(DOC.as_bytes()).expect("the same document reads");
         assert_eq!(scene, bytes);
+    }
+
+    /// A document that arrives as JSON reads the same as its bytes, which is
+    /// the route a protocol takes: the fields are already parsed on the reader's
+    /// side and no second copy of the document exists.
+    #[test]
+    fn a_value_reads_the_same_as_its_bytes() {
+        let value: serde_json::Value = serde_json::from_str(DOC).expect("the document parses");
+        let scene = Scene::from_value(value).expect("the same document reads");
+        let bytes = Scene::from_bytes(DOC.as_bytes()).expect("the same document reads");
+        assert_eq!(scene, bytes);
+    }
+
+    /// The version of a value is read before the shape, exactly as it is on the
+    /// wire: a producer that moved first reads why, and not whichever field
+    /// this tree stopped at.
+    #[test]
+    fn a_value_of_another_version_is_refused_by_version() {
+        let value = serde_json::json!({
+            "version": 3,
+            "plane": { "width": 1.0, "height": 1.0 },
+            "primitives": [ { "FancyShape": { "nothing": true } } ],
+        });
+        let err = Scene::from_value(value).expect_err("version 3 is not read here");
+        assert_eq!(
+            err.to_string(),
+            format!("scene document version 3, and this tree reads {OLDEST} to {VERSION}")
+        );
+        // A value with no version at all fails on the shape, which names the
+        // field it is missing rather than a version nobody stated.
+        let err = Scene::from_value(serde_json::json!({
+            "plane": { "width": 4.0, "height": 2.0 },
+            "primitives": [],
+        }))
+        .expect_err("a document states its version");
+        assert!(err.to_string().contains("version"), "{err}");
     }
 
     /// A version this tree does not read is refused by name, so a producer that

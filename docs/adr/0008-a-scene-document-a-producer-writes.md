@@ -114,7 +114,13 @@ connects one to the view.
 
 The reconnection point is a push seam: installing a list built outside the
 process, with its own plane and viewport, into a view that has no source either.
-This record is that state, reached through a file instead of a socket.
+This record reached that state through a file; `Push::Scene` and
+`Viewer::install_scene` reach the same state through the wire, and
+`vv_show_scene` is the tool that carries one. The install needs no worker,
+because a list decodes nothing and uploads nothing, and it drops whatever the
+view held, so a picture and a list take the window over from each other. The
+file route reads bytes and the wire route reads the fields a protocol already
+parsed (`Scene::from_value`), and both check the version before the shape.
 
 ## Consequences
 
@@ -143,14 +149,19 @@ This record is that state, reached through a file instead of a socket.
   primitive far outside what a frame can map paints nothing rather than
   answering an error. A producer that scales its units by a stray factor sees a
   blank window; the README says so rather than the reader guessing.
-- A producer may write a large list, and nothing in this route bounds its size:
-  the parse is on the launch thread and the list is held whole. A bound belongs
-  with the push seam, where `MAX_PUSH_BYTES` already caps one payload; a file the
-  user names is not a flood.
+- A producer may write a large list, and nothing in either route bounds its
+  size: the parse is on the calling thread and the list is held whole. The push
+  seam carries a payload cap for pictures (`MAX_PUSH_BYTES`) and none for a
+  document, because a list is cheap on the wire and expensive once parsed, and a
+  bound on shapes needs a measurement this record does not have. A file the user
+  names is not a flood, and a caller that pushes a list no window can hold is a
+  caller's mistake to make.
 - `checks.gpu` carries the end-to-end proof: a two-rect document written as text,
   opened through `Launch::scene`, painted, and read back — the frame that waits
   for the pass shows the clear color, and the frame after it shows the rects at
-  the fit the extent asks for.
+  the fit the extent asks for. A second paint pushes a picture and then a
+  document into a blank viewer, and the installed list takes the window over at
+  its own extent.
 
 ## Testing
 

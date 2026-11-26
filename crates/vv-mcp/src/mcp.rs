@@ -13,7 +13,7 @@
 //! The server advertises that single revision, so an older client fails fast
 //! on `UnsupportedProtocolVersion`.
 //!
-//! The server advertises four tools, and every one of them reaches the picture
+//! The server advertises five tools, and every one of them reaches the picture
 //! through the [`Sink`] the binary installs.
 //! `vv_show_image_bytes` shows a picture that never touches the disk, so
 //! `vv --mcp` with no path runs entirely on pushed content.
@@ -49,6 +49,9 @@
 //!   count and the size of plane 0.
 //! - `vv_show_image(path)` opens a local file the same way, and a document
 //!   opens as a book.
+//! - `vv_show_scene(document)` installs a plane and a display list that a
+//!   program outside this process wrote, so the picture is the shapes and no
+//!   raster lands behind it.
 //! - `vv_clear()` returns to the blank view.
 //! - `vv_get_status()` reports the mode, the plane count, the source label,
 //!   the plane size and the scale.
@@ -91,8 +94,9 @@ const PROTOCOL: ProtocolVersion = ProtocolVersion::V_2026_07_28;
 
 /// Instructions the server sends to a client.
 const INSTRUCTIONS: &str = "Shows images. Push a picture from memory with `vv_show_image_bytes`, \
-                            open a file with `vv_show_image`, read what shows with \
-                            `vv_get_status`, and return to the blank view with `vv_clear`.";
+                            open a file with `vv_show_image`, hand over a display list with \
+                            `vv_show_scene`, read what shows with `vv_get_status`, and return to \
+                            the blank view with `vv_clear`.";
 
 /// The largest byte payload one `vv_show_image_bytes` call accepts.
 ///
@@ -130,6 +134,20 @@ pub trait Sink: Send + Sync + 'static {
     /// The function answers the open reason when the file cannot be read or
     /// decoded.
     fn show_path(&self, path: std::path::PathBuf) -> Result<Shown, String>;
+
+    /// Show a plane and a display list that a caller built outside the process.
+    ///
+    /// The document arrives as the fields it states, because the wire already
+    /// holds them: this crate names no geometry and no version of its own, so
+    /// the fields travel whole to the layer that reads a document, which is the
+    /// same reader `vv --scene <file>` drives.
+    ///
+    /// # Errors
+    ///
+    /// The function answers why the document is not one this viewer reads: a
+    /// version it does not know, a plane or a box it cannot frame, a field the
+    /// shape does not have, or a picture leaf in the list.
+    fn show_scene(&self, document: serde_json::Value) -> Result<Shown, String>;
 
     /// Return to the blank view.
     fn clear(&self) -> Status;
@@ -201,6 +219,7 @@ fn tools() -> Vec<rmcp::model::Tool> {
             ),
         )
         .with_annotations(writes()),
+        scene_tool(),
         rmcp::model::Tool::new(
             "vv_clear",
             "Return to the blank view and forget the open picture.",
@@ -217,6 +236,73 @@ fn tools() -> Vec<rmcp::model::Tool> {
     ]
 }
 
+/// The `vv_show_scene` tool.
+///
+/// Its document schema is stated field by field, because the fields are what a
+/// producer reads: the version it writes, the extent its units cover, the box
+/// its window shows and the list. A primitive is stated as an object and not as
+/// this tree's variant table, so a variant the reader gains is one this schema
+/// describes no less and a producer needs no second copy of it.
+fn scene_tool() -> rmcp::model::Tool {
+    rmcp::model::Tool::new(
+        "vv_show_scene",
+        "Show a display list a program outside this viewer wrote, with no picture behind it. The \
+         document states its version, the extent of the plane in the producer's own units, the \
+         box of that plane the window shows, and the primitives to draw in paint order. The \
+         window shows the list at every zoom, so a pan or a zoom costs no walk of the geometry.",
+        schema(
+            serde_json::json!({
+                "document": {
+                    "type": "object",
+                    "description": "The display list: its version (1 or 2), its plane extent in \
+                                    the producer's own units, an optional viewport box of that \
+                                    plane, and the primitives in paint order.",
+                    "properties": {
+                        "version": {
+                            "type": "integer",
+                            "description": "The document version this shape is written for."
+                        },
+                        "plane": {
+                            "type": "object",
+                            "description": "The extent the list was written for, in the \
+                                            producer's own units.",
+                            "properties": {
+                                "width": { "type": "number" },
+                                "height": { "type": "number" }
+                            },
+                            "required": ["width", "height"]
+                        },
+                        "viewport": {
+                            "type": "object",
+                            "description": "The box of the plane the window shows. Each axis \
+                                            takes its own ratio of the window to the box, and a \
+                                            document that leaves it out frames the whole plane.",
+                            "properties": {
+                                "x0": { "type": "number" },
+                                "y0": { "type": "number" },
+                                "x1": { "type": "number" },
+                                "y1": { "type": "number" }
+                            },
+                            "required": ["x0", "y0", "x1", "y1"]
+                        },
+                        "primitives": {
+                            "type": "array",
+                            "description": "The primitives, in paint order. Each one is a \
+                                            variant of the display list, such as a rect, a path \
+                                            with a fill or a stroke, a glyph run, or a clip or \
+                                            layer marker.",
+                            "items": { "type": "object" }
+                        }
+                    },
+                    "required": ["version", "plane", "primitives"]
+                }
+            }),
+            &["document"],
+        ),
+    )
+    .with_annotations(writes())
+}
+
 /// The MCP server.
 ///
 /// The server keeps the sink the binary installed, so every tool call has one
@@ -230,7 +316,7 @@ struct ViewerMcpServer<S: Sink> {
 // The lint fires on the trait shape, not on the code.
 #[allow(clippy::unused_async_trait_impl)]
 impl<S: Sink> ServerHandler for ViewerMcpServer<S> {
-    /// Advertise the four tools at the sole supported revision.
+    /// Advertise the five tools at the sole supported revision.
     ///
     /// The server advertises no resources and no prompts.
     fn get_info(&self) -> ServerConfig {
@@ -285,6 +371,7 @@ impl<S: Sink> ServerHandler for ViewerMcpServer<S> {
         let result = match request.name.as_ref() {
             "vv_show_image_bytes" => show_bytes(&*self.sink, &arguments),
             "vv_show_image" => show_path(&*self.sink, &arguments),
+            "vv_show_scene" => show_scene(&*self.sink, &arguments),
             "vv_clear" => Ok(shown_status(&self.sink.clear())),
             "vv_get_status" => Ok(shown_status(&self.sink.status())),
             other => {
@@ -348,6 +435,28 @@ fn show_path(
 ) -> Result<serde_json::Value, String> {
     let path = string_argument(arguments, "path")?;
     let shown = sink.show_path(std::path::PathBuf::from(path))?;
+    Ok(serde_json::json!({
+        "planes": shown.planes,
+        "width": shown.width,
+        "height": shown.height,
+    }))
+}
+
+/// Read the `document` argument and install that list.
+///
+/// # Errors
+///
+/// The function answers a missing argument, an argument that is not an object,
+/// or the reason the sink reports for a document this viewer does not read.
+fn show_scene(
+    sink: &dyn Sink,
+    arguments: &serde_json::Map<String, serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let document = arguments
+        .get("document")
+        .cloned()
+        .ok_or_else(|| "the document argument holds an object".to_owned())?;
+    let shown = sink.show_scene(document)?;
     Ok(serde_json::json!({
         "planes": shown.planes,
         "width": shown.width,
@@ -455,6 +564,8 @@ mod tests {
         calls: Mutex<Vec<String>>,
         /// The bytes the last `show_bytes` call carried.
         bytes: Mutex<Vec<u8>>,
+        /// The document the last `show_scene` call carried.
+        document: Mutex<serde_json::Value>,
         /// The defect `show_bytes` and `show_path` answer, if any.
         failure: Option<String>,
     }
@@ -490,6 +601,19 @@ mod tests {
                     planes: 2,
                     width: 595.0,
                     height: 842.0,
+                }),
+            }
+        }
+
+        fn show_scene(&self, document: serde_json::Value) -> Result<Shown, String> {
+            self.calls.lock().unwrap().push("scene".to_owned());
+            *self.document.lock().unwrap() = document;
+            match &self.failure {
+                Some(reason) => Err(reason.clone()),
+                None => Ok(Shown {
+                    planes: 1,
+                    width: 100.0,
+                    height: 50.0,
                 }),
             }
         }
@@ -635,9 +759,9 @@ mod tests {
         );
     }
 
-    /// The server advertises the four tools, each with the four hints.
+    /// The server advertises the five tools, each with the four hints.
     #[test]
-    fn tools_list_names_the_four_tools() {
+    fn tools_list_names_the_five_tools() {
         let rt = runtime();
         let (mut stream, _) = serve(&rt);
         let response = rt.block_on(round_trip(
@@ -660,6 +784,7 @@ mod tests {
             [
                 "vv_show_image_bytes",
                 "vv_show_image",
+                "vv_show_scene",
                 "vv_clear",
                 "vv_get_status"
             ]
@@ -672,8 +797,88 @@ mod tests {
             assert!(hints["openWorldHint"].is_boolean(), "{tool}");
             assert_eq!(tool["inputSchema"]["type"], "object");
         }
-        assert_eq!(tools[3]["annotations"]["readOnlyHint"], true);
+        assert_eq!(tools[4]["annotations"]["readOnlyHint"], true);
         assert_eq!(tools[0]["annotations"]["readOnlyHint"], false);
+    }
+
+    /// A display list reaches the sink as the document its caller stated, field
+    /// for field, and the answer names the plane it covers.
+    #[test]
+    fn show_scene_passes_the_document_whole() {
+        let rt = runtime();
+        let (mut stream, sink) = serve(&rt);
+        let document = serde_json::json!({
+            "version": 2,
+            "plane": { "width": 100.0, "height": 50.0 },
+            "viewport": { "x0": 10.0, "y0": 5.0, "x1": 60.0, "y1": 30.0 },
+            "primitives": [],
+        });
+        let response = rt.block_on(round_trip(
+            &mut stream,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "vv_show_scene",
+                    "arguments": { "document": document.clone() },
+                    "_meta": client_meta(),
+                },
+            }),
+        ));
+        assert_eq!(response["result"]["isError"], false, "{response}");
+        assert_eq!(response["result"]["structuredContent"]["planes"], 1);
+        assert_eq!(response["result"]["structuredContent"]["width"], 100.0);
+        assert_eq!(*sink.document.lock().unwrap(), document);
+    }
+
+    /// A call that names no document fails before the sink sees it.
+    #[test]
+    fn a_scene_call_without_a_document_is_a_tool_error() {
+        let rt = runtime();
+        let response = call(&rt, "vv_show_scene", &serde_json::json!({}));
+        assert_eq!(response["result"]["isError"], true, "{response}");
+    }
+
+    /// A document the sink refuses, because this viewer does not read its
+    /// version, is a tool result with the reason.
+    #[test]
+    fn a_refused_document_is_a_tool_result() {
+        let rt = runtime();
+        let (server_side, client_side) = tokio::io::duplex(8192);
+        let srv = ViewerMcpServer {
+            sink: Arc::new(Fake::failing(
+                "scene document version 9, and this tree reads 1 to 2",
+            )),
+        };
+        rt.block_on(async move {
+            tokio::spawn(async move {
+                if let Ok(running) = srv.serve(server_side).await {
+                    let _ = running.waiting().await;
+                }
+            });
+        });
+        let mut stream = client_side;
+        let response = rt.block_on(round_trip(
+            &mut stream,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "vv_show_scene",
+                    "arguments": {
+                        "document": { "version": 9, "plane": {}, "primitives": [] }
+                    },
+                    "_meta": client_meta(),
+                },
+            }),
+        ));
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        assert_eq!(
+            response["result"]["structuredContent"]["error"],
+            "scene document version 9, and this tree reads 1 to 2"
+        );
     }
 
     /// The bytes of a push reach the sink, and the answer names the plane.

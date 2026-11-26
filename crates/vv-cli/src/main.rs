@@ -63,6 +63,7 @@ use vv_view::{
     input,
     pane::{PaneGeometry, Wid},
     push::{self, Push},
+    scene_file,
     screen::OnScreen,
     viewer::{Event, Host, Launch, Viewer},
 };
@@ -160,6 +161,17 @@ impl mcp::Sink for Bridge {
     fn show_path(&self, path: PathBuf) -> Result<mcp::Shown, String> {
         let (reply, answers) = mpsc::channel();
         self.send(Push::Path { path, reply })?;
+        await_show(&answers)
+    }
+
+    fn show_scene(&self, document: serde_json::Value) -> Result<mcp::Shown, String> {
+        // The document is read here, on the server's thread, because this layer
+        // names the source layer and the protocol layer does not: a document
+        // this tree cannot read fails the call before the view hears of it, and
+        // the frame loop receives a list it can draw.
+        let scene = scene_file::Scene::from_value(document).map_err(|err| err.to_string())?;
+        let (reply, answers) = mpsc::channel();
+        self.send(Push::Scene { scene, reply })?;
         await_show(&answers)
     }
 

@@ -40,6 +40,10 @@ impl vv_mcp::mcp::Sink for NoView {
         Err("no window in this test".to_owned())
     }
 
+    fn show_scene(&self, _document: serde_json::Value) -> Result<vv_mcp::mcp::Shown, String> {
+        Err("no window in this test".to_owned())
+    }
+
     fn clear(&self) -> vv_mcp::mcp::Status {
         blank()
     }
@@ -185,9 +189,39 @@ fn stdio_serves_discover_and_the_tool_list() {
         [
             "vv_show_image_bytes",
             "vv_show_image",
+            "vv_show_scene",
             "vv_clear",
             "vv_get_status"
         ]
+    );
+
+    // A display list crosses the real pipe: the fields of the document reach
+    // the sink, and the sink's refusal comes back as a tool result rather than
+    // a protocol error.
+    let scene = round_trip(
+        &mut writer,
+        &mut reader,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "vv_show_scene",
+                "arguments": {
+                    "document": {
+                        "version": 2,
+                        "plane": { "width": 4.0, "height": 2.0 },
+                        "primitives": []
+                    }
+                },
+                "_meta": meta(),
+            },
+        }),
+    );
+    assert_eq!(scene["result"]["isError"], true, "{scene}");
+    assert_eq!(
+        scene["result"]["structuredContent"]["error"],
+        "no window in this test"
     );
 
     let call = round_trip(
@@ -195,7 +229,7 @@ fn stdio_serves_discover_and_the_tool_list() {
         &mut reader,
         &serde_json::json!({
             "jsonrpc": "2.0",
-            "id": 3,
+            "id": 4,
             "method": "tools/call",
             "params": { "name": "nope", "arguments": {}, "_meta": meta() },
         }),

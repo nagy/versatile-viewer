@@ -37,6 +37,10 @@ vv-core = { path = "../vv-core" }
 vv-gpu = { path = "../vv-gpu" }
 vv-mcp = { path = "../vv-mcp" }
 vv-view = { path = "../vv-view" }
+# The display list a tool hands over arrives as the JSON fields it states, and
+# this layer is the one that reads them into a scene document: the protocol
+# layer names no geometry, so the value crosses the wall untouched.
+serde_json = "1.0.154"
 
 # The swapchain image view the frame hands to `Viewer::render`.
 wgpu = { version = "30.0.2", default-features = false, features = [
@@ -46,9 +50,6 @@ wgpu = { version = "30.0.2", default-features = false, features = [
 
 [dev-dependencies]
 tempfile = "3.27.0"
-# The MCP stdio test reads the frames of a real child process, so it parses
-# and builds JSON of its own.
-serde_json = "1.0.154"
 # The embed example opens a frame window and a container child, so it speaks
 # the X protocol directly.
 x11rb = { version = "0.14.0", default-features = false }

@@ -1771,6 +1771,202 @@ const RED_BMP: [u8; 102] = [
     0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255,
 ];
 
+/// Install one document into `viewer` and answer what the view reported.
+///
+/// The document is the value a tool call carries, so the shape is parsed on this
+/// side of the wire and the push receives the plane and the list it describes.
+fn push_scene(
+    viewer: &mut vv_view::viewer::Viewer,
+    document: serde_json::Value,
+) -> vv_view::push::Shown {
+    let scene = vv_view::scene_file::Scene::from_value(document).expect("the document reads");
+    let (reply, answers) = std::sync::mpsc::channel();
+    viewer.accept(vv_view::push::Push::Scene { scene, reply });
+    answers
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the view answers")
+        .expect("the list installs")
+}
+
+/// Run frames until the pixel at `(x, y)` reads `want`, and answer that frame.
+///
+/// A list lands a frame after it installs, because the display pass is built on
+/// a worker, so the pixel is what the wait is for and not the call.
+fn wait_for_pixel(
+    canvas: &Canvas,
+    viewer: &mut vv_view::viewer::Viewer,
+    host: &mut NullHost,
+    (x, y): (usize, usize),
+    want: [u8; 4],
+) -> Pixels {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the pixel at ({x}, {y}) lands"
+        );
+        let pixels = shot_frame_read(canvas, viewer, host);
+        if pixels.at(x, y) == want {
+            return pixels;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(4));
+    }
+}
+
+/// A pushed list takes the window over from a picture, and its own extent frames
+/// it.
+///
+/// `vv --mcp` alone pushes every picture it shows, and this is the other
+/// direction of the same seam: a producer that owns its layout hands over a
+/// plane and the shapes on it, so nothing decodes, no texture lands and the
+/// viewer draws the list at every zoom.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_pushed_scene_installs_its_list() {
+    let document = serde_json::json!({
+        "version": 2,
+        "plane": { "width": 200.0, "height": 100.0 },
+        "primitives": [
+            { "Rect": { "rect": { "x0": 0.0, "y0": 0.0, "x1": 100.0, "y1": 100.0 },
+                        "paint": { "Solid": { "r": 255, "g": 0, "b": 0, "a": 255 } } } },
+            { "Rect": { "rect": { "x0": 100.0, "y0": 0.0, "x1": 200.0, "y1": 100.0 },
+                        "paint": { "Solid": { "r": 0, "g": 255, "b": 0, "a": 255 } } } }
+        ]
+    });
+    let launch = vv_view::viewer::Launch::blank(true);
+    let (win_w, win_h) = launch.window_size();
+    let canvas = canvas!(win_w, win_h);
+    let mut viewer = vv_view::viewer::Viewer::new(
+        canvas.device.clone(),
+        canvas.queue.clone(),
+        FORMAT,
+        canvas.device.limits().max_texture_dimension_2d,
+        launch,
+        canvas.size,
+    );
+    let mut host = NullHost;
+
+    // A picture first, so the list installs over a raster the way a tool call
+    // over a pushed photograph does.
+    let (reply, answers) = std::sync::mpsc::channel();
+    viewer.accept(vv_view::push::Push::Bytes {
+        data: RED_BMP.to_vec(),
+        reply,
+    });
+    answers
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the worker answers")
+        .expect("the bytes decode");
+    wait_for_pixel(
+        &canvas,
+        &mut viewer,
+        &mut host,
+        (512, 384),
+        [255, 0, 0, 255],
+    );
+    // The picture is a raster, so it draws no list.
+    assert!(!viewer.listed());
+
+    let shown = push_scene(&mut viewer, document);
+    assert_eq!(shown.planes, 1);
+    // The plane is the producer's extent and not the picture's: the list is
+    // written in its own units, so the answer states the extent it was written
+    // for.
+    assert_eq!((shown.width, shown.height), (200.0, 100.0));
+    assert_eq!(viewer.status().source, "mcp");
+
+    // The plane is 200 by 100 in a 1024 by 768 window, so the fit is 5.12 and
+    // the plane fills the middle 1024 by 512 of the window; the picture before
+    // it was 4 by 4 and filled the window whole.
+    let listed = wait_for_pixel(
+        &canvas,
+        &mut viewer,
+        &mut host,
+        (768, 384),
+        [0, 255, 0, 255],
+    );
+    assert!(viewer.listed(), "the frame that shows the list drew one");
+    assert_eq!(
+        listed.at(256, 384),
+        [255, 0, 0, 255],
+        "the left half is red"
+    );
+    let clear = [CLEAR.r, CLEAR.g, CLEAR.b, CLEAR.a];
+    assert_eq!(
+        listed.at(256, 8),
+        clear,
+        "the letterbox is the window and not the picture"
+    );
+    assert_eq!(
+        viewer.status().scale.map(|s| s.x.round()),
+        Some(5.0),
+        "the status reports the axis scale of the installed plane"
+    );
+}
+
+/// A second document at the same extent replaces the first whole.
+///
+/// The pass keys its paint by the list itself, so the frame re-encodes instead
+/// of compositing the picture the previous document asked for.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_second_pushed_scene_re_encodes_the_list() {
+    let first = serde_json::json!({
+        "version": 2,
+        "plane": { "width": 200.0, "height": 100.0 },
+        "primitives": [
+            { "Rect": { "rect": { "x0": 0.0, "y0": 0.0, "x1": 100.0, "y1": 100.0 },
+                        "paint": { "Solid": { "r": 255, "g": 0, "b": 0, "a": 255 } } } },
+            { "Rect": { "rect": { "x0": 100.0, "y0": 0.0, "x1": 200.0, "y1": 100.0 },
+                        "paint": { "Solid": { "r": 0, "g": 255, "b": 0, "a": 255 } } } }
+        ]
+    });
+    let second = serde_json::json!({
+        "version": 2,
+        "plane": { "width": 200.0, "height": 100.0 },
+        "primitives": [
+            { "Rect": { "rect": { "x0": 0.0, "y0": 0.0, "x1": 100.0, "y1": 100.0 },
+                        "paint": { "Solid": { "r": 0, "g": 0, "b": 255, "a": 255 } } } }
+        ]
+    });
+    let launch = vv_view::viewer::Launch::blank(true);
+    let (win_w, win_h) = launch.window_size();
+    let canvas = canvas!(win_w, win_h);
+    let mut viewer = vv_view::viewer::Viewer::new(
+        canvas.device.clone(),
+        canvas.queue.clone(),
+        FORMAT,
+        canvas.device.limits().max_texture_dimension_2d,
+        launch,
+        canvas.size,
+    );
+    let mut host = NullHost;
+
+    push_scene(&mut viewer, first);
+    wait_for_pixel(
+        &canvas,
+        &mut viewer,
+        &mut host,
+        (768, 384),
+        [0, 255, 0, 255],
+    );
+    push_scene(&mut viewer, second);
+    wait_for_pixel(
+        &canvas,
+        &mut viewer,
+        &mut host,
+        (256, 384),
+        [0, 0, 255, 255],
+    );
+    let after = shot_frame_read(&canvas, &mut viewer, &mut host);
+    let clear = [CLEAR.r, CLEAR.g, CLEAR.b, CLEAR.a];
+    assert_eq!(
+        after.at(768, 384),
+        clear,
+        "the green rect of the first document is gone"
+    );
+}
+
 /// A pushed picture replaces a scene list.
 ///
 /// A run may carry `--scene` and `--mcp` at once, and a push is where the two

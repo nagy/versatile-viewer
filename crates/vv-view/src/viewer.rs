@@ -765,23 +765,9 @@ impl Viewer {
             }
         } else if let Some(scene) = scene {
             // A scene document: the plane is the extent the producer states and
-            // the list is the picture, so no texture and no loader exist for
-            // this plane. The view holds no source either, because a source is
-            // what repaints a region and this one has no raster to repaint:
-            // the list draws at every zoom, and a refused frame simply draws
-            // nothing rather than the plane texture of a source that never
-            // made one.
-            self.st.img = scene.plane;
-            self.planes = 1;
-            self.st.adopt_source(None);
-            self.st.scene = Some(scene.primitives);
-            // The box the producer's window shows is this view's fit: the plane
-            // is its extent and the two ratios come from that box alone, so the
-            // picture arrives framed the way the producer framed it and not
-            // merely whole.
-            self.st.viewport = scene.viewport;
-            self.st.open_box = None;
-            self.st.reset_view();
+            // the list is the picture, so the launch installs it exactly as a
+            // pushed list installs one.
+            self.show_scene(scene);
         } else if let Some(book) = source.take() {
             // A document launch: no picture exists yet, so a loader paints the
             // spread the fit frames and then the coarse whole book (see
@@ -941,7 +927,60 @@ impl Viewer {
             }
             Push::Bytes { data, reply } => self.push_async(reply, Opening::Bytes(data)),
             Push::Path { path, reply } => self.push_async(reply, Opening::Path(path)),
+            Push::Scene { scene, reply } => {
+                let _ = reply.send(Ok(self.install_scene(scene)));
+            }
         }
+    }
+
+    /// Install a plane and a display list a caller built outside the process.
+    ///
+    /// This is the push half of a scene document: the list is the picture, so
+    /// nothing decodes and nothing uploads, and the whole install is the state
+    /// of one frame. A picture the view held is dropped whole, which is what a
+    /// pushed picture does to a list, so the two routes take the window over
+    /// from each other instead of drawing beside one another.
+    /// A frame the display pass refuses shows the window background, because a
+    /// plane with no raster behind it has no fallback to paint.
+    pub fn install_scene(&mut self, scene: Scene) -> Shown {
+        self.show_scene(scene);
+        // The label names the wire, the way a pushed picture does: a status
+        // report says what shows and not which file a launch opened.
+        push::MEMORY_LABEL.clone_into(&mut self.label);
+        Shown {
+            planes: self.planes,
+            width: self.st.img.w,
+            height: self.st.img.h,
+        }
+    }
+
+    /// Put a plane and its list into the view, dropping whatever it held.
+    ///
+    /// A list has no raster, so the view adopts no source: a source is what
+    /// repaints a region, and the list draws at every zoom on its own.
+    /// The adopt is also what drops the list, the viewport and the patches of
+    /// the plane the view held, so it runs before the new ones are set.
+    fn show_scene(&mut self, scene: Scene) {
+        // The view shows the image and not the grid, because a caller that
+        // handed over a plane and a list asked to see it.
+        self.st.mode = Mode::Image;
+        self.st.open_id = None;
+        self.st.view_from_grid = None;
+        self.st.loader = None;
+        self.st.view_loading = false;
+        self.st.view_tex = None;
+        self.st.cell_box = None;
+        self.st.adopt_source(None);
+        self.st.img = scene.plane;
+        self.st.scene = Some(scene.primitives);
+        // The box the producer's window shows is this view's fit: the plane is
+        // its extent and the two ratios come from that box alone, so the picture
+        // arrives framed the way the producer framed it and not merely whole.
+        self.st.viewport = scene.viewport;
+        self.st.open_box = None;
+        self.st.reset_view();
+        self.planes = 1;
+        self.title_open_id = None;
     }
 
     /// What the view holds now, for a status report.

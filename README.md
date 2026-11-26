@@ -195,6 +195,12 @@ same thing, and a viewer older than the field refuses a version 2 document by
 version instead of by an unknown field.
 `docs/adr/0008` records the document, and `docs/adr/0009` the per-axis viewport.
 
+The file is one entrance and the protocol is the other: the `vv_show_scene` MCP
+tool hands over the same document as the JSON fields it states, and the running
+viewer installs it, so a program that owns its layout needs no file on disk. A
+document that arrives that way takes the window over from whatever it showed,
+and a picture pushed later takes it back.
+
 ## MCP
 
 `vv --mcp` also serves the [Model Context Protocol] on stdio, so an agent can
@@ -218,8 +224,13 @@ fields, and `server/discover` replaces the handshake.
 | --- | --- | --- |
 | `vv_show_image_bytes` | `data_base64` | plane count and the size of plane 0 |
 | `vv_show_image` | `path` | plane count and the size of plane 0 |
+| `vv_show_scene` | `document` | plane count and the size of plane 0 |
 | `vv_clear` | none | the blank status |
 | `vv_get_status` | none | mode, plane count, source label, plane size, scale on each axis |
+
+`vv_show_scene` installs a [scene document](#scene-documents) as the fields it
+states, so a producer hands over shapes instead of a picture: no file is
+written, nothing decodes, and the list draws at every zoom.
 
 `vv_show_image_bytes` decides the format from the bytes, so the call carries
 no file name or extension. A JPEG XL image, a PNG, an SVG document and a PDF

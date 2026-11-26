@@ -12,6 +12,12 @@
 //! A decode failure travels back as the reply's `Err`, so a caller reads the
 //! decoder's reason instead of a picture that never came.
 //!
+//! A list arrives as a whole: the plane, the box its window shows and the
+//! primitives to draw, read out of the document a caller wrote
+//! ([`Scene::from_value`]). Nothing decodes and nothing uploads, so the install
+//! runs in the frame that drains it, and a producer that owns its own layout
+//! hands over shapes instead of pixels (see `crate::scene_file`).
+//!
 //! The view keeps no history here: a [`Push::Bytes`] replaces what shows, and
 //! [`Push::Clear`] returns to the blank state the launch started from.
 //!
@@ -25,6 +31,10 @@ use std::{path::PathBuf, sync::mpsc::Sender};
 // `vv-mcp`: the pair lives in `vv-core`, so the view and the protocol layer
 // describe one shape.
 pub use vv_core::push::{Shown, Status};
+
+// The plane, the box and the list of a document a caller built outside the
+// process, which is what a push of a list carries.
+use crate::scene_file::Scene;
 
 /// The label of content that came from memory instead of a path.
 pub const MEMORY_LABEL: &str = "mcp";
@@ -55,6 +65,18 @@ pub enum Push {
     Clear {
         /// Where the answer goes.
         reply: Sender<Status>,
+    },
+    /// Show a plane and a display list that a caller built outside the process.
+    ///
+    /// The list is the picture: there is no raster behind this plane, so a
+    /// frame the display pass refuses shows the window background and never a
+    /// stretched texture. The install needs no worker, because nothing decodes
+    /// and nothing uploads.
+    Scene {
+        /// The plane, the box its window shows and the primitives to draw.
+        scene: Scene,
+        /// Where the answer goes.
+        reply: Sender<Result<Shown, String>>,
     },
     /// Report what the view holds.
     Status {
