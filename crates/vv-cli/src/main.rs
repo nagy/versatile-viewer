@@ -19,10 +19,14 @@
 //! q quits.
 //! ESC and Enter toggle between the grid and the image view.
 //!
-//! Usage: `vv [--mcp] [--wid <id>] [<image-path-or-directory>]`
+//! Usage: `vv [--mcp] [--wid <id>] [--scene <file>] [<image-path-or-directory>]`
 //!
 //! `clap` prints `--help` and `--version` before the viewer starts, and the
 //! `Cli` struct below is the one place the flags are declared.
+//!
+//! `vv --scene <file>` shows a scene document: a plane and a display list that a
+//! producer in another process wrote (see `vv_source::scene_file`), so the
+//! viewer decodes nothing and draws the shapes at any zoom.
 //!
 //! `RUST_LOG` sets the diagnostics: `RUST_LOG=vv=debug` traces the frame and
 //! the input, `RUST_LOG=vv=trace` adds every key press, and any target reads
@@ -684,8 +688,9 @@ impl ApplicationHandler for App {
     name = "vv",
     version,
     about = "A fast image viewer: nsxiv meets mpv. JPEG XL first-class.",
-    after_help = "The path reads as an image file or as a directory of them.\nESC and Enter \
-                  toggle between the grid and the image view."
+    after_help = "The path reads as an image file or as a directory of them, and --scene reads a \
+                  display list that another process wrote.\nESC and Enter toggle between the grid \
+                  and the image view."
 )]
 struct Cli {
     /// Serve the Model Context Protocol on stdio.
@@ -694,13 +699,19 @@ struct Cli {
     /// Draw the image view inside this host window instead of a top-level window
     #[arg(long, value_name = "ID", value_parser = parse_wid)]
     wid: Option<Wid>,
+    /// Show a scene document instead of an image
+    ///
+    /// The file states a plane and a display list that another process wrote, so
+    /// the viewer draws the shapes and decodes nothing.
+    #[arg(long, value_name = "FILE", conflicts_with = "path")]
+    scene: Option<PathBuf>,
     /// The image file or the directory to show
     ///
     /// A run that serves the protocol starts with no path: the window opens
     /// blank, and every picture arrives through a tool.
     #[arg(
         value_name = "IMAGE-PATH-OR-DIRECTORY",
-        required_unless_present = "mcp"
+        required_unless_present_any = ["mcp", "scene"]
     )]
     path: Option<PathBuf>,
 }
@@ -767,9 +778,10 @@ fn main() -> Result<()> {
         None => Pane::Window,
     };
     // A run without a path opens blank, so the first picture comes from a tool.
-    let launch = match cli.path {
-        Some(path) => Launch::open(&path, pane.shows_grid())?,
-        None => Launch::blank(pane.shows_grid()),
+    let launch = match (cli.scene, cli.path) {
+        (Some(path), _) => Launch::scene(&path, pane.shows_grid())?,
+        (None, Some(path)) => Launch::open(&path, pane.shows_grid())?,
+        (None, None) => Launch::blank(pane.shows_grid()),
     };
     let event_loop = EventLoop::new().context("cannot create the event loop")?;
     let mut app = App::new(launch, pane, push_rx);
@@ -852,6 +864,30 @@ mod tests {
         assert_eq!(cli.path, None);
         let err = parsed(&[]).expect_err("no path and no protocol");
         assert!(err.to_string().contains("IMAGE-PATH-OR-DIRECTORY"), "{err}");
+    }
+
+    #[test]
+    fn the_scene_flag_takes_the_slot_of_the_path() {
+        // A scene document replaces the path and never joins it: one run shows
+        // one thing, and the launch reads the file differently.
+        let cli = parsed(&["--scene", "drawing.scene.json"]).expect("parses");
+        assert_eq!(cli.scene, Some(PathBuf::from("drawing.scene.json")));
+        assert_eq!(cli.path, None);
+        // The joined form, and either order against the other flags.
+        assert_eq!(
+            parsed(&["--scene=drawing.scene.json"])
+                .expect("parses")
+                .scene,
+            Some(PathBuf::from("drawing.scene.json"))
+        );
+        let with_pane = parsed(&["--wid", "74", "--scene", "drawing.scene.json"]).expect("parses");
+        assert_eq!(with_pane.wid, Wid::parse("74"));
+        assert_eq!(with_pane.scene, Some(PathBuf::from("drawing.scene.json")));
+        // A run that names both says two things at once.
+        let err = parsed(&["--scene", "drawing.scene.json", "pic.jpg"]).expect_err("two sources");
+        assert!(err.to_string().contains("--scene"), "{err}");
+        // And the flag is enough on its own, beside `--mcp`.
+        assert!(parsed(&["--mcp", "--scene", "drawing.scene.json"]).is_ok());
     }
 
     #[test]

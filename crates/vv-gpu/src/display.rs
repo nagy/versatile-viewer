@@ -91,7 +91,7 @@ use crate::{
     dim::{self, Rect},
     draw::{Color, Quad, Vec2},
     region,
-    scene::{FillRule, Paint, Primitive, Spread, Stop},
+    scene::{FillRule, GlyphRun, Paint, Primitive, Spread, Stop},
     texture::{Texture, Uploader},
 };
 
@@ -561,50 +561,7 @@ impl SceneView {
                     transform,
                     paint,
                 } => {
-                    // The face is parsed once per run, keyed by its bytes, so a
-                    // label never re-parses a font per frame.
-                    // The table outlives the list: a face comes from
-                    // `sans_serif_face`, one `Arc` for the process, so every
-                    // label of every map names the same bytes and vello keeps
-                    // the outlines it resolved for them.
-                    let key = run.font.as_ptr() as usize;
-                    if self.fonts.len() >= FACES && !self.fonts.contains_key(&key) {
-                        self.fonts.clear();
-                    }
-                    let (_, font) = self.fonts.entry(key).or_insert_with(|| {
-                        (
-                            Arc::clone(&run.font),
-                            FontData::new(Blob::from(run.font.to_vec()), run.face),
-                        )
-                    });
-                    let placed = *transform;
-                    let glyphs = run.glyphs.iter().map(|glyph| Glyph {
-                        id: glyph.id,
-                        x: glyph.x,
-                        y: glyph.y,
-                    });
-                    match brush(paint) {
-                        Brush::Solid(color) => {
-                            self.base
-                                .draw_glyphs(font)
-                                .font_size(run.size)
-                                .brush(color)
-                                .transform(placed)
-                                .draw(Fill::NonZero, glyphs);
-                        }
-                        Brush::Ramp { gradient, space } => {
-                            // A glyph run's coordinates are in its own space, so
-                            // the ramp reaches it the way it reaches a path.
-                            let at = brush_at(Some(placed.inverse()), space);
-                            self.base
-                                .draw_glyphs(font)
-                                .font_size(run.size)
-                                .brush(&gradient)
-                                .brush_transform(Some(at))
-                                .transform(placed)
-                                .draw(Fill::NonZero, glyphs);
-                        }
-                    }
+                    self.glyphs(run, transform, paint);
                 }
                 Primitive::PushClip {
                     path,
@@ -638,6 +595,68 @@ impl SceneView {
                         .or_insert_with(|| image_brush(pixels));
                     self.base.draw_image(brush.as_ref(), *transform);
                 }
+            }
+        }
+    }
+
+    /// Encode one glyph run, or nothing when its bytes name no face.
+    ///
+    /// The face is parsed once per run, keyed by its bytes, so a label never
+    /// re-parses a font per frame, and the table outlives the list: a face comes
+    /// from `sans_serif_face`, one `Arc` for the process, so every label of every
+    /// map names the same bytes and vello keeps the outlines it resolved for
+    /// them.
+    ///
+    /// A run carries a producer's bytes, and `draw_glyphs` unwraps the same parse
+    /// this check makes, so a face that does not resolve is refused here: a frame
+    /// that drops one run still paints, where a panic there paints nothing ever
+    /// again. The table takes no entry for a refused run, so a list of bad runs
+    /// costs no face parse per frame.
+    fn glyphs(&mut self, run: &GlyphRun, transform: &Affine, paint: &Paint) {
+        if skrifa::FontRef::from_index(run.font.as_ref(), run.face).is_err() {
+            tracing::warn!(
+                face = run.face,
+                bytes = run.font.len(),
+                "a glyph run names no face"
+            );
+            return;
+        }
+        let key = run.font.as_ptr() as usize;
+        if self.fonts.len() >= FACES && !self.fonts.contains_key(&key) {
+            self.fonts.clear();
+        }
+        let (_, font) = self.fonts.entry(key).or_insert_with(|| {
+            (
+                Arc::clone(&run.font),
+                FontData::new(Blob::from(run.font.to_vec()), run.face),
+            )
+        });
+        let placed = *transform;
+        let glyphs = run.glyphs.iter().map(|glyph| Glyph {
+            id: glyph.id,
+            x: glyph.x,
+            y: glyph.y,
+        });
+        match brush(paint) {
+            Brush::Solid(color) => {
+                self.base
+                    .draw_glyphs(font)
+                    .font_size(run.size)
+                    .brush(color)
+                    .transform(placed)
+                    .draw(Fill::NonZero, glyphs);
+            }
+            Brush::Ramp { gradient, space } => {
+                // A glyph run's coordinates are in its own space, so the ramp
+                // reaches it the way it reaches a path.
+                let at = brush_at(Some(placed.inverse()), space);
+                self.base
+                    .draw_glyphs(font)
+                    .font_size(run.size)
+                    .brush(&gradient)
+                    .brush_transform(Some(at))
+                    .transform(placed)
+                    .draw(Fill::NonZero, glyphs);
             }
         }
     }
@@ -1353,7 +1372,7 @@ fn image_brush(pixels: &DecodedImage) -> ImageBrush {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scene::{GlyphRun, PlacedGlyph, Stroke};
+    use crate::scene::{PlacedGlyph, Stroke};
 
     /// A solid paint, for the primitives the band tests build.
     fn solid() -> Paint {

@@ -1565,6 +1565,7 @@ dependencies = [
  "arrayvec",
  "euclid",
  "polycool",
+ "serde",
  "smallvec",
 ]
 
@@ -2910,6 +2911,9 @@ name = "smallvec"
 version = "1.16.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "149309498a5f7334b12ddae0cad8aba81ce785fe91755068867e017cf98fee46"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "smol_str"
@@ -3519,6 +3523,7 @@ dependencies = [
  "glam",
  "kurbo",
  "proptest",
+ "serde",
 ]
 
 [[package]]
@@ -3528,6 +3533,7 @@ dependencies = [
  "bytemuck",
  "derive_more",
  "pollster",
+ "skrifa 0.49.0",
  "tracing",
  "vello",
  "vv-core",
@@ -3578,6 +3584,7 @@ dependencies = [
  "rayon",
  "resvg",
  "serde",
+ "serde_json",
  "sha2",
  "skrifa 0.44.0",
  "tempfile",

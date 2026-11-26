@@ -132,6 +132,7 @@ nix run . -- <image-path-or-directory>   # single image or directory grid
 nix run . -- --mcp <image-path-or-directory>   # the same, plus MCP on stdio
 nix run . -- --mcp          # no path: the window waits for a pushed picture
 nix run . -- --wid 0x3a00007 <image-path-or-directory>   # inside a host window
+nix run . -- --scene <file>   # a display list another process wrote
 nix run . -- --version   # prints `vv 0.1.0`
 nix run . -- --help      # every flag and the path
 ```
@@ -141,6 +142,43 @@ the loader and the X11 libraries in through rpath, and the driver comes from
 the host (`/run/opengl-driver` on NixOS). Outside Nix, `cargo build --release`
 and a `libvulkan.so.1` with the X11 libraries are enough, because every
 decoder and the renderer are pure Rust. No C toolchain is necessary.
+
+## Scene documents
+
+`vv --scene <file>` shows a display list a program outside this process wrote,
+and decodes nothing. The document names a plane, its own units, and the
+primitives in paint order:
+
+```json
+{
+  "version": 1,
+  "plane": { "width": 800.0, "height": 480.0 },
+  "primitives": [
+    { "Rect": { "rect": { "x0": 0.0, "y0": 0.0, "x1": 400.0, "y1": 480.0 },
+                "paint": { "Solid": { "r": 200, "g": 40, "b": 40, "a": 255 } } } }
+  ]
+}
+```
+
+The vocabulary is `vv_core::scene`, so every primitive this tree can draw is a
+primitive a document may state. The one leaf it cannot is `Image`, because a
+picture is bytes rather than a shape, so a document that names it is refused.
+`version` guards the shape of the document and is checked before the rest of it
+is read: an unknown field, a missing field, a picture leaf, a plane of no extent
+or a version this tree does not read each fail the launch before a window opens.
+
+A glyph run carries the font's own bytes, so the pass checks the face before
+vello parses it: a run whose bytes or face index name no face is dropped with a
+`warn!` and the rest of the frame paints. Coordinates are `f64` in the
+vocabulary, and a plane far outside the range a frame can map paints nothing
+rather than an error, so a producer that multiplies its units by a stray factor
+sees a blank window and not a wrong picture.
+
+The extent is in the units the list is written in, not in pixels, so the window
+keeps its default size and the fit frames the whole plane. There is no raster
+behind the list: a zoom re-places the one encoded list, and a frame the display
+pass refuses shows the window background rather than a fallback picture.
+`docs/adr/0008` records the decision.
 
 ## MCP
 

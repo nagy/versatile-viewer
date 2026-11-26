@@ -34,6 +34,13 @@ winit = { version = "0.30.13", default-features = false, features = [
 # build exists to keep out. Vello drives the device through the same
 # `wgpu 30` typed API either way.
 vello = { version = "0.12.0", default-features = false, features = ["wgpu"] }
+# The one check vello does not make for itself: `draw_glyphs` parses a run's font
+# bytes and face index with `FontRef::from_index(..).unwrap()`, and a run's bytes
+# come from a producer this crate does not trust, so a face that does not parse
+# would take the process down on the frame thread.
+# The 0.49 line is the one `vello 0.12` already pulls, so the lock carries no new
+# copy.
+skrifa = "0.49.0"
 # Block on the two async wgpu calls of startup (adapter, device).
 pollster = "1.0.2"
 # The instance bytes of one quad.

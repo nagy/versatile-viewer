@@ -84,6 +84,11 @@ toml = { version = "1.2.1", default-features = false, features = [
 # error and a rule inherits `[defaults]` through an `Option` per field.
 # No feature beyond the derive macro: the file has no allocator of its own.
 serde = { version = "1.0.229", features = ["derive"] }
+# The format of a scene document (`src/scene_file.rs`), which a producer in
+# another process writes: JSON because a person or an agent reads the file as
+# often as this viewer does, and because the vocabulary's own serde is the whole
+# schema. The same version `vv-mcp` and `vv-cli` link.
+serde_json = "1.0.154"
 # The kill of a timed-out converter, which names its whole process group by the
 # negative pid. Only the one syscall wrapper.
 libc = "0.2.191"

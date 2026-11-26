@@ -55,4 +55,6 @@ pub use vv_pixels::{
     DecodedImage, cap_texture_side, downscale_rgba, downscale_rgba_ref, error, placeholder,
     resample_rgba,
 };
-pub use vv_source::{book, convert, fb_to_rgba, measure_vector, pdf, sign, surface, svg};
+pub use vv_source::{
+    book, convert, fb_to_rgba, measure_vector, pdf, scene_file, sign, surface, svg,
+};

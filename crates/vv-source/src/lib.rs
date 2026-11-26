@@ -28,6 +28,9 @@
 //! surface API runs headless.
 //! The decoder crates stay behind this seam: jxl-oxide, the `image` crate,
 //! resvg for SVG, and hayro for PDF.
+//! A scene document (`scene_file`) is the one source that carries no decoder: a
+//! producer outside this process wrote the display list, so this crate reads a
+//! version, a plane and the primitives and paints them.
 //! The entries a converted source caches live in `vv-cache`, beside the grid
 //! thumbnails, so one crate owns every derived byte on disk.
 
@@ -36,6 +39,7 @@ pub mod convert;
 mod decode;
 pub mod pdf;
 mod pdf_scene;
+pub mod scene_file;
 pub mod sign;
 pub mod surface;
 pub mod svg;

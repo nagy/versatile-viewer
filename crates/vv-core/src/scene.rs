@@ -23,6 +23,18 @@
 //! a layer nest in the same sequence, so no primitive carries an index into a
 //! side table.
 //!
+//! # The list crosses the wire
+//!
+//! Every type here derives `serde`, because a producer in another process
+//! writes a list and a viewer reads it: the `scene_file` module of `vv-source`
+//! holds the document that wraps one, and `docs/adr/0008` records the decision.
+//! [`Primitive::Image`] is the one leaf that stays off the wire, because it
+//! carries a [`DecodedImage`] and a picture is bytes rather than a shape; a
+//! document that states one is refused by name, and a list that holds one does
+//! not serialise.
+//! Every struct and every struct variant denies an unknown field, so a producer
+//! and a viewer agree on the whole shape of what they exchange or on nothing.
+//!
 //! # Examples
 //!
 //! ```
@@ -46,6 +58,7 @@
 use std::sync::Arc;
 
 use kurbo::{Affine, BezPath, Rect};
+use serde::{Deserialize, Serialize};
 
 use crate::{draw::Color, pixels::DecodedImage, region};
 
@@ -53,7 +66,7 @@ use crate::{draw::Color, pixels::DecodedImage, region};
 ///
 /// SVG carries this as `fill-rule`, and a glyph outline needs it, so the shape
 /// and the rule travel together.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FillRule {
     /// A point inside an odd number of subpaths is inside the shape.
     NonZero,
@@ -63,7 +76,8 @@ pub enum FillRule {
 }
 
 /// One stop of a gradient ramp.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Stop {
     /// The position along the ramp, from 0 to 1.
     pub offset: f32,
@@ -72,7 +86,7 @@ pub struct Stop {
 }
 
 /// What a gradient does past its last stop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Spread {
     /// The last color holds.
     Pad,
@@ -83,7 +97,8 @@ pub enum Spread {
 }
 
 /// How the pixels inside a shape are coloured.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum Paint {
     /// One color over the whole shape.
     Solid(Color),
@@ -176,7 +191,8 @@ fn placed_point(at: Affine, point: (f64, f64)) -> (f64, f64) {
 ///
 /// The style is `kurbo`'s, because it already carries the width, the caps, the
 /// joins, the miter limit and the dash array an SVG stroke names.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Stroke {
     /// The width, the caps, the joins and the dashes.
     pub style: kurbo::Stroke,
@@ -185,7 +201,8 @@ pub struct Stroke {
 }
 
 /// One glyph of a run, and where its origin lands.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlacedGlyph {
     /// The glyph id inside the font.
     pub id: u32,
@@ -202,7 +219,8 @@ pub struct PlacedGlyph {
 /// treemap label) and, later, for the glyph runs a PDF hands over.
 /// The font travels as its own bytes, because this layer sits below the
 /// renderer: the face index names which font of a collection to parse.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GlyphRun {
     /// The font file's bytes.
     pub font: Arc<[u8]>,
@@ -215,7 +233,13 @@ pub struct GlyphRun {
 }
 
 /// One drawable element of a display list, in surface units, in paint order.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Every variant but [`Self::Image`] crosses the wire, so a producer in another
+/// process states a picture and a viewer paints it. A struct variant denies a
+/// field it does not know, so a producer that invents one is refused rather
+/// than having it dropped and painting a picture it never asked for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum Primitive {
     /// A filled rectangle.
     ///
@@ -246,6 +270,11 @@ pub enum Primitive {
     /// This is the leaf that everything else falls back to: an embedded image
     /// inside a document, one label of a treemap, and a subtree whose
     /// compositing the renderer cannot express.
+    /// The leaf stays off the wire: a picture is bytes and the document that
+    /// would carry them is a picture format, not a scene. A document that names
+    /// this variant is refused, so a producer cannot hand over a list that
+    /// half-paints.
+    #[serde(skip)]
     Image {
         /// The pixels, and their extents.
         pixels: DecodedImage,

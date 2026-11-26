@@ -32,7 +32,16 @@ euclid = "0.22.14"
 # The path type belongs to neither a decoder nor the renderer, and the crate is
 # already in the build through hayro, resvg and peniko, whose `peniko 0.6` wants
 # this same version, so the tree carries one `kurbo`.
-kurbo = "0.13.1"
+# `serde` is the wire form of the vocabulary a scene document states, and it
+# covers the rect, the path, the stroke style and the placement transform a
+# producer already writes.
+kurbo = { version = "0.13.1", features = ["serde"] }
+# The wire form of the scene vocabulary, so one process hands a list to another
+# and neither side links the other's crate.
+# `rc` is what lets the two fields held behind an `Arc`
+# (`Paint::Linear::stops`, `GlyphRun::font`) cross the wire as they are read, so
+# a label copies a handle here and no producer repeats the bytes.
+serde = { version = "1.0.229", features = ["derive", "rc"] }
 
 [dev-dependencies]
 # The proptests of `region`, `region_sel`, `rotate` and `tween`.

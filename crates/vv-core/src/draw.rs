@@ -15,6 +15,7 @@
 //! testable without a display.
 
 pub use glam::Vec2;
+use serde::{Deserialize, Serialize};
 
 use crate::dim::{self, Rect};
 
@@ -43,6 +44,8 @@ pub fn turned(v: Vec2, degrees: f32) -> Vec2 {
 /// The channels are straight alpha: [`Color::a`] says how much of the color the
 /// draw keeps, and the renderer blends with `SRC_ALPHA` over
 /// `ONE_MINUS_SRC_ALPHA`.
+/// The four channels cross the wire as the four named fields of the value, so a
+/// scene document states a color in the same bytes a decoder wrote.
 ///
 /// # Examples
 ///
@@ -59,7 +62,7 @@ pub fn turned(v: Vec2, degrees: f32) -> Vec2 {
 /// assert!((clear[1] - 0.2).abs() < 1e-9);
 /// assert_eq!(clear[3], 1.0);
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Color {
     /// The red channel.
     pub r: u8,

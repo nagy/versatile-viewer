@@ -1537,6 +1537,229 @@ fn a_listed_document_paints_its_plane_until_the_pass_lands() {
     }
 }
 
+/// A scene document paints the list it states, and its own extent frames it.
+///
+/// `vv --scene <file>` is the route a producer outside this process takes: a
+/// plane, a display list and no raster at all, so the frame that waits for the
+/// display-list pass shows the window background and nothing else, and every
+/// frame after it shows the shapes.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_scene_file_paints_its_list() {
+    let document = r#"{
+      "version": 1,
+      "plane": { "width": 200.0, "height": 100.0 },
+      "primitives": [
+        { "Rect": { "rect": { "x0": 0.0, "y0": 0.0, "x1": 100.0, "y1": 100.0 },
+                    "paint": { "Solid": { "r": 255, "g": 0, "b": 0, "a": 255 } } } },
+        { "Rect": { "rect": { "x0": 100.0, "y0": 0.0, "x1": 200.0, "y1": 100.0 },
+                    "paint": { "Solid": { "r": 0, "g": 255, "b": 0, "a": 255 } } } }
+      ]
+    }"#;
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("scene.json");
+    std::fs::write(&path, document).expect("write the scene");
+    let launch = vv_view::viewer::Launch::scene(&path, false).expect("the scene opens");
+    // The launch keeps the default window, because the extent is in the units the
+    // list is written in: the fit decides how many window pixels a unit covers.
+    let (win_w, win_h) = launch.window_size();
+    assert_eq!((win_w, win_h), (1024, 768));
+    let canvas = canvas!(win_w, win_h);
+    let mut viewer = vv_view::viewer::Viewer::new(
+        canvas.device.clone(),
+        canvas.queue.clone(),
+        FORMAT,
+        canvas.device.limits().max_texture_dimension_2d,
+        launch,
+        canvas.size,
+    );
+    let mut host = NullHost;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut waiting = None;
+    let listed = loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the display-list pass lands"
+        );
+        let pixels = shot_frame_read(&canvas, &mut viewer, &mut host);
+        if viewer.listed() {
+            break pixels;
+        }
+        waiting.get_or_insert(pixels);
+        std::thread::sleep(std::time::Duration::from_millis(4));
+    };
+    let clear = [CLEAR.r, CLEAR.g, CLEAR.b, CLEAR.a];
+    // A scene has no raster behind it, so a frame that draws no list falls back
+    // to nothing: the background is the whole picture.
+    let waiting = waiting.expect("a frame of the build drew no list");
+    assert_eq!(
+        waiting.at(256, 384),
+        clear,
+        "there is no plane to fall back to"
+    );
+    // The plane is 200 by 100 in a 1024 by 768 window, so the fit is 5.12 and
+    // the plane fills the middle 1024 by 512 of the window.
+    assert_eq!(
+        listed.at(256, 384),
+        [255, 0, 0, 255],
+        "the left half is the red rect"
+    );
+    assert_eq!(
+        listed.at(768, 384),
+        [0, 255, 0, 255],
+        "the right half is the green rect"
+    );
+    assert_eq!(
+        listed.at(256, 8),
+        clear,
+        "the letterbox keeps the window background"
+    );
+}
+
+/// A glyph run whose bytes name no face is dropped, and the frame still paints.
+///
+/// A run carries the producer's own bytes, so the face is the one field this
+/// tree cannot trust: vello parses it with an `unwrap`, so the pass checks it
+/// first. A refused run costs its labels and never the process.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_glyph_run_that_names_no_face_paints_nothing() {
+    use std::sync::Arc;
+
+    use vv_core::{
+        dim::{SurfaceSize, WindowSize, WindowVector},
+        region,
+        scene::{self, GlyphRun, Paint, PlacedGlyph, Primitive},
+    };
+
+    let mut canvas = canvas!(200, 100);
+    canvas.begin(CLEAR);
+    let (win_w, win_h) = (canvas.size.0 as f32, canvas.size.1 as f32);
+    let frame = region::Frame {
+        img: SurfaceSize::new(win_w, win_h),
+        win: WindowSize::new(win_w, win_h),
+        pan: WindowVector::zero(),
+        scale: 1.0,
+        angle: 0.0,
+    };
+    // Two runs a document can state: bytes that are not a font at all, and a
+    // face index past the end of the one empty file.
+    let run = |bytes: &[u8], face: u32| GlyphRun {
+        font: Arc::from(bytes.to_vec()),
+        face,
+        size: 24.0,
+        glyphs: Arc::from(vec![PlacedGlyph {
+            id: 1,
+            x: 120.0,
+            y: 60.0,
+        }]),
+    };
+    let list: Arc<[Primitive]> = Arc::from(vec![
+        Primitive::Rect {
+            rect: scene::rect_of(region::crop(0.0, 0.0, 100.0, 100.0)),
+            paint: Paint::Solid(Color::new(255, 0, 0, 255)),
+        },
+        Primitive::Glyphs {
+            run: run(b"not a font at all", 0),
+            transform: kurbo::Affine::IDENTITY,
+            paint: Paint::Solid(Color::WHITE),
+        },
+        Primitive::Glyphs {
+            run: run(b"", 9),
+            transform: kurbo::Affine::IDENTITY,
+            paint: Paint::Solid(Color::WHITE),
+        },
+    ]);
+    let mut pass = canvas
+        .renderer
+        .display_pass(&canvas.device)
+        .expect("a display-list pass");
+    let painted = pass
+        .draw(&canvas.device, &canvas.queue, &list, &frame, canvas.size)
+        .expect("the frame draws")
+        .expect("the frame fits");
+    canvas.renderer.texture(
+        painted.texture,
+        painted.src,
+        painted.quad,
+        Color::WHITE,
+        Filter::Linear,
+    );
+    let out = canvas.print();
+    assert_eq!(out.at(50, 50), [255, 0, 0, 255], "the rect still paints");
+    assert_eq!(
+        out.at(150, 50),
+        [CLEAR.r, CLEAR.g, CLEAR.b, CLEAR.a],
+        "a run that names no face draws nothing"
+    );
+}
+
+/// A pushed picture replaces a scene list.
+///
+/// A run may carry `--scene` and `--mcp` at once, and a push is where the two
+/// meet: the push adopts its own source, which drops the list, so a tool call
+/// takes the window over and nothing stale draws beside it.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_pushed_picture_replaces_a_scene_list() {
+    let document = r#"{ "version": 1, "plane": { "width": 100.0, "height": 100.0 },
+      "primitives": [ { "Rect": { "rect": { "x0": 0.0, "y0": 0.0, "x1": 100.0, "y1": 100.0 },
+                    "paint": { "Solid": { "r": 0, "g": 0, "b": 255, "a": 255 } } } } ] }"#;
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("scene.json");
+    std::fs::write(&path, document).expect("write the scene");
+    let launch = vv_view::viewer::Launch::scene(&path, true).expect("the scene opens");
+    let (win_w, win_h) = launch.window_size();
+    let canvas = canvas!(win_w, win_h);
+    let mut viewer = vv_view::viewer::Viewer::new(
+        canvas.device.clone(),
+        canvas.queue.clone(),
+        FORMAT,
+        canvas.device.limits().max_texture_dimension_2d,
+        launch,
+        canvas.size,
+    );
+    let mut host = NullHost;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut blue = false;
+    while !blue {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the scene's list lands"
+        );
+        let pixels = shot_frame_read(&canvas, &mut viewer, &mut host);
+        blue = viewer.listed() && pixels.at(512, 384) == [0, 0, 255, 255];
+        std::thread::sleep(std::time::Duration::from_millis(4));
+    }
+
+    // A push of an SVG document, over the scene the launch opened.
+    let square = r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="#ff0000"/></svg>"##;
+    let (reply, answers) = std::sync::mpsc::channel();
+    viewer.accept(vv_view::push::Push::Bytes {
+        data: square.as_bytes().to_vec(),
+        reply,
+    });
+    answers
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the worker answers")
+        .expect("the bytes decode");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut red = false;
+    while !red {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the pushed picture lands"
+        );
+        red = shot_frame_read(&canvas, &mut viewer, &mut host).at(512, 384) == [255, 0, 0, 255];
+        std::thread::sleep(std::time::Duration::from_millis(4));
+    }
+    assert!(
+        !viewer.listed(),
+        "the list is gone, so no scene draws beside the picture"
+    );
+    assert_eq!(viewer.status().source, "mcp");
+}
+
 /// How many pixels of `frame` disagree with the raster `want`.
 ///
 /// A vector file paints no paper of its own, so the raster is transparent where

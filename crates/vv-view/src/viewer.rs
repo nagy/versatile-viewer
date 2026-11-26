@@ -26,6 +26,9 @@
 //! lists itself, a single file decodes, and the result is what sizes a window.
 //! A host therefore opens the launch first, creates its window from
 //! [`Launch::window_size`], and then builds the viewer on its device.
+//! A scene document ([`Launch::scene`]) is the one launch that decodes
+//! nothing: a producer outside this process wrote the display list, so the
+//! launch reads a plane and a list and the first frame draws it.
 //!
 //! The input vocabulary is [`Event`], one level above `input::Input`, so a host
 //! maps its own toolkit into it and [`Viewer::handle_event`] keeps the held
@@ -69,6 +72,7 @@ use crate::{
     region_sel,
     render::Renderer,
     rotate,
+    scene_file::Scene,
     surface::{Crop, Size, Surface, View, open_book_surface, open_bytes, open_surface},
     texture::Texture,
     theme,
@@ -181,6 +185,9 @@ pub struct Launch {
     grid: Option<Grid>,
     /// The decoded picture of a single-file launch.
     decoded: Option<DecodedImage>,
+    /// The plane and the list of a scene-file launch, which paints with no
+    /// raster at all.
+    scene: Option<Scene>,
     /// The surface of a single-file launch, kept when it can repaint a region.
     source: Option<Arc<dyn Surface>>,
     /// The part of the plane a fresh open frames.
@@ -211,6 +218,7 @@ impl Launch {
             shows_grid,
             grid: None,
             decoded: None,
+            scene: None,
             source: None,
             open_box: None,
             blur: None,
@@ -219,6 +227,40 @@ impl Launch {
             title: format!("{}{SEP}{APP}", crate::push::MEMORY_LABEL),
             label: crate::push::MEMORY_LABEL.to_owned(),
         }
+    }
+
+    /// Open the scene document the command line names.
+    ///
+    /// A scene document is a plane and a display list that a producer in
+    /// another process wrote (see [`crate::scene_file`]), so this launch decodes
+    /// nothing and keeps no surface: the list *is* the picture, and a plane with
+    /// no raster behind it has nothing to repaint. A file this tree cannot read
+    /// fails here, before a window exists.
+    ///
+    /// The window keeps the default size, because the extent is in the units the
+    /// producer's own list is written in and only the fit decides how much of a
+    /// window one of those units covers.
+    ///
+    /// # Errors
+    ///
+    /// Returns the read error of the document: a missing file, bytes that are not
+    /// a scene, another version, or an extent no fit can frame.
+    pub fn scene(path: &Path, shows_grid: bool) -> Result<Self> {
+        let scene = Scene::read(path)
+            .map_err(|err| anyhow::anyhow!("{path}: {err}", path = path.display()))?;
+        Ok(Self {
+            shows_grid,
+            grid: None,
+            decoded: None,
+            scene: Some(scene),
+            source: None,
+            open_box: None,
+            blur: None,
+            single_plane: true,
+            win0: (1024, 768),
+            title: image_title(path),
+            label: path.display().to_string(),
+        })
     }
 
     /// Open the path the command line names, or a path a host names.
@@ -307,6 +349,7 @@ impl Launch {
             shows_grid,
             grid,
             decoded,
+            scene: None,
             source,
             open_box,
             blur,
@@ -679,6 +722,7 @@ impl Viewer {
         let Launch {
             grid,
             decoded,
+            scene,
             source,
             open_box,
             blur,
@@ -718,6 +762,20 @@ impl Viewer {
                     None,
                 );
             }
+        } else if let Some(scene) = scene {
+            // A scene document: the plane is the extent the producer states and
+            // the list is the picture, so no texture and no loader exist for
+            // this plane. The view holds no source either, because a source is
+            // what repaints a region and this one has no raster to repaint:
+            // the list draws at every zoom, and a refused frame simply draws
+            // nothing rather than the plane texture of a source that never
+            // made one.
+            self.st.img = scene.plane;
+            self.planes = 1;
+            self.st.adopt_source(None);
+            self.st.scene = Some(scene.primitives);
+            self.st.open_box = None;
+            self.st.reset_view();
         } else if let Some(book) = source.take() {
             // A document launch: no picture exists yet, so a loader paints the
             // spread the fit frames and then the coarse whole book (see
@@ -1007,8 +1065,11 @@ impl Viewer {
         self.title_open_id = None;
     }
 
-    /// The size of the open picture, in physical pixels.
+    /// The size of the open plane, in surface units.
     ///
+    /// A raster source measures its picture in pixels and a document measures
+    /// its plane in its own units, so a scene document answers the extent its
+    /// producer stated, which need not be a pixel count.
     /// A host that fits a window to the picture reads this.
     #[must_use]
     pub fn image_size(&self) -> (u32, u32) {
@@ -2601,8 +2662,9 @@ impl Viewer {
 
 #[cfg(test)]
 mod tests {
-    use super::open_initial;
+    use super::{Launch, open_initial};
 
+    /// A pane that draws no grid opens the first entry of a directory.
     #[test]
     fn a_pane_that_draws_no_grid_opens_the_first_entry() {
         // A pane that draws no grid opens entry 0 of any directory.
@@ -2617,5 +2679,57 @@ mod tests {
         assert_eq!(open_initial(true, false, 1), Some(0));
         assert_eq!(open_initial(true, false, 0), None);
         assert_eq!(open_initial(true, true, 1), None);
+    }
+
+    /// A scene document this tree cannot read fails the launch, so a window
+    /// never opens over a plane that could not paint anything.
+    ///
+    /// The message names the file, because a reader of one failed launch has
+    /// nothing else to go on.
+    #[test]
+    fn a_broken_scene_file_fails_the_launch() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir.path().join("scene.json");
+        let later = r#"{ "version": 2, "plane": { "width": 1.0, "height": 1.0 },
+                        "primitives": [] }"#;
+        std::fs::write(&path, later).expect("the document writes");
+        let err = Launch::scene(&path, false)
+            .err()
+            .expect("version 2 is not read here");
+        let said = err.to_string();
+        assert!(said.contains("version 2"), "{said}");
+        assert!(said.contains("scene.json"), "{said}");
+        // A file that is not there fails the same way, before a window exists.
+        let missing = dir.path().join("nope.json");
+        let err = Launch::scene(&missing, false)
+            .err()
+            .expect("no such document");
+        assert!(err.to_string().contains("nope.json"), "{err}");
+    }
+
+    /// A scene document launches the image view with the default window, and a
+    /// title that names the file.
+    ///
+    /// The extent is in the units the producer writes its list in, so the launch
+    /// never sizes a window from it: the fit decides what a unit covers.
+    #[test]
+    fn a_scene_file_launches_the_default_window() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir.path().join("scene.json");
+        let document = r#"{ "version": 1, "plane": { "width": 4000.0, "height": 600.0 },
+                            "primitives": [] }"#;
+        std::fs::write(&path, document).expect("the document writes");
+        let launch = Launch::scene(&path, false).expect("the document reads");
+        assert_eq!(launch.window_size(), (1024, 768));
+        assert!(
+            launch.title().contains("scene.json"),
+            "the title names the file: {}",
+            launch.title()
+        );
+        assert!(
+            launch.title().ends_with("versatile-viewer"),
+            "and the title keeps the application name: {}",
+            launch.title()
+        );
     }
 }
