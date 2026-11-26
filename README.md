@@ -232,6 +232,15 @@ fields, and `server/discover` replaces the handshake.
 states, so a producer hands over shapes instead of a picture: no file is
 written, nothing decodes, and the list draws at every zoom.
 
+`cargo run --example scene_client` is a working producer to copy: it builds a
+document, spawns `vv --mcp`, calls `vv_show_scene` and leaves the window
+interactive. Run `cargo build` first, because the example spawns the binary
+beside itself and falls back to `vv` from `PATH`, which is the one a Nix install
+put there. The example links nothing of this tree, because the document is JSON
+and the call is one request line, which is the whole of what a program in
+another language writes. `--out scene.json` writes the same document instead, so
+`vv --scene scene.json` paints it.
+
 `vv_show_image_bytes` decides the format from the bytes, so the call carries
 no file name or extension. A JPEG XL image, a PNG, an SVG document and a PDF
 all route on their own content, and the payload may hold up to 64 MiB. The call
