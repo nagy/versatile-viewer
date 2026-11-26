@@ -176,7 +176,8 @@
             # The rpath and the missing-library gate live in the fixup, which
             # still runs.
             doCheck = false;
-            meta.description = "A fast image viewer. nsxiv meets mpv. JPEG XL first-class.";
+            # No description here: crane fills meta.description from
+            # `[workspace.package] description' in Cargo.toml.
           };
 
           # Static rustdoc HTML installed under $out/share/doc.

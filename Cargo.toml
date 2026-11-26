@@ -15,6 +15,9 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+# crane reads `description' from here when the root holds no [package] table,
+# and turns it into the package's meta.description.
+description = "A fast image viewer. nsxiv meets mpv. JPEG XL first-class."
 # The floor the tree builds on: edition 2024 asks for 1.85, the first slice API
 # (`as_chunks_mut` in `decode.rs` and `svg.rs`) landed in 1.88, and the value
 # layer of `vv-core` stays one step of `const` through `Color::tint` and
