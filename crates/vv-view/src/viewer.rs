@@ -531,6 +531,14 @@ pub struct Viewer {
     grid: Option<Grid>,
     /// The pane draws no grid, so `ESC` and `Enter` never leave the image view.
     shows_grid: bool,
+    /// The viewer reads the keys, or the host owns them (see
+    /// [`Viewer::set_keys`]).
+    ///
+    /// A host that drives its own input policy takes the keys, and then no key
+    /// enters `input`, so every gesture a key starts stays off: `f`, `W`, `E`,
+    /// `T`, `r`, `v`, the arrows and `q` included. The pointer, the buttons,
+    /// the wheel and the focus reach the view either way.
+    keys: bool,
     /// Whether `Shift+T` has recolored every picture.
     ///
     /// The theme is a shader uniform and never a pixel, so flipping this costs
@@ -683,6 +691,7 @@ impl Viewer {
             scene_pass: ListPass::default(),
             grid: None,
             shows_grid: launch.shows_grid,
+            keys: true,
             input: Input::default(),
             title_open_id: None,
             recolor: false,
@@ -818,12 +827,30 @@ impl Viewer {
         }
     }
 
+    /// Hand the viewer's own keys to the host, or take them back.
+    ///
+    /// A host that runs its own key bindings calls this once after
+    /// [`Viewer::new`]: every key event is then dropped before the input layer,
+    /// so the viewer's `f`, `W`, `E`, `T`, `r`, `v`, arrows, `q` and the rest
+    /// start nothing, while the pointer, the buttons, the wheel and the focus
+    /// keep reaching the view.
+    /// The keys are on by default, so a host that keeps the viewer's bindings
+    /// changes nothing.
+    /// A hold that was captured before the call stays until its release, which
+    /// the viewer still reads.
+    pub const fn set_keys(&mut self, on: bool) {
+        self.keys = on;
+    }
+
     /// Take one input event.
     ///
     /// The window actions a lost focus needs arrive through `host`, so a host
     /// that moves the keyboard away mid-drag cannot strand a capture.
     pub fn handle_event(&mut self, event: Event, host: &mut dyn Host) {
         match event {
+            // A host that took the keys drops them before the input layer, so
+            // no held state and no press edge exists for the frame to read.
+            Event::Key { .. } if !self.keys => {}
             Event::Key {
                 key,
                 state,

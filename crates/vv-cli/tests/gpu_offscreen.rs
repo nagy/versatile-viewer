@@ -1616,6 +1616,62 @@ fn a_scene_file_paints_its_list() {
     );
 }
 
+/// A host that takes the keys keeps `q` for itself, and the pointer still
+/// reaches the view.
+///
+/// `viewer_host` is the seam a host with its own key bindings uses, and the
+/// viewer's own bindings would otherwise answer the same presses: `q` would end
+/// the process under the host's own quit key.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_host_that_takes_the_keys_keeps_q() {
+    let document = r#"{
+      "version": 2,
+      "plane": { "width": 100.0, "height": 50.0 },
+      "primitives": [
+        { "Rect": { "rect": { "x0": 0.0, "y0": 0.0, "x1": 100.0, "y1": 50.0 },
+                    "paint": { "Solid": { "r": 255, "g": 0, "b": 0, "a": 255 } } } }
+      ]
+    }"#;
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("scene.json");
+    std::fs::write(&path, document).expect("write the scene");
+    let launch = vv_view::viewer::Launch::scene(&path, false).expect("the scene opens");
+    let (win_w, win_h) = launch.window_size();
+    let canvas = canvas!(win_w, win_h);
+    let mut viewer = vv_view::viewer::Viewer::new(
+        canvas.device.clone(),
+        canvas.queue.clone(),
+        FORMAT,
+        canvas.device.limits().max_texture_dimension_2d,
+        launch,
+        canvas.size,
+    );
+    let mut host = NullHost;
+
+    // The host owns the keys, so the press reaches no binding: `q` asks for no
+    // exit, and the frame reads no press edge at all.
+    viewer.set_keys(false);
+    host.press(&mut viewer, winit::keyboard::KeyCode::KeyQ);
+    shot_frame_read(&canvas, &mut viewer, &mut host);
+    assert!(!viewer.quit(), "the host kept the key");
+
+    // The pointer and the buttons are not keys, so the view still hears them:
+    // a hover is the one report of them a test reads back without a viewport.
+    viewer.handle_event(
+        vv_view::viewer::Event::Pointer(Vec2::new(4.0, 4.0)),
+        &mut host,
+    );
+    shot_frame_read(&canvas, &mut viewer, &mut host);
+    assert!(!viewer.quit(), "the pointer changes no key state");
+
+    // Handing them back restores the bindings the viewer carries.
+    viewer.set_keys(true);
+    host.press(&mut viewer, winit::keyboard::KeyCode::KeyQ);
+    shot_frame_read(&canvas, &mut viewer, &mut host);
+    assert!(viewer.quit(), "the viewer reads its own key again");
+}
+
 /// A document that states the box its window shows fills the window with that
 /// box, so a producer whose two axes scale differently lands its own picture and
 /// not a whole-but-squashed plane.
