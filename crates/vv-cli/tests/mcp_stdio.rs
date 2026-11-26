@@ -62,6 +62,7 @@ fn blank() -> vv_mcp::mcp::Status {
         width: 0.0,
         height: 0.0,
         scale: None,
+        visible: None,
     }
 }
 

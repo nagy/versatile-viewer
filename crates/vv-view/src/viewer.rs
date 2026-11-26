@@ -993,7 +993,23 @@ impl Viewer {
             width: self.st.img.w,
             height: self.st.img.h,
             scale: self.st.view_scale,
+            visible: self.visible(),
         }
+    }
+
+    /// The box of the open plane the window shows, in surface units.
+    ///
+    /// One frame answers the same mapping the draw reads, so the box names what
+    /// the window covers and not what a caller re-derives from a window size and
+    /// a fit it computes itself.
+    /// The box is not clamped into the plane, because a window may show the
+    /// space past an edge of it.
+    /// `None` before the first frame measures the pane, and while the view
+    /// names no plane the frame can draw.
+    #[must_use]
+    pub fn visible(&self) -> Option<Crop> {
+        let (win_w, win_h) = self.last_win?;
+        Some(self.st.frame(Vec2::new(win_w, win_h))?.shown(0.0))
     }
 
     /// Open a pushed picture on a worker.

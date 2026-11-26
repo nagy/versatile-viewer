@@ -112,6 +112,12 @@ geometry.
   picks an axis.
 - `vv_get_status` reports `scale` as `{ "x": …, "y": … }`. One number would name
   neither axis of a view that states a viewport.
+- The same answer carries `visible`, the box of the plane the window shows, in
+  the plane's own units, named as a document names its viewport (`x0`, `y0`,
+  `x1`, `y1`). The two factors say how large a unit is and the box says where
+  the units land, so a producer that places its own content reads the framing
+  back instead of recomputing a fit it does not own. The box is not clamped into
+  the plane, because a window may show the space past an edge of it.
 - The fit for a stated viewport is the box for every zoom mode, so `W`, `E` and
   `T` do nothing to such a view, and `f`'s fill aim is skipped for it. That is
   the honest reading of "the box is the fit"; a way to leave the box is a

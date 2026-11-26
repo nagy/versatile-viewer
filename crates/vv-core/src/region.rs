@@ -328,8 +328,30 @@ impl Frame {
     /// corners.
     /// A zero `margin` gives the rect the paint must cover, and [`MARGIN`]
     /// gives the rect worth painting.
+    /// [`Self::shown`] answers the same box before the clip, which a reader
+    /// that places its own content wants.
     #[must_use]
     pub fn crop(&self, margin: f32) -> Crop {
+        let shown = self.shown(margin);
+        let x = shown.min_x().clamp(0.0, self.img.width);
+        let y = shown.min_y().clamp(0.0, self.img.height);
+        let right = shown.max_x().clamp(x, self.img.width);
+        let bottom = shown.max_y().clamp(y, self.img.height);
+        crop(x, y, right - x, bottom - y)
+    }
+
+    /// The source rect the window shows, grown by `margin` and not clipped.
+    ///
+    /// [`Self::crop`] answers this same box clamped into the plane, because a
+    /// paint wants a region the plane holds. A reader that places its own
+    /// content reads the box here instead: a window may show the space past an
+    /// edge of the plane, and a clamped box would name a box the window does
+    /// not show, so the reader could not tell how far past the plane it
+    /// reaches.
+    /// A turned plane grows the box the same way, to cover its corners, and a
+    /// frame that names no drawable plane answers an empty box.
+    #[must_use]
+    pub fn shown(&self, margin: f32) -> Crop {
         let margin = margin.max(0.0);
         if !(self.has_drawable_plane() && self.win.width > 0.0 && self.win.height > 0.0) {
             return crop(0.0, 0.0, 0.0, 0.0);
@@ -356,11 +378,7 @@ impl Frame {
             max.x = max.x.max(point.x);
             max.y = max.y.max(point.y);
         }
-        let x = min.x.clamp(0.0, self.img.width);
-        let y = min.y.clamp(0.0, self.img.height);
-        let right = max.x.clamp(x, self.img.width);
-        let bottom = max.y.clamp(y, self.img.height);
-        crop(x, y, right - x, bottom - y)
+        crop(min.x, min.y, max.x - min.x, max.y - min.y)
     }
 }
 

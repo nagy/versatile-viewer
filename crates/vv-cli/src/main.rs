@@ -205,6 +205,7 @@ fn blank_status(reason: &str) -> mcp::Status {
         width: 0.0,
         height: 0.0,
         scale: None,
+        visible: None,
     }
 }
 

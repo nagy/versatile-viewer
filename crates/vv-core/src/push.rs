@@ -12,7 +12,7 @@
 //! Neither type names a texture, a plane buffer or a window, so a caller builds
 //! one with no device.
 
-use crate::region::Scale;
+use crate::region::{Crop, Scale};
 
 /// A picture the viewer opened from pushed content.
 ///
@@ -50,4 +50,15 @@ pub struct Status {
     /// the window on each axis at its own ratio, and one number would name
     /// neither axis of such a view.
     pub scale: Option<Scale>,
+    /// The box of the open plane the window shows, in surface units, or None
+    /// before the first frame computes the layout.
+    ///
+    /// [`Self::scale`] names the two ratios and this box names where they
+    /// land, so a caller that places its own content reads the framing back
+    /// instead of re-deriving the fit from a window size it does not own.
+    /// The box is the plane's own units, so a window resize or a pan shows as
+    /// this value alone.
+    /// It is not clamped into the plane: a window that shows the space past an
+    /// edge reads that space too.
+    pub visible: Option<Crop>,
 }

@@ -1679,6 +1679,21 @@ fn a_scene_viewport_fills_the_window_on_each_axis() {
             "the stated box reaches the window corner at {x},{y}"
         );
     }
+    // The status names the same box the document stated, in the plane's own
+    // units, so a producer reads back where its two ratios landed instead of
+    // recomputing the fit from a window size it does not own.
+    let shown = viewer.visible().expect("a frame measured the pane");
+    for (got, want) in [
+        (shown.min_x(), 50.0),
+        (shown.min_y(), 20.0),
+        (shown.max_x(), 150.0),
+        (shown.max_y(), 70.0),
+    ] {
+        assert!(
+            (got - want).abs() < 0.5,
+            "the visible box reads {got}, and the document stated {want}"
+        );
+    }
 }
 
 /// A glyph run whose bytes name no face is dropped, and the frame still paints.

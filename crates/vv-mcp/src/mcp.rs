@@ -54,7 +54,7 @@
 //!   raster lands behind it.
 //! - `vv_clear()` returns to the blank view.
 //! - `vv_get_status()` reports the mode, the plane count, the source label,
-//!   the plane size and the scale.
+//!   the plane size, the two scale factors and the box the window shows.
 //!
 //! Every diagnostic goes to stderr, because stdout carries only protocol
 //! frames.
@@ -495,6 +495,15 @@ fn shown_status(status: &Status) -> serde_json::Value {
             "x": scale.x,
             "y": scale.y,
         })),
+        // The box the window shows, in the plane's own units and in the same
+        // field names a document states its viewport with, so a caller reads
+        // back where the two factors landed without knowing the window size.
+        "visible": status.visible.map(|shown| serde_json::json!({
+            "x0": shown.min_x(),
+            "y0": shown.min_y(),
+            "x1": shown.max_x(),
+            "y1": shown.max_y(),
+        })),
     })
 }
 
@@ -627,6 +636,7 @@ mod tests {
                 width: 0.0,
                 height: 0.0,
                 scale: None,
+                visible: None,
             }
         }
 
@@ -639,6 +649,7 @@ mod tests {
                 width: 3.0,
                 height: 2.0,
                 scale: Some(vv_core::region::Scale::uniform(2.0)),
+                visible: Some(vv_core::region::crop(1.0, 0.5, 1.5, 1.0)),
             }
         }
     }
@@ -966,6 +977,10 @@ mod tests {
         assert_eq!(status["source"], "mcp");
         assert_eq!(status["scale"]["x"], 2.0);
         assert_eq!(status["scale"]["y"], 2.0);
+        assert_eq!(status["visible"]["x0"], 1.0);
+        assert_eq!(status["visible"]["y0"], 0.5);
+        assert_eq!(status["visible"]["x1"], 2.5);
+        assert_eq!(status["visible"]["y1"], 1.5);
     }
 
     /// A call to a tool the server does not advertise fails as a client error.

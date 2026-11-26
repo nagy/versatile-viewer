@@ -226,7 +226,7 @@ fields, and `server/discover` replaces the handshake.
 | `vv_show_image` | `path` | plane count and the size of plane 0 |
 | `vv_show_scene` | `document` | plane count and the size of plane 0 |
 | `vv_clear` | none | the blank status |
-| `vv_get_status` | none | mode, plane count, source label, plane size, scale on each axis |
+| `vv_get_status` | none | mode, plane count, source label, plane size, scale on each axis, and the box the window shows |
 
 `vv_show_scene` installs a [scene document](#scene-documents) as the fields it
 states, so a producer hands over shapes instead of a picture: no file is
