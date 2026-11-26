@@ -355,10 +355,14 @@ impl SceneView {
         {
             self.keep(list, plane, band);
         }
-        // The band lands at the frame's own scale, which is the linear part of
-        // the transform that places it.
-        let [xx, yx, _, _, _, _] = to_window.as_coeffs();
-        let scale = xx.hypot(yx);
+        // What the frame asks `vello` to flatten is bounded by the largest
+        // factor of the placing transform, which is its largest singular value:
+        // the linear part is a turn composed with the two factors, so its two
+        // column norms are those factors and a turn leaves them alone.
+        // A budget must over-report and never under-report, so the larger one
+        // is the answer even when the window shows more of the coarser axis.
+        let [xx, yx, xy, yy, _, _] = to_window.as_coeffs();
+        let scale = xx.hypot(yx).max(xy.hypot(yy));
         // A frame past the budget is one vello paints *nothing* of, and it says
         // so to nobody: refuse it here, where the caller can still show the
         // plane, and forget the paint on screen so no later frame reuses it.
@@ -708,20 +712,20 @@ fn target_of(
 
 /// The transform that maps surface units onto window pixels.
 ///
-/// This is the draw transform of [`region::Frame`]: the plane scales, turns
-/// clockwise by the frame's angle about its own center, and that center sits at
-/// the window middle plus the pan.
+/// This is the draw transform of [`region::Frame`]: the plane scales on each
+/// axis, turns clockwise by the frame's angle about its own center, and that
+/// center sits at the window middle plus the pan.
 #[must_use]
 pub fn to_window(frame: &region::Frame) -> Affine {
     let (w, h) = (f64::from(frame.img.width), f64::from(frame.img.height));
-    let scale = f64::from(frame.scale);
+    let scale = (f64::from(frame.scale.x), f64::from(frame.scale.y));
     let center = (
         f64::from(frame.win.width) / 2.0 + f64::from(frame.pan.x),
         f64::from(frame.win.height) / 2.0 + f64::from(frame.pan.y),
     );
     Affine::translate(center)
         * Affine::rotate(f64::from(frame.angle).to_radians())
-        * Affine::scale(scale)
+        * Affine::scale_non_uniform(scale.0, scale.1)
         * Affine::translate((-w / 2.0, -h / 2.0))
 }
 
@@ -1406,7 +1410,7 @@ mod tests {
             img: dim::SurfaceSize::new(plane.0, plane.1),
             win: dim::WindowSize::new(win.0, win.1),
             pan: dim::WindowVector::new(pan.0, pan.1),
-            scale,
+            scale: region::Scale::uniform(scale),
             angle: 0.0,
         }
     }
@@ -1441,6 +1445,31 @@ mod tests {
         assert!(
             !base.covers(hull(1000.0)),
             "a window that left the band is not covered"
+        );
+    }
+
+    /// A frame whose two axes carry different factors maps each axis at its
+    /// own, so the box a stated view asks for is the box the window shows.
+    #[test]
+    fn a_frame_scales_each_axis_at_its_own_factor() {
+        let mut squashed = frame((100.0, 400.0), (800.0, 600.0), (0.0, 0.0), 1.0);
+        squashed.scale = region::Scale::axes(8.0, 1.5);
+        let mapped = to_window(&squashed);
+        assert_eq!(
+            mapped * kurbo::Point::new(0.0, 0.0),
+            kurbo::Point::new(0.0, 0.0)
+        );
+        assert_eq!(
+            mapped * kurbo::Point::new(100.0, 400.0),
+            kurbo::Point::new(800.0, 600.0),
+            "the box fills the window on both axes"
+        );
+        // The window covers 100 by 400 surface units, so the band keeps a
+        // primitive a uniform fit of the same plane would have thrown away.
+        let visible = window_hull(mapped, (800, 600));
+        assert!(
+            (visible.width() - 100.0).abs() < 1e-9 && (visible.height() - 400.0).abs() < 1e-9,
+            "the two axes bound different spans: {visible:?}"
         );
     }
 
@@ -1790,7 +1819,7 @@ mod tests {
             img: dim::SurfaceSize::new(img.0, img.1),
             win: dim::WindowSize::new(win.0, win.1),
             pan: dim::WindowVector::new(0.0, 0.0),
-            scale: (win.0 / img.0).min(win.1 / img.1),
+            scale: region::Scale::uniform((win.0 / img.0).min(win.1 / img.1)),
             angle: 0.0,
         })
     }
@@ -1833,7 +1862,7 @@ mod tests {
                 img: dim::SurfaceSize::new(plane.0, plane.1),
                 win: dim::WindowSize::new(to.0, to.1),
                 pan: dim::WindowVector::new(10.0, -20.0),
-                scale: (to.0 / plane.0).min(to.1 / plane.1),
+                scale: region::Scale::uniform((to.0 / plane.0).min(to.1 / plane.1)),
                 angle,
             });
             let size = (from.0 as u32, from.1 as u32);

@@ -161,26 +161,46 @@ pub const PREFETCH_GIVE_UP: Duration = Duration::from_secs(3);
 /// Outside that interval a window edge exposes background.
 /// A cursor near the image edge therefore pans only as far as coverage
 /// allows.
+/// The answer is the user's pan and not the placement of the plane: a stated
+/// viewport places itself (see [`ViewState::view_pan`]), so that part is taken
+/// out here and added back by the frame.
+/// A view that states such a box already fills the window on both axes, so the
+/// caller never aims this one there: the box is its own fit.
 #[must_use]
 pub fn aim_fill_pan(st: &ViewState, mouse: Vec2, win_w: f32, win_h: f32) -> Vec2 {
-    let target = (win_w / st.img.w).max(win_h / st.img.h);
+    let target = region::Scale::uniform((win_w / st.img.w).max(win_h / st.img.h));
     let cur = st.view_scale.unwrap_or(target);
+    // The offset is where the draw places the plane, which is the stated
+    // viewport's placement plus the user's pan.
+    let offset = st.offset(cur);
     // Mouse position in image coordinates at the current scale.
     // The offset is the window top-left of the unpanned image.
-    let img_x = (mouse.x - (win_w - st.img.w * cur) / 2.0 - st.pan.x) / cur;
-    let img_y = (mouse.y - (win_h - st.img.h * cur) / 2.0 - st.pan.y) / cur;
-    let off_x = (win_w - st.img.w * target) / 2.0;
-    let off_y = (win_h - st.img.h * target) / 2.0;
+    let img_x = (mouse.x - (win_w - st.img.w * cur.x) / 2.0 - offset.x) / cur.x;
+    let img_y = (mouse.y - (win_h - st.img.h * cur.y) / 2.0 - offset.y) / cur.y;
+    let off_x = (win_w - st.img.w * target.x) / 2.0;
+    let off_y = (win_h - st.img.h * target.y) / 2.0;
+    let placed = st.view_pan(target);
     Vec2 {
-        x: (win_w / 2.0 - off_x - img_x * target).clamp(-off_x.abs(), off_x.abs()),
-        y: (win_h / 2.0 - off_y - img_y * target).clamp(-off_y.abs(), off_y.abs()),
+        x: (win_w / 2.0 - off_x - img_x * target.x).clamp(-off_x.abs(), off_x.abs()) - placed.x,
+        y: (win_h / 2.0 - off_y - img_y * target.y).clamp(-off_y.abs(), off_y.abs()) - placed.y,
     }
 }
+
+/// The furthest a free zoom may pull back, as a fraction of the fit scale.
+///
+/// The band is relative because a factor counts output pixels per surface
+/// unit, and a surface unit is the plane's own: a document that measures its
+/// plane in slot indices or prices fits at a factor a picture never shows, and
+/// an absolute bound would turn the first wheel step into a jump.
+pub const ZOOM_OUT: f32 = 0.01;
+
+/// The furthest a free zoom may push in, as a multiple of the fit scale.
+pub const ZOOM_IN: f32 = 100.0;
 
 /// How the code scales the image to the window.
 /// The code recomputes the scale every frame, so resizing always stays
 /// correct.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ZoomMode {
     /// Fit down to the window, centered.
     /// The code never upscales here (default).
@@ -198,13 +218,17 @@ pub enum ZoomMode {
     /// The shorter relative dimension overflows and is cropped.
     Fill,
     /// The free zoom factor, set with +/- as multiples of the last fit scale.
-    Free(f32),
+    ///
+    /// The factor is one number on both axes, because a zoom magnifies the view
+    /// it is applied to: a stated viewport that fills the window keeps its own
+    /// ratio between the axes and this number scales the pair.
+    Free(region::Scale),
 }
 
 impl ZoomMode {
     /// The free scale, or the fit scale when the mode is not free.
     #[must_use]
-    pub fn free_or(self, fit: f32) -> f32 {
+    pub fn free_or(self, fit: region::Scale) -> region::Scale {
         match self {
             Self::Free(scale) => scale,
             Self::FitDown | Self::FitAll | Self::FitWidth | Self::FitHeight | Self::Fill => fit,
@@ -242,10 +266,23 @@ pub struct ViewState {
     pub img: Size,
     pub zoom: ZoomMode,
     /// The on-screen pan offset, eased toward `target_pan` each frame.
+    ///
+    /// The offset is the user's: a view that states the box its window shows
+    /// places that box itself (see [`Self::view_pan`]), so this number moves
+    /// the view off the stated placement and never carries it.
     pub pan: Vec2,
     pub target_pan: Vec2,
     /// The on-screen scale, eased toward the target scale each frame.
-    pub view_scale: Option<f32>,
+    pub view_scale: Option<region::Scale>,
+    /// The plane box a producer stated its window shows, or `None` when the
+    /// view frames the whole plane.
+    ///
+    /// A display list in the producer's own units is written for a viewport
+    /// rather than for a window: the box names the part of the plane the window
+    /// shows, and the view fills the window with it on each axis at its own
+    /// ratio. The box is the fit then (see [`Self::viewport_scale`]), so it
+    /// survives a resize, and the user's pan and zoom move off it.
+    pub viewport: Option<region::Crop>,
     /// The held-key ramps that drive continuous motion.
     /// Each held key owns one ramp, so the speed eases in, holds, and eases
     /// out instead of stepping on the auto-repeat rate.
@@ -537,23 +574,20 @@ impl ViewState {
     /// One frame answers a screen point for the draw, the `f` hit test and the
     /// `v` region drag, so no caller re-derives the transform on its own.
     pub fn frame(&self, win: Vec2) -> Option<region::Frame> {
-        Some(region::Frame {
-            img: dim::SurfaceSize::new(self.img.w, self.img.h),
-            win: dim::WindowSize::new(win.x, win.y),
-            pan: dim::WindowVector::new(self.pan.x, self.pan.y),
-            scale: self.view_scale?,
-            angle: self.angle,
-        })
-        .filter(region::Frame::has_drawable_plane)
+        Some(self.frame_at(win, self.pan, self.view_scale?))
+            .filter(region::Frame::has_drawable_plane)
     }
 
     /// The window mapping of the open plane at `pan` and `scale`.
     ///
     /// [`Self::frame`] answers the same mapping for the pan and the scale on
     /// screen; a caller that aims elsewhere (the target pan of a glide) asks
-    /// here, so it never assembles the five numbers itself.
+    /// here, so it never assembles the six numbers itself.
+    /// `pan` is the user's offset: the placement of a stated viewport is added
+    /// here (see [`Self::view_pan`]).
     #[must_use]
-    pub fn frame_at(&self, win: Vec2, pan: Vec2, scale: f32) -> region::Frame {
+    pub fn frame_at(&self, win: Vec2, pan: Vec2, scale: region::Scale) -> region::Frame {
+        let pan = pan + self.view_pan(scale);
         region::Frame {
             img: dim::SurfaceSize::new(self.img.w, self.img.h),
             win: dim::WindowSize::new(win.x, win.y),
@@ -561,6 +595,78 @@ impl ViewState {
             scale,
             angle: self.angle,
         }
+    }
+
+    /// The scale the view asks for in a window of `win`, before the ease.
+    ///
+    /// A box the document states is the fit for every zoom mode, so `W`, `E` and
+    /// `T` keep the producer's framing; a view that states none answers the
+    /// mode's own ratio, computed every frame so a resize stays correct.
+    /// A fit measures the opening box when the surface names one: a book frames
+    /// its first spread, so the cover page shows whole and whichever side binds
+    /// decides.
+    /// The caller asks only once the plane is known, because every ratio divides
+    /// by it.
+    #[must_use]
+    pub fn fit_scale(&self, win: Vec2) -> region::Scale {
+        if let Some(boxed) = self.viewport_scale(win) {
+            return boxed;
+        }
+        let (fit_w, fit_h) = self
+            .open_box
+            .map_or((self.img.w, self.img.h), |boxed| (boxed.w, boxed.h));
+        match self.zoom {
+            ZoomMode::FitDown => {
+                region::Scale::uniform((win.x / fit_w).min(win.y / fit_h).min(1.0))
+            }
+            ZoomMode::FitAll => region::Scale::uniform((win.x / fit_w).min(win.y / fit_h)),
+            ZoomMode::FitWidth => region::Scale::uniform(win.x / fit_w),
+            ZoomMode::FitHeight => region::Scale::uniform(win.y / fit_h),
+            // Cover: the larger ratio wins, so the image fills the window and
+            // the code crops the other axis.
+            // A free zoom keeps its scale as the fit base.
+            ZoomMode::Fill | ZoomMode::Free(_) => {
+                region::Scale::uniform((win.x / fit_w).max(win.y / fit_h))
+            }
+        }
+    }
+
+    /// The scale the stated viewport asks for in a window of `win`.
+    ///
+    /// The box fills the window, so each axis takes the ratio of the window to
+    /// the box: a stated view is its own fit, and no fit mode applies to it.
+    #[must_use]
+    pub fn viewport_scale(&self, win: Vec2) -> Option<region::Scale> {
+        let view = self.viewport?;
+        Some(region::Scale::axes(
+            win.x / view.width(),
+            win.y / view.height(),
+        ))
+    }
+
+    /// The window offset the stated viewport places the plane at, before the
+    /// user's pan.
+    ///
+    /// The box fills the window, so the box's centre sits at the window's middle
+    /// and the plane's centre lands wherever that puts it.
+    /// The offset is derived every frame rather than stored, because a resize
+    /// changes both the fit and the plane's distance from the box.
+    #[must_use]
+    pub fn view_pan(&self, scale: region::Scale) -> Vec2 {
+        let Some(view) = self.viewport else {
+            return Vec2::ZERO;
+        };
+        Vec2::new(
+            (self.img.w / 2.0 - view.center().x) * scale.x,
+            (self.img.h / 2.0 - view.center().y) * scale.y,
+        )
+    }
+
+    /// The window offset of the plane's centre: the stated viewport's placement
+    /// plus the user's pan.
+    #[must_use]
+    pub fn offset(&self, scale: region::Scale) -> Vec2 {
+        self.pan + self.view_pan(scale)
     }
 
     /// Frame the opening box again once the image dimensions land.
@@ -612,7 +718,7 @@ impl ViewState {
             self.open_align = OpenAlign::Free;
             return;
         }
-        let top = Vec2::new(0.0, Column::new(self.img, scale, win_h).top_pan());
+        let top = Vec2::new(0.0, Column::new(self.img, scale.y, win_h).top_pan());
         self.pan = top;
         self.target_pan = top;
         self.open_align = OpenAlign::Holding { pan: top };
@@ -636,7 +742,7 @@ impl ViewState {
         let (Some(scale), Some(source)) = (self.view_scale, self.source.as_ref()) else {
             return false;
         };
-        if !(scale.is_finite() && scale > 0.0) {
+        if !scale.is_drawable() {
             return false;
         }
         let count = source.spread_count();
@@ -646,7 +752,7 @@ impl ViewState {
         if count < 2 || !(first.height().is_finite() && first.height() > 0.0) {
             return false;
         }
-        let column = Column::new(self.img, scale, win_h);
+        let column = Column::new(self.img, scale.y, win_h);
         let row = column
             .spread_at_top(self.target_pan.y, first.height())
             .min(count - 1);
@@ -737,21 +843,29 @@ impl ViewState {
             return None;
         }
         let scale = self.view_scale?;
-        if !(scale.is_finite() && scale > 0.0) {
+        if !scale.is_drawable() {
             return None;
         }
         let aim = self.frame_at(win, self.target_pan, scale);
-        let patch = region::Patch::new(aim.crop(region::MARGIN), scale);
+        // A patch is one raster at one scale, and only a raster source ever
+        // paints one: a view that states its viewport draws a list and paints no
+        // patch, so the coarser axis is the honest reading here.
+        let patch = region::Patch::new(aim.crop(region::MARGIN), scale.coarsest());
         (!patch.rect.is_empty()).then_some(patch)
     }
 
     /// Drop the region state of the image that was open, and retire every
     /// worker result still in flight.
+    ///
+    /// What the view shows is what a content change replaces, so the stated
+    /// viewport goes with it: a viewport belongs to the list it framed, and the
+    /// next picture or document fits its own plane.
     pub fn close_crop(&mut self) {
         self.source = None;
         self.scene = None;
         self.scene_pending = false;
         self.list_drawn = false;
+        self.viewport = None;
         self.drop_patch();
     }
 
@@ -975,11 +1089,11 @@ impl ViewState {
         let Some(scale) = self.view_scale else {
             return;
         };
-        if !(scale.is_finite() && scale > 0.0) {
+        if !scale.is_drawable() {
             return;
         }
         let frame = self.frame_at(win, self.pan, scale);
-        let needed = region::Patch::new(frame.crop(0.0), scale);
+        let needed = region::Patch::new(frame.crop(0.0), scale.coarsest());
         // A prefetched patch that holds the window is the patch on screen now.
         // The check runs before the debounce, so the landing frame shows the
         // sharp spread at once instead of waiting out [`region::QUIET`].
@@ -1035,7 +1149,7 @@ impl ViewState {
         };
         // Paint a margin around what the window shows, so a small pan between
         // two paints stays covered, and a filter keeps its outer context.
-        let paint = region::Patch::new(frame.crop(region::MARGIN), scale);
+        let paint = region::Patch::new(frame.crop(region::MARGIN), scale.coarsest());
         if paint.rect.is_empty() {
             return;
         }
@@ -1047,7 +1161,8 @@ impl ViewState {
         let plane = self.source_plane;
         let uploader = uploader.clone();
         rayon::spawn(
-            move || match source.render(View::region(plane, paint.rect, scale)) {
+            // A patch is painted at one scale, the one its pixels hold.
+            move || match source.render(View::region(plane, paint.rect, paint.scale)) {
                 Ok(image) => {
                     // The paint is a window patch, so it uploads on this worker
                     // and the main thread only draws it.
@@ -1465,7 +1580,7 @@ pub fn patch_dest(
 /// transform of the whole image.
 pub fn draw_patch(r: &mut Renderer, patch: &CropState, frame: &region::Frame, filter: Filter) {
     let rect = patch.patch.rect;
-    let (scale, angle) = (frame.scale, frame.angle);
+    let (scale, angle) = (frame.scale.coarsest(), frame.angle);
     let middle = dim::SurfacePoint::new(
         rect.min_x() + rect.width() / 2.0,
         rect.min_y() + rect.height() / 2.0,
@@ -1764,13 +1879,13 @@ pub fn patch_covers(st: &ViewState, win_w: f32, win_h: f32) -> bool {
     let Some(scale) = st.view_scale else {
         return false;
     };
-    if st.img.w <= 0.0 || !(scale.is_finite() && scale > 0.0) {
+    if st.img.w <= 0.0 || !scale.is_drawable() {
         return false;
     }
     let Some(frame) = st.frame(Vec2::new(win_w, win_h)) else {
         return false;
     };
-    let needed = region::Patch::new(frame.crop(0.0), scale);
+    let needed = region::Patch::new(frame.crop(0.0), scale.coarsest());
     region::patch_reaches_window(needed, crop.patch)
 }
 
@@ -1850,7 +1965,7 @@ pub fn draw_cell(r: &mut Renderer, st: &ViewState, tex: &Texture, cell: Size, wi
     }
     let scale = st
         .view_scale
-        .unwrap_or((win.x / st.img.w).min(win.y / st.img.h));
+        .unwrap_or_else(|| region::Scale::uniform((win.x / st.img.w).min(win.y / st.img.h)));
     let Some((size, middle)) = cell_place(st.img, st.cell_box, cell) else {
         return;
     };
@@ -1859,7 +1974,7 @@ pub fn draw_cell(r: &mut Renderer, st: &ViewState, tex: &Texture, cell: Size, wi
         r,
         tex,
         size,
-        scale,
+        scale.coarsest(),
         dim::draw_window(frame.to_screen(middle)),
         st.angle,
         Filter::Linear,
@@ -1979,7 +2094,9 @@ pub fn show_entry(
         st.loader = None;
         st.view_loading = false;
         if set_scale_now {
-            st.view_scale = Some((win_w / st.img.w).min(win_h / st.img.h));
+            st.view_scale = Some(region::Scale::uniform(
+                (win_w / st.img.w).min(win_h / st.img.h),
+            ));
         }
         attach_blur_bg(&mut st.blur_bg, &r.uploader(), blur.as_ref(), st.open_id);
     } else {
@@ -2000,7 +2117,9 @@ pub fn show_entry(
                 h: h.as_f32(),
             };
             if set_scale_now {
-                st.view_scale = Some((win_w / st.img.w).min(win_h / st.img.h));
+                st.view_scale = Some(region::Scale::uniform(
+                    (win_w / st.img.w).min(win_h / st.img.h),
+                ));
             }
         } else {
             // The dimensions arrive with the header or the texture.
@@ -2256,7 +2375,7 @@ mod tests {
             img: dim::SurfaceSize::new(1000.0, 500.0),
             win: dim::WindowSize::new(1000.0, 500.0),
             pan: dim::WindowVector::zero(),
-            scale: 1.0,
+            scale: region::Scale::uniform(1.0),
             angle: 0.0,
         };
         let kept = region::crop(10.0, 10.0, 100.0, 100.0);
@@ -2304,7 +2423,7 @@ mod tests {
             img: dim::SurfaceSize::new(1000.0, 500.0),
             win: dim::WindowSize::new(800.0, 600.0),
             pan: dim::WindowVector::new(100.0, 0.0),
-            scale: 0.5,
+            scale: region::Scale::uniform(0.5),
             angle: 0.0,
         };
         let drag = region_sel::Drag::new(
@@ -2459,6 +2578,7 @@ mod tests {
             pan: Vec2::ZERO,
             target_pan: Vec2::ZERO,
             view_scale: None,
+            viewport: None,
             zoom_anchor: None,
             angle: 0.0,
             pivot: None,
@@ -2502,6 +2622,85 @@ mod tests {
         false
     }
 
+    /// A stated viewport is the fit under every zoom mode, so `W`, `E` and `T`
+    /// keep the producer's framing instead of replacing it; a view that states
+    /// none answers the mode's own ratio.
+    #[test]
+    fn a_stated_viewport_is_the_fit_under_every_mode() {
+        let mut st = view_state();
+        st.img = Size { w: 200.0, h: 100.0 };
+        st.viewport = Some(region::crop(50.0, 20.0, 200.0, 120.0));
+        let win = Vec2::new(900.0, 600.0);
+        let boxed = region::Scale::axes(4.5, 5.0);
+        for zoom in [
+            ZoomMode::FitDown,
+            ZoomMode::FitAll,
+            ZoomMode::FitWidth,
+            ZoomMode::FitHeight,
+            ZoomMode::Fill,
+            ZoomMode::Free(region::Scale::uniform(2.0)),
+        ] {
+            st.zoom = zoom;
+            assert_eq!(
+                st.fit_scale(win),
+                boxed,
+                "the box is the fit under {zoom:?}"
+            );
+        }
+        // Without a box the modes answer their own ratio again, and a fit never
+        // upscales under `FitDown`.
+        let mut plain = view_state();
+        plain.img = Size { w: 200.0, h: 100.0 };
+        let small = Vec2::new(100.0, 100.0);
+        plain.zoom = ZoomMode::FitDown;
+        assert_eq!(plain.fit_scale(small), region::Scale::uniform(0.5));
+        plain.zoom = ZoomMode::FitWidth;
+        assert_eq!(plain.fit_scale(small), region::Scale::uniform(0.5));
+        plain.zoom = ZoomMode::Fill;
+        assert_eq!(plain.fit_scale(small), region::Scale::uniform(1.0));
+    }
+
+    /// A stated viewport fills the window with its own box on each axis, so the
+    /// box is the fit, a resize re-derives both ratios, and the pan moves off the
+    /// placement rather than carrying it.
+    #[test]
+    fn a_stated_viewport_fills_the_window_with_its_box() {
+        let mut st = view_state();
+        st.img = Size { w: 200.0, h: 100.0 };
+        // A box of 200 by 120: wider than tall in window terms, and not the
+        // plane's own shape.
+        st.viewport = Some(region::crop(50.0, 20.0, 200.0, 120.0));
+        let win = Vec2::new(900.0, 600.0);
+        let scale = st.viewport_scale(win).expect("a stated box is the fit");
+        assert_eq!(scale, region::Scale::axes(4.5, 5.0), "one ratio per axis");
+        let frame = st.frame_at(win, Vec2::ZERO, scale);
+        // The box corners land on the window corners, so the box is what the
+        // window shows.
+        for (boxed, window) in [((50.0, 20.0), (0.0, 0.0)), ((250.0, 140.0), (900.0, 600.0))] {
+            let at = frame.to_screen(dim::SurfacePoint::new(boxed.0, boxed.1));
+            assert!(
+                (at.x - window.0).abs() < 1e-3 && (at.y - window.1).abs() < 1e-3,
+                "the box corner {boxed:?} lands on {window:?}: {at:?}"
+            );
+        }
+        // A window of another shape re-derives both ratios and keeps the box.
+        let narrow = Vec2::new(450.0, 600.0);
+        let apart = st.viewport_scale(narrow).expect("the box is still the fit");
+        assert_eq!(apart, region::Scale::axes(2.25, 5.0));
+        let frame = st.frame_at(narrow, Vec2::ZERO, apart);
+        let corner = frame.to_screen(dim::SurfacePoint::new(50.0, 20.0));
+        assert!(corner.x.abs() < 1e-3 && corner.y.abs() < 1e-3);
+        // The user's pan moves the picture off the stated placement, because the
+        // placement is derived every frame rather than stored.
+        let moved = st.frame_at(narrow, Vec2::new(30.0, -10.0), apart);
+        let corner = moved.to_screen(dim::SurfacePoint::new(50.0, 20.0));
+        assert!((corner.x - 30.0).abs() < 1e-3 && (corner.y + 10.0).abs() < 1e-3);
+        // A view that states nothing keeps the uniform fit and places nothing.
+        let plain = view_state();
+        assert_eq!(plain.viewport_scale(win), None);
+        assert_eq!(plain.view_pan(region::Scale::uniform(2.0)), Vec2::ZERO);
+    }
+
     /// A document whose display list drew the frame before asks no worker for a
     /// region patch: the list is the picture, at any zoom and sharper than a
     /// patch, so the raster is only the fallback of a frame the list refuses.
@@ -2513,7 +2712,7 @@ mod tests {
     fn a_listed_document_paints_no_patch() {
         let mut st = view_state();
         st.img = Size { w: 100.0, h: 50.0 };
-        st.view_scale = Some(1.0);
+        st.view_scale = Some(region::Scale::uniform(1.0));
         st.source = Some(Arc::new(Listed));
         let win = Vec2::new(100.0, 50.0);
         assert!(

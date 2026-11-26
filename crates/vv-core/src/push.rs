@@ -12,6 +12,8 @@
 //! Neither type names a texture, a plane buffer or a window, so a caller builds
 //! one with no device.
 
+use crate::region::Scale;
+
 /// A picture the viewer opened from pushed content.
 ///
 /// The extent measures plane 0, in surface units (pixels for a raster or a
@@ -41,7 +43,11 @@ pub struct Status {
     /// The height of the open plane, in surface units, or 0 when nothing
     /// shows.
     pub height: f32,
-    /// The output pixels per surface unit, or None before the first frame
-    /// computes the fit.
-    pub scale: Option<f32>,
+    /// The output pixels per surface unit on each axis, or None before the
+    /// first frame computes the fit.
+    ///
+    /// Two factors, because a view that states the box its window shows fills
+    /// the window on each axis at its own ratio, and one number would name
+    /// neither axis of such a view.
+    pub scale: Option<Scale>,
 }

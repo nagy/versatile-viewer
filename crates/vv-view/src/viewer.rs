@@ -79,8 +79,8 @@ use crate::{
     view::{
         BACKGROUND, CropState, EASE_TIME, ListPass, Mode, NavKeys, OpenAlign, PAN_RATE, Prefetch,
         ROTATE_DRAG_SPAN, ROTATE_DRAG_SPEED, Ramps, SPREAD_EASE_TIME, ViewState, ZOOM_ANCHOR_DRIFT,
-        ZOOM_DRAG_SPAN, ZOOM_DRAG_SPEED, ZoomMode, aim_fill_pan, attach_blur_bg, draw_cell,
-        draw_list, draw_patch, draw_selection, draw_turned, keep_pivot, pan_drag_speed,
+        ZOOM_DRAG_SPAN, ZOOM_DRAG_SPEED, ZOOM_IN, ZOOM_OUT, ZoomMode, aim_fill_pan, attach_blur_bg,
+        draw_cell, draw_list, draw_patch, draw_selection, draw_turned, keep_pivot, pan_drag_speed,
         patch_covers, put_back_view, read_nav_mouse, same_plane, selection_rect, show_entry,
         view_filter,
     },
@@ -650,6 +650,7 @@ impl Viewer {
                 pan: Vec2::ZERO,
                 target_pan: Vec2::ZERO,
                 view_scale: None,
+                viewport: None,
                 zoom_anchor: None,
                 angle: 0.0,
                 pivot: None,
@@ -774,6 +775,11 @@ impl Viewer {
             self.planes = 1;
             self.st.adopt_source(None);
             self.st.scene = Some(scene.primitives);
+            // The box the producer's window shows is this view's fit: the plane
+            // is its extent and the two ratios come from that box alone, so the
+            // picture arrives framed the way the producer framed it and not
+            // merely whole.
+            self.st.viewport = scene.viewport;
             self.st.open_box = None;
             self.st.reset_view();
         } else if let Some(book) = source.take() {
@@ -1853,20 +1859,21 @@ impl Viewer {
                 && self.st.img.w > 0.0
                 && let Some(scale) = self.st.view_scale
             {
-                let center = Vec2::new(win_w / 2.0 + self.st.pan.x, win_h / 2.0 + self.st.pan.y);
+                let offset = self.st.offset(scale);
+                let center = Vec2::new(win_w / 2.0 + offset.x, win_h / 2.0 + offset.y);
                 // A turned image must hit-test its own outline, so the point
                 // goes back into the unrotated image space first.
                 let m = rotate::unrotate_point(m, center, self.st.angle);
-                let ox = (win_w - self.st.img.w * scale) / 2.0 + self.st.pan.x;
-                let oy = (win_h - self.st.img.h * scale) / 2.0 + self.st.pan.y;
+                let ox = (win_w - self.st.img.w * scale.x) / 2.0 + offset.x;
+                let oy = (win_h - self.st.img.h * scale.y) / 2.0 + offset.y;
                 let inside = m.x >= ox
-                    && m.x < ox + self.st.img.w * scale
+                    && m.x < ox + self.st.img.w * scale.x
                     && m.y >= oy
-                    && m.y < oy + self.st.img.h * scale;
+                    && m.y < oy + self.st.img.h * scale.y;
                 let filled = ox <= 0.0
                     && oy <= 0.0
-                    && ox + self.st.img.w * scale >= win_w
-                    && oy + self.st.img.h * scale >= win_h;
+                    && ox + self.st.img.w * scale.x >= win_w
+                    && oy + self.st.img.h * scale.y >= win_h;
                 if !inside {
                     f_open_grid = self.grid.is_some();
                 } else if filled {
@@ -1991,9 +1998,13 @@ impl Viewer {
                 // window center, clamped so the window never shows
                 // background.
                 // Zoom-out recentres.
+                // A stated viewport already fills the window on both axes, so
+                // there is nothing for the fill aim to reach: the box is the fit
+                // and aiming at the cursor would only jump the picture.
                 if self.st.zoom == ZoomMode::Fill
                     && self.st.img.w > 0.0
                     && self.st.view_scale.is_some()
+                    && self.st.viewport.is_none()
                 {
                     self.st.target_pan =
                         aim_fill_pan(&self.st, self.input.cursor_position(), win_w, win_h);
@@ -2007,24 +2018,9 @@ impl Viewer {
             // img_w/img_h).
             if self.st.img.w > 0.0 {
                 // Scale for the current mode (fit modes recompute every
-                // frame, so resizing stays correct).
-                // A fit measures the opening box when the surface names one:
-                // a book frames its first spread, so the cover page shows
-                // whole and whichever side binds decides.
-                let (fit_w, fit_h) = self
-                    .st
-                    .open_box
-                    .map_or((self.st.img.w, self.st.img.h), |boxed| (boxed.w, boxed.h));
-                let fit_scale = match self.st.zoom {
-                    ZoomMode::FitDown => (win_w / fit_w).min(win_h / fit_h).min(1.0),
-                    ZoomMode::FitAll => (win_w / fit_w).min(win_h / fit_h),
-                    ZoomMode::FitWidth => win_w / fit_w,
-                    ZoomMode::FitHeight => win_h / fit_h,
-                    // Cover: the larger ratio wins, so the image fills the
-                    // window and the code crops the other axis.
-                    // A free zoom keeps its scale as the fit base.
-                    ZoomMode::Fill | ZoomMode::Free(_) => (win_w / fit_w).max(win_h / fit_h),
-                };
+                // frame, so resizing stays correct). A box the document states
+                // is the fit for every mode (see `ViewState::fit_scale`).
+                let fit_scale = self.st.fit_scale(Vec2::new(win_w, win_h));
 
                 // Held keys feed the ramps.
                 // The ramps make a hold ease in to cruise speed and a release
@@ -2120,7 +2116,11 @@ impl Viewer {
                         let span = win_w.max(win_h) * ZOOM_DRAG_SPAN;
                         let r = (-delta.y * ZOOM_DRAG_SPEED / span).exp();
                         let base = self.st.zoom.free_or(fit_scale);
-                        self.st.zoom = ZoomMode::Free((base * r).clamp(0.01, 100.0));
+                        // The band is relative to the fit, so a document whose
+                        // units make a fit of a thousandth of a pixel still
+                        // steps one factor rather than snapping to a floor.
+                        self.st.zoom =
+                            ZoomMode::Free(base.scaled(r).within(fit_scale, ZOOM_OUT, ZOOM_IN));
                     }
                 }
                 // A held `r` turns the vertical mouse travel into the image
@@ -2154,7 +2154,8 @@ impl Viewer {
                 let zoom_step = motion.zoom;
                 if let Some(factor) = zoom_step {
                     let base = self.st.zoom.free_or(fit_scale);
-                    self.st.zoom = ZoomMode::Free((base * factor).clamp(0.01, 100.0));
+                    self.st.zoom =
+                        ZoomMode::Free(base.scaled(factor).within(fit_scale, ZOOM_OUT, ZOOM_IN));
                     // Keyboard zoom centers on the picture, not the cursor.
                     // None falls back to the window center anchor.
                     self.st.zoom_anchor = None;
@@ -2174,14 +2175,7 @@ impl Viewer {
                     None => target_scale,
                     Some(_) if resized => target_scale,
                     Some(_) if zoom_step.is_some() => target_scale,
-                    Some(s) => {
-                        let s = s + (target_scale - s) * alpha;
-                        if (target_scale - s).abs() < target_scale * 0.001 {
-                            target_scale
-                        } else {
-                            s
-                        }
-                    }
+                    Some(s) => s.eased(target_scale, alpha),
                 });
 
                 // A discrete zoom step (the wheel) replaces the target that
@@ -2191,7 +2185,11 @@ impl Viewer {
                 let wheel = self.input.wheel_move();
                 if wheel != 0.0 {
                     let factor = 1.25f32.powf(wheel);
-                    self.st.zoom = ZoomMode::Free((target_scale * factor).clamp(0.01, 100.0));
+                    self.st.zoom = ZoomMode::Free(
+                        target_scale
+                            .scaled(factor)
+                            .within(fit_scale, ZOOM_OUT, ZOOM_IN),
+                    );
                     self.st.zoom_anchor = Some(self.input.cursor_position());
                 }
                 // Left-drag pans: the image follows the cursor (grab-style).
@@ -2292,8 +2290,9 @@ impl Viewer {
                 let scale = self.st.view_scale.unwrap();
                 if matches!(self.st.zoom, ZoomMode::Free(_))
                     && let Some(s_old) = prev_scale
-                    && (scale - s_old).abs() > f32::EPSILON
-                    && s_old > 0.0
+                    && ((scale.x - s_old.x).abs() > f32::EPSILON
+                        || (scale.y - s_old.y).abs() > f32::EPSILON)
+                    && s_old.is_drawable()
                 {
                     let center = Vec2 {
                         x: win_w / 2.0,
@@ -2303,11 +2302,12 @@ impl Viewer {
                     let a = anchor.unwrap_or(center);
                     let (ax, ay) = (a.x, a.y);
                     let keyboard_zoom = anchor.is_none();
-                    let r = scale / s_old;
-                    let ox = ax - (ax - (win_w - self.st.img.w * s_old) / 2.0 - self.st.pan.x) * r;
-                    let oy = ay - (ay - (win_h - self.st.img.h * s_old) / 2.0 - self.st.pan.y) * r;
-                    let new_x = ox - (win_w - self.st.img.w * scale) / 2.0;
-                    let new_y = oy - (win_h - self.st.img.h * scale) / 2.0;
+                    // The offset that holds the anchored surface point still,
+                    // solved per axis (see `region::Frame::anchored`).
+                    let held = self
+                        .st
+                        .frame_at(Vec2::new(win_w, win_h), self.st.pan, s_old)
+                        .anchored(scale, dim::WindowPoint::new(ax, ay));
                     // A held key zoom skips the drift: it centers anyway.
                     // So does an anchor that already sits at the window
                     // center: the drift can only move it away from there.
@@ -2324,8 +2324,11 @@ impl Viewer {
                     // Move the pan and its target by the same amount.
                     // The anchor then holds without discarding the offset a
                     // held pan key added this frame.
-                    let dx = new_x + d.x - self.st.pan.x;
-                    let dy = new_y + d.y - self.st.pan.y;
+                    // A stated viewport places itself at every scale, so the
+                    // user's pan takes only what that placement leaves.
+                    let placed = self.st.view_pan(scale);
+                    let dx = held.x + d.x - placed.x - self.st.pan.x;
+                    let dy = held.y + d.y - placed.y - self.st.pan.y;
                     self.st.pan.x += dx;
                     self.st.pan.y += dy;
                     self.st.target_pan.x += dx;
@@ -2570,7 +2573,7 @@ impl Viewer {
                         r,
                         texture,
                         self.st.img,
-                        self.st.view_scale.unwrap(),
+                        self.st.view_scale.unwrap().coarsest(),
                         center,
                         self.st.angle,
                         view_filter(self.st.pixelated),
@@ -2690,14 +2693,14 @@ mod tests {
     fn a_broken_scene_file_fails_the_launch() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let path = dir.path().join("scene.json");
-        let later = r#"{ "version": 2, "plane": { "width": 1.0, "height": 1.0 },
+        let later = r#"{ "version": 3, "plane": { "width": 1.0, "height": 1.0 },
                         "primitives": [] }"#;
         std::fs::write(&path, later).expect("the document writes");
         let err = Launch::scene(&path, false)
             .err()
-            .expect("version 2 is not read here");
+            .expect("version 3 is not read here");
         let said = err.to_string();
-        assert!(said.contains("version 2"), "{said}");
+        assert!(said.contains("version 3"), "{said}");
         assert!(said.contains("scene.json"), "{said}");
         // A file that is not there fails the same way, before a window exists.
         let missing = dir.path().join("nope.json");

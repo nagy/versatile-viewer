@@ -51,7 +51,9 @@ vocabulary is a value type and lives in `vv-core`; a *file format* is a source
 concern and lives in the layer that opens files. `vv-core` gained no
 `serde_json`, and it stays a layer that reads nothing.
 
-**One version field, read on its own.** `VERSION` is 1. The header is parsed
+**One version field, read on its own.** `VERSION` is 1 when this route landed
+and 2 once a document could state its viewport (`docs/adr/0009`); `OLDEST` names
+the oldest version the reader still opens. The header is parsed
 first, from the same bytes, so a document that states another number is refused
 by version and not by whichever field this tree happens to reach first: a
 producer that moved ahead reads why its document did not open, and no list is
@@ -124,12 +126,10 @@ This record is that state, reached through a file instead of a socket.
   producer that emits text will hit first. A run whose bytes or face index name
   no face is dropped by the pass with a `warn!` rather than taking the process
   down, because vello parses the same bytes with an `unwrap`.
-- The viewport is not in the document, and the fit is uniform. A producer whose
-  viewport scales its two axes differently states a picture here that is whole
-  and uniformly scaled rather than the frame it would emit, because
-  `region::Frame` carries one `scale: f32`. The per-axis transform is its own
-  decision — a `Frame` of four numbers, a per-primitive affine, or an affine
-  handed to the scene pass — and this record does not take it.
+- The fit is uniform for a document that states no viewport, because
+  `region::Frame` answers one factor on both axes. A producer whose two axes
+  scale differently states the box its window shows, and `docs/adr/0009` records
+  that decision and the per-axis scale it rests on.
 - `list_drawn` follows a pass refusal down to nothing rather than to a raster, so
   a heavy scene on a deep zoom shows the background for the refused frames. A
   policy for a list source with no raster of its own — keep the last encode and

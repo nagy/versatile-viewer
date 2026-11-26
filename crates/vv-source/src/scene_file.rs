@@ -1,8 +1,8 @@
 //! A scene document that a producer outside this process wrote.
 //!
-//! `vv --scene <file>` reads one: a version, the plane extent and the display
-//! list, so a program that owns the layout of a picture hands over the shapes
-//! and this viewer draws them at any zoom.
+//! `vv --scene <file>` reads one: a version, the plane extent, the optional box
+//! the window shows and the display list, so a program that owns the layout of a
+//! picture hands over the shapes and this viewer draws them at any zoom.
 //! The list is the picture and there is no raster behind it, so a scene
 //! document is not a [`Surface`](crate::surface::Surface): the two entrances
 //! here answer a plane and a list, and nothing in this module can rasterize.
@@ -11,8 +11,9 @@
 //!
 //! ```json
 //! {
-//!   "version": 1,
+//!   "version": 2,
 //!   "plane": { "width": 800.0, "height": 480.0 },
+//!   "viewport": { "x0": 100.0, "y0": 40.0, "x1": 300.0, "y1": 160.0 },
 //!   "primitives": [{ "Rect": { "rect": { "x0": 0.0, "y0": 0.0, "x1": 8.0, "y1": 3.0 },
 //!                              "paint": { "Solid": { "r": 1, "g": 2, "b": 3, "a": 255 } } } }]
 //! }
@@ -24,6 +25,18 @@
 //! `version` is the one guard on the shape of the document, and it is read on
 //! its own before the rest: a producer that writes another number is refused by
 //! name, so it reads why, and a scene this viewer cannot read never half-paints.
+//!
+//! # The viewport
+//!
+//! A document may name the box of its plane the window shows, and then the
+//! window shows exactly that box: each axis takes the ratio of the window to the
+//! box, so a producer whose two axes scale differently states it here and the
+//! picture is right and not merely whole.
+//! A document that states no viewport frames the whole plane, one factor on both
+//! axes, which is what a picture does.
+//! The box is in the plane's own units and says nothing about window pixels, so
+//! a resize re-derives both ratios and the view keeps showing the box the
+//! producer named.
 //!
 //! # What a document cannot state
 //!
@@ -40,28 +53,66 @@ use std::sync::Arc;
 use derive_more::{Display, Error, From};
 use serde::{Deserialize, Serialize};
 
-use crate::{scene::Primitive, surface::Size};
+use crate::{
+    region::{self, Crop},
+    scene::Primitive,
+    surface::Size,
+};
 
-/// The one document version this tree reads.
+/// The document version this tree writes and reads.
 ///
 /// A producer that moves to another shape bumps this, and an older viewer
 /// refuses the document by name instead of reading the fields it recognizes.
-pub const VERSION: u32 = 1;
+/// Version 2 added the viewport, so a producer that states one writes 2 and a
+/// version 1 viewer refuses it by version rather than by an unknown field.
+pub const VERSION: u32 = 2;
+
+/// The oldest document version this tree still reads.
+///
+/// Version 1 is a version 2 document without a viewport: every other field
+/// means what it meant, so a document written before the viewport existed still
+/// paints.
+pub const OLDEST: u32 = 1;
 
 /// One scene document as a producer states it.
 ///
 /// The extent is the plane the list was written for, in the producer's own
 /// units: the list is in those units and carries no scale, so the viewer frames
-/// the whole extent and a zoom is a change of the transform alone.
+/// the extent — or the box the document states inside it — and a zoom is a
+/// change of the transform alone.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SceneDoc {
-    /// The document version, which must be [`VERSION`].
+    /// The document version, which must be [`OLDEST`] to [`VERSION`].
     pub version: u32,
     /// The plane the list describes.
     pub plane: Extent,
+    /// The box of the plane the window shows, or none for the whole plane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewport: Option<Viewport>,
     /// The primitives, in paint order.
     pub primitives: Vec<Primitive>,
+}
+
+/// The box of the plane a window shows, in the plane's own units.
+///
+/// The box fills the window, so the two axes take their own ratio: a document
+/// whose axes are independent (a plot with a price axis and a time axis) states
+/// the range of each and the viewer maps each range onto the window's own span.
+/// The box needs no relation to the plane's bounds: a producer may show the
+/// empty space past the end of its data, and the viewer paints the background
+/// there.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Viewport {
+    /// The left edge of the box, in surface units.
+    pub x0: f32,
+    /// The top edge of the box, in surface units.
+    pub y0: f32,
+    /// The right edge of the box, in surface units.
+    pub x1: f32,
+    /// The bottom edge of the box, in surface units.
+    pub y1: f32,
 }
 
 /// The one field a document is checked on before the rest of it is read.
@@ -73,7 +124,7 @@ pub struct SceneDoc {
 /// would allocate a list it is about to drop.
 #[derive(Debug, Deserialize)]
 struct Header {
-    /// The document version, which must be [`VERSION`].
+    /// The document version, which must be [`OLDEST`] to [`VERSION`].
     version: u32,
 }
 
@@ -92,6 +143,8 @@ pub struct Extent {
 pub struct Scene {
     /// The plane extent, in surface units.
     pub plane: Size,
+    /// The box of the plane a window shows, in surface units.
+    pub viewport: Option<Crop>,
     /// The primitives, in paint order.
     pub primitives: Arc<[Primitive]>,
 }
@@ -106,12 +159,26 @@ pub enum SceneError {
     #[display("scene document: {_0}")]
     Parse(#[from] serde_json::Error),
     /// The document states a version this tree does not read.
-    #[display("scene document version {found}, and this tree reads {wanted}")]
+    #[display("scene document version {found}, and this tree reads {oldest} to {newest}")]
     Version {
         /// The version the document states.
         found: u32,
-        /// The version this tree reads.
-        wanted: u32,
+        /// The oldest version this tree reads.
+        oldest: u32,
+        /// The newest version this tree reads.
+        newest: u32,
+    },
+    /// The viewport is not a box this viewer can frame.
+    #[display("scene viewport {x0},{y0} to {x1},{y1} is not a positive box")]
+    Viewport {
+        /// The left edge the document states.
+        x0: f32,
+        /// The top edge the document states.
+        y0: f32,
+        /// The right edge the document states.
+        x1: f32,
+        /// The bottom edge the document states.
+        y1: f32,
     },
     /// The extent is not a plane this viewer can frame.
     #[display("scene plane {width}x{height} is not a positive extent")]
@@ -129,17 +196,19 @@ impl Scene {
     /// # Errors
     ///
     /// Returns [`SceneError::Parse`] when the bytes are not a document of this
-    /// shape, [`SceneError::Version`] when they state another version, and
-    /// [`SceneError::Plane`] when the extent it names cannot be framed.
+    /// shape, [`SceneError::Version`] when they state another version,
+    /// [`SceneError::Plane`] when the extent it names cannot be framed, and
+    /// [`SceneError::Viewport`] when the box it names cannot be.
     pub fn from_bytes(data: &[u8]) -> Result<Self, SceneError> {
         // The version first, on its own: a document of another shape is refused
         // by version and not by whichever field this tree happens to read
         // before it.
         let header: Header = serde_json::from_slice(data)?;
-        if header.version != VERSION {
+        if !(OLDEST..=VERSION).contains(&header.version) {
             return Err(SceneError::Version {
                 found: header.version,
-                wanted: VERSION,
+                oldest: OLDEST,
+                newest: VERSION,
             });
         }
         let doc: SceneDoc = serde_json::from_slice(data)?;
@@ -156,8 +225,31 @@ impl Scene {
                 height: plane.h,
             });
         }
+        // A box of no width, of no height or of no number gives the fit a ratio
+        // it cannot compute, so the document is refused before a window opens
+        // over it rather than after a blank frame.
+        // The extents are checked and not only the edges: two corners far enough
+        // apart overflow to an infinity, and a box of infinite width fits at
+        // zero and paints nothing.
+        let viewport = match doc.viewport {
+            Some(view) => {
+                let (w, h) = (view.x1 - view.x0, view.y1 - view.y0);
+                let boxed = w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0;
+                if !boxed {
+                    return Err(SceneError::Viewport {
+                        x0: view.x0,
+                        y0: view.y0,
+                        x1: view.x1,
+                        y1: view.y1,
+                    });
+                }
+                Some(region::crop(view.x0, view.y0, w, h))
+            }
+            None => None,
+        };
         Ok(Self {
             plane,
+            viewport,
             primitives: Arc::from(doc.primitives),
         })
     }
@@ -259,11 +351,11 @@ mod tests {
     /// moved first never half-paints.
     #[test]
     fn another_version_is_refused_by_name() {
-        let doc = DOC.replace("\"version\": 1", "\"version\": 2");
-        let err = Scene::from_bytes(doc.as_bytes()).expect_err("version 2 is not read here");
+        let doc = DOC.replace("\"version\": 1", "\"version\": 3");
+        let err = Scene::from_bytes(doc.as_bytes()).expect_err("version 3 is not read here");
         assert_eq!(
             err.to_string(),
-            format!("scene document version 2, and this tree reads {VERSION}")
+            format!("scene document version 3, and this tree reads {OLDEST} to {VERSION}")
         );
     }
 
@@ -271,13 +363,58 @@ mod tests {
     /// reads why, and not whichever field this tree stopped at.
     #[test]
     fn another_version_is_refused_before_the_shape_is_read() {
-        let doc = r#"{ "version": 2, "plane": { "width": 1.0, "height": 1.0 },
+        let doc = r#"{ "version": 3, "plane": { "width": 1.0, "height": 1.0 },
                        "primitives": [ { "FancyShape": { "nothing": true } } ] }"#;
-        let err = Scene::from_bytes(doc.as_bytes()).expect_err("version 2 is not read here");
+        let err = Scene::from_bytes(doc.as_bytes()).expect_err("version 3 is not read here");
         assert!(
-            err.to_string().contains("version 2"),
+            err.to_string().contains("version 3"),
             "the answer names the version: {err}"
         );
+    }
+
+    /// A document that states the box its window shows reads as that box, and a
+    /// document that states none frames the whole plane.
+    #[test]
+    fn a_viewport_names_the_box_the_window_shows() {
+        let doc = r#"{ "version": 2, "plane": { "width": 800.0, "height": 480.0 },
+                       "viewport": { "x0": 100.0, "y0": 40.0, "x1": 300.0, "y1": 160.0 },
+                       "primitives": [] }"#;
+        let scene = Scene::from_bytes(doc.as_bytes()).expect("the box reads");
+        assert_eq!(
+            scene.viewport,
+            Some(region::crop(100.0, 40.0, 200.0, 120.0)),
+            "the box reads as the crop the view fits"
+        );
+        // A version 1 document states no viewport at all, and that is the
+        // whole plane.
+        let old = Scene::from_bytes(DOC.as_bytes()).expect("a version 1 document reads");
+        assert_eq!(old.viewport, None);
+    }
+
+    /// A box with no width, no height or no number is refused before a window
+    /// opens over it: the fit has no ratio to compute.
+    #[test]
+    fn a_viewport_of_no_extent_is_refused() {
+        let doc = r#"{ "version": 2, "plane": { "width": 8.0, "height": 4.0 },
+                       "viewport": { "x0": 2.0, "y0": 1.0, "x1": 2.0, "y1": 3.0 },
+                       "primitives": [] }"#;
+        let err = Scene::from_bytes(doc.as_bytes()).expect_err("a flat box frames nothing");
+        assert!(
+            err.to_string().contains("not a positive box"),
+            "the answer names the box: {err}"
+        );
+        let wide = doc.replace("\"x1\": 2.0", "\"x1\": 9.0");
+        assert!(
+            Scene::from_bytes(wide.as_bytes()).is_ok(),
+            "a box wider than the plane still frames"
+        );
+        // Two corners far enough apart overflow to an infinity, and a box of
+        // infinite width would fit at zero and paint nothing.
+        let huge = doc
+            .replace("\"x0\": 2.0", "\"x0\": -3.0e38")
+            .replace("\"x1\": 2.0", "\"x1\": 3.0e38");
+        let err = Scene::from_bytes(huge.as_bytes()).expect_err("an infinite box frames nothing");
+        assert!(err.to_string().contains("not a positive box"), "{err}");
     }
 
     /// A picture leaf stays off the wire: a document that states one is refused
@@ -380,12 +517,18 @@ mod tests {
                 width: 12.0,
                 height: 6.0,
             },
+            viewport: None,
             primitives: vec![Primitive::PushLayer { alpha: 0.25 }],
         };
         let text = serde_json::to_string(&doc).expect("a document writes");
+        assert!(
+            !text.contains("viewport"),
+            "a document that states no box writes none: {text}"
+        );
         let scene = Scene::from_bytes(text.as_bytes()).expect("and reads back");
         assert_eq!(scene.primitives, Arc::from(doc.primitives));
         assert_eq!(scene.plane, Size { w: 12.0, h: 6.0 });
+        assert_eq!(scene.viewport, None);
     }
 
     /// The stroke style's own serde is kurbo's, so a field this tree never

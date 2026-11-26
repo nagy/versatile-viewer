@@ -705,7 +705,7 @@ fn a_listed_pdf_page_lands_on_its_plane() {
         win: WindowSize::new(200.0, 200.0),
         pan: WindowVector::zero(),
         // A page of 64 points fills the window at this scale.
-        scale: 200.0 / plane.w,
+        scale: vv_core::region::Scale::uniform(200.0 / plane.w),
         angle: 0.0,
     };
     let mut pass = canvas
@@ -787,7 +787,7 @@ fn a_nested_document_lands_in_its_box() {
         img: SurfaceSize::new(plane, plane),
         win: WindowSize::new(200.0, 200.0),
         pan: WindowVector::zero(),
-        scale: 200.0 / plane,
+        scale: vv_core::region::Scale::uniform(200.0 / plane),
         angle: 0.0,
     };
     let mut pass = canvas
@@ -840,7 +840,7 @@ fn a_display_list_paints_its_rects_and_its_pictures() {
         img: SurfaceSize::new(win_w, win_h),
         win: WindowSize::new(win_w, win_h),
         pan: WindowVector::zero(),
-        scale: 1.0,
+        scale: vv_core::region::Scale::uniform(1.0),
         angle: 0.0,
     };
     let blue = [0, 0, 255, 255];
@@ -901,7 +901,7 @@ fn a_zoomed_list_follows_its_frame() {
         img: SurfaceSize::new(200.0, 200.0),
         win: WindowSize::new(200.0, 200.0),
         pan: WindowVector::zero(),
-        scale,
+        scale: vv_core::region::Scale::uniform(scale),
         angle: 0.0,
     };
     let list: Arc<[Primitive]> = Arc::from(vec![Primitive::Rect {
@@ -985,7 +985,7 @@ fn a_listed_opacity_layer_blends_its_content() {
         img: SurfaceSize::new(200.0, 200.0),
         win: WindowSize::new(200.0, 200.0),
         pan: WindowVector::zero(),
-        scale,
+        scale: vv_core::region::Scale::uniform(scale),
         angle: 0.0,
     };
     let list: Arc<[Primitive]> = Arc::from(vec![
@@ -1058,7 +1058,7 @@ fn a_resized_window_places_the_paint_it_has() {
         img: SurfaceSize::new(200.0, 100.0),
         win: WindowSize::new(win.0, win.1),
         pan: WindowVector::zero(),
-        scale: (win.0 / 200.0).min(win.1 / 100.0),
+        scale: vv_core::region::Scale::uniform((win.0 / 200.0).min(win.1 / 100.0)),
         angle: 0.0,
     };
 
@@ -1401,7 +1401,7 @@ fn a_listed_svg_lands_where_its_plane_does() {
         img: SurfaceSize::new(plane, plane),
         win: WindowSize::new(200.0, 200.0),
         pan: WindowVector::zero(),
-        scale: 200.0 / plane,
+        scale: vv_core::region::Scale::uniform(200.0 / plane),
         angle: 0.0,
     };
     let mut pass = canvas
@@ -1616,6 +1616,71 @@ fn a_scene_file_paints_its_list() {
     );
 }
 
+/// A document that states the box its window shows fills the window with that
+/// box, so a producer whose two axes scale differently lands its own picture and
+/// not a whole-but-squashed plane.
+///
+/// The box is 100 by 50 in a 1024 by 768 window, so the two axes take 10.24 and
+/// 15.36 pixels per unit: a uniform fit would show the whole 200 by 100 plane in
+/// the middle of the window instead, and the two rects beside the box would
+/// show.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_scene_viewport_fills_the_window_on_each_axis() {
+    let document = r#"{
+      "version": 2,
+      "plane": { "width": 200.0, "height": 100.0 },
+      "viewport": { "x0": 50.0, "y0": 20.0, "x1": 150.0, "y1": 70.0 },
+      "primitives": [
+        { "Rect": { "rect": { "x0": 0.0, "y0": 0.0, "x1": 50.0, "y1": 70.0 },
+                    "paint": { "Solid": { "r": 0, "g": 255, "b": 0, "a": 255 } } } },
+        { "Rect": { "rect": { "x0": 150.0, "y0": 70.0, "x1": 200.0, "y1": 100.0 },
+                    "paint": { "Solid": { "r": 0, "g": 0, "b": 255, "a": 255 } } } },
+        { "Rect": { "rect": { "x0": 50.0, "y0": 20.0, "x1": 150.0, "y1": 70.0 },
+                    "paint": { "Solid": { "r": 255, "g": 0, "b": 0, "a": 255 } } } }
+      ]
+    }"#;
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("scene.json");
+    std::fs::write(&path, document).expect("write the scene");
+    let launch = vv_view::viewer::Launch::scene(&path, false).expect("the scene opens");
+    let (win_w, win_h) = launch.window_size();
+    let canvas = canvas!(win_w, win_h);
+    let mut viewer = vv_view::viewer::Viewer::new(
+        canvas.device.clone(),
+        canvas.queue.clone(),
+        FORMAT,
+        canvas.device.limits().max_texture_dimension_2d,
+        launch,
+        canvas.size,
+    );
+    let mut host = NullHost;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let listed = loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the display-list pass lands"
+        );
+        let pixels = shot_frame_read(&canvas, &mut viewer, &mut host);
+        if viewer.listed() {
+            break pixels;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(4));
+    };
+    // The box covers the window corner to corner, so every sampled point of the
+    // window is the red rect that covers it, and the two rects outside the box
+    // paint nothing at all.
+    let (w, h) = (win_w as usize, win_h as usize);
+    let corners = [(2, 2), (w - 2, 2), (2, h - 2), (w - 2, h - 2)];
+    for (x, y) in corners {
+        assert_eq!(
+            listed.at(x, y),
+            [255, 0, 0, 255],
+            "the stated box reaches the window corner at {x},{y}"
+        );
+    }
+}
+
 /// A glyph run whose bytes name no face is dropped, and the frame still paints.
 ///
 /// A run carries the producer's own bytes, so the face is the one field this
@@ -1639,7 +1704,7 @@ fn a_glyph_run_that_names_no_face_paints_nothing() {
         img: SurfaceSize::new(win_w, win_h),
         win: WindowSize::new(win_w, win_h),
         pan: WindowVector::zero(),
-        scale: 1.0,
+        scale: vv_core::region::Scale::uniform(1.0),
         angle: 0.0,
     };
     // Two runs a document can state: bytes that are not a font at all, and a
@@ -1694,6 +1759,18 @@ fn a_glyph_run_that_names_no_face_paints_nothing() {
     );
 }
 
+/// A 4 by 4 BMP of one color, which the push above decodes into a texture.
+///
+/// A raster keeps [`Viewer::listed`] quiet, so the test reads the claim it
+/// makes — the list the launch installed is gone — and never the list a pushed
+/// document would answer with one of its own.
+const RED_BMP: [u8; 102] = [
+    66, 77, 102, 0, 0, 0, 0, 0, 0, 0, 54, 0, 0, 0, 40, 0, 0, 0, 4, 0, 0, 0, 4, 0, 0, 0, 1, 0, 24,
+    0, 0, 0, 0, 0, 48, 0, 0, 0, 19, 11, 0, 0, 19, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0,
+    0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255,
+    0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255,
+];
+
 /// A pushed picture replaces a scene list.
 ///
 /// A run may carry `--scene` and `--mcp` at once, and a push is where the two
@@ -1732,11 +1809,13 @@ fn a_pushed_picture_replaces_a_scene_list() {
         std::thread::sleep(std::time::Duration::from_millis(4));
     }
 
-    // A push of an SVG document, over the scene the launch opened.
-    let square = r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="#ff0000"/></svg>"##;
+    // A push of a picture over the scene the launch opened.
+    // The payload is a raster on purpose: a pushed document answers a list of
+    // its own, and then [`Viewer::listed`] reports *that* list a frame later and
+    // the assertion below would test the wrong thing.
     let (reply, answers) = std::sync::mpsc::channel();
     viewer.accept(vv_view::push::Push::Bytes {
-        data: square.as_bytes().to_vec(),
+        data: RED_BMP.to_vec(),
         reply,
     });
     answers
@@ -1928,7 +2007,7 @@ fn a_listed_book_places_its_pages() {
         img: SurfaceSize::new(plane.w, plane.h),
         win: WindowSize::new(256.0, 256.0),
         pan: WindowVector::zero(),
-        scale: (256.0 / plane.w).min(256.0 / plane.h),
+        scale: vv_core::region::Scale::uniform((256.0 / plane.w).min(256.0 / plane.h)),
         angle: 0.0,
     };
     let mut pass = canvas
@@ -2010,7 +2089,7 @@ fn a_listed_book_places_its_pages_below_one_base_unit() {
         img: SurfaceSize::new(plane.w, plane.h),
         win: WindowSize::new(win_w, win_h),
         pan: WindowVector::zero(),
-        scale: (win_w / plane.w).min(win_h / plane.h),
+        scale: vv_core::region::Scale::uniform((win_w / plane.w).min(win_h / plane.h)),
         angle: 0.0,
     };
     let mut pass = canvas
@@ -2141,7 +2220,7 @@ fn paint_list_flat(
         img: SurfaceSize::new(canvas.size.0 as f32, canvas.size.1 as f32),
         win: WindowSize::new(canvas.size.0 as f32, canvas.size.1 as f32),
         pan: WindowVector::zero(),
-        scale: 1.0,
+        scale: vv_core::region::Scale::uniform(1.0),
         angle: 0.0,
     };
     paint_list_at(canvas, list, frame)
@@ -2544,7 +2623,7 @@ fn a_frame_past_the_flatten_limit_is_refused() {
         img: SurfaceSize::new(plane.w, plane.h),
         win: WindowSize::new(256.0, 256.0),
         pan: WindowVector::zero(),
-        scale,
+        scale: vv_core::region::Scale::uniform(scale),
         angle: 0.0,
     };
 
@@ -2638,7 +2717,7 @@ fn a_zoomed_book_paints_the_page_it_shows() {
             ((f64::from(plane.w) / 2.0 - center_x) * f64::from(scale)) as f32,
             ((f64::from(plane.h) / 2.0 - center_y) * f64::from(scale)) as f32,
         ),
-        scale,
+        scale: vv_core::region::Scale::uniform(scale),
         angle: 0.0,
     };
     let mut canvas = canvas!(256, 256);
@@ -2822,7 +2901,7 @@ fn the_region_veil_dims_only_outside_the_selection() {
             img: dim::SurfaceSize::new(64.0, 64.0),
             win: dim::WindowSize::new(64.0, 64.0),
             pan: dim::WindowVector::zero(),
-            scale: 1.0,
+            scale: vv_core::region::Scale::uniform(1.0),
             angle,
         };
         canvas.begin(Color::BLACK);
@@ -3522,7 +3601,7 @@ fn a_zoom_back_in_answers_the_list_again() {
             0.0,
             -((page as f64 * PAGE_HEIGHT + PAGE_HEIGHT / 2.0) as f32 - plane.height / 2.0) * scale,
         ),
-        scale,
+        scale: vv_core::region::Scale::uniform(scale),
         angle: 0.0,
     };
     let whole = page(0, 256.0 / plane.height);

@@ -151,8 +151,9 @@ primitives in paint order:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "plane": { "width": 800.0, "height": 480.0 },
+  "viewport": { "x0": 100.0, "y0": 40.0, "x1": 500.0, "y1": 280.0 },
   "primitives": [
     { "Rect": { "rect": { "x0": 0.0, "y0": 0.0, "x1": 400.0, "y1": 480.0 },
                 "paint": { "Solid": { "r": 200, "g": 40, "b": 40, "a": 255 } } } }
@@ -175,10 +176,24 @@ rather than an error, so a producer that multiplies its units by a stray factor
 sees a blank window and not a wrong picture.
 
 The extent is in the units the list is written in, not in pixels, so the window
-keeps its default size and the fit frames the whole plane. There is no raster
-behind the list: a zoom re-places the one encoded list, and a frame the display
-pass refuses shows the window background rather than a fallback picture.
-`docs/adr/0008` records the decision.
+keeps its default size. There is no raster behind the list: a zoom re-places the
+one encoded list, and a frame the display pass refuses shows the window
+background rather than a fallback picture.
+
+`viewport` names the box of the plane the window shows, and the window shows
+exactly that box: each axis takes its own ratio of the window to the box, so a
+producer whose two axes scale differently (a plot with a time axis and a price
+axis) states the range of each and the picture is right rather than merely
+whole. The box is in the plane's own units, so a resize re-derives both ratios
+and never needs a new document. A document that leaves the field out frames the
+whole plane on both axes, which is what a picture does. Only the scene layer
+takes the viewport, so the pan, the wheel and the `+`/`-` keys still work and
+move off the stated view.
+
+`version` 2 added the viewport. A version 1 document still reads and means the
+same thing, and a viewer older than the field refuses a version 2 document by
+version instead of by an unknown field.
+`docs/adr/0008` records the document, and `docs/adr/0009` the per-axis viewport.
 
 ## MCP
 
@@ -204,7 +219,7 @@ fields, and `server/discover` replaces the handshake.
 | `vv_show_image_bytes` | `data_base64` | plane count and the size of plane 0 |
 | `vv_show_image` | `path` | plane count and the size of plane 0 |
 | `vv_clear` | none | the blank status |
-| `vv_get_status` | none | mode, plane count, source label, plane size, scale |
+| `vv_get_status` | none | mode, plane count, source label, plane size, scale on each axis |
 
 `vv_show_image_bytes` decides the format from the bytes, so the call carries
 no file name or extension. A JPEG XL image, a PNG, an SVG document and a PDF

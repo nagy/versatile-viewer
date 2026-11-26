@@ -14,25 +14,29 @@
 //! that already exists, and [`QUIET`] debounces the request past the ease.
 //!
 //! The mapping mirrors the draw: the image center sits at the window middle
-//! plus the pan, and the image turns clockwise around that point.
+//! plus the pan, the image scales by one factor per axis, and it turns
+//! clockwise around that point.
 //! [`Frame::to_screen`] and [`Frame::to_image`] are inverses, and `proptest`
 //! holds that.
-//! One [`Frame`] carries the five numbers that mapping needs, so no function
+//! One [`Frame`] carries the six numbers that mapping needs, so no function
 //! takes them loose and no call site swaps the scale for the angle.
+//! [`Scale`] carries the two factors, because a view that shows a stated box
+//! fills the window on both axes at once and a picture that fits keeps them
+//! equal.
 //!
 //! # Examples
 //!
 //! ```
 //! use vv_core::{
 //!     dim::{SurfaceSize, WindowSize, WindowVector},
-//!     region,
+//!     region::{self, Scale},
 //! };
 //!
 //! let frame = |scale| region::Frame {
 //!     img: SurfaceSize::new(1024.0, 512.0),
 //!     win: WindowSize::new(800.0, 600.0),
 //!     pan: WindowVector::zero(),
-//!     scale,
+//!     scale: Scale::uniform(scale),
 //!     angle: 0.0,
 //! };
 //! // The whole document fits the window at this scale, so the crop covers it
@@ -43,6 +47,15 @@
 //! let zoomed = frame(4.0).crop(0.0);
 //! assert!((zoomed.width() - 200.0).abs() < 1e-3);
 //! assert!((zoomed.height() - 150.0).abs() < 1e-3);
+//! // The two axes are independent, so a view that states one factor per axis
+//! // shows a box of the plane that is not the plane's own shape.
+//! let axes = |scale| region::Frame {
+//!     scale,
+//!     ..frame(0.5)
+//! };
+//! let squashed = axes(Scale::axes(1.0, 4.0)).crop(0.0);
+//! assert!((squashed.width() - 800.0).abs() < 1e-3);
+//! assert!((squashed.height() - 150.0).abs() < 1e-3);
 //! ```
 
 use std::time::Duration;
@@ -100,10 +113,117 @@ pub fn contains_point(rect: Crop, point: SurfacePoint) -> bool {
     crate::dim::contains_point(&rect, point.x, point.y)
 }
 
+/// The output pixels one surface unit covers on each axis.
+///
+/// The two axes are independent because two different views want them so: a
+/// fit scales a picture by one factor on both, and a view that states the box
+/// its window shows fills the window on each axis at its own ratio.
+/// [`Scale::uniform`] is the one-factor constructor, so a reader of a value
+/// says which case it means, and [`Scale::coarsest`] is the one number a paint
+/// of both axes can serve.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Scale {
+    /// Output pixels per surface unit across.
+    pub x: f32,
+    /// Output pixels per surface unit down.
+    pub y: f32,
+}
+
+impl Scale {
+    /// One factor, both axes.
+    #[must_use]
+    pub const fn uniform(scale: f32) -> Self {
+        Self { x: scale, y: scale }
+    }
+
+    /// One factor per axis.
+    #[must_use]
+    pub const fn axes(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
+
+    /// Whether both factors are positive and finite.
+    #[must_use]
+    pub fn is_drawable(self) -> bool {
+        self.x.is_finite() && self.y.is_finite() && self.x > 0.0 && self.y > 0.0
+    }
+
+    /// The pair with a zero or non-finite factor read as one.
+    ///
+    /// The inverse mapping divides by the factors, so a frame the caller left
+    /// half-built still answers a point instead of an infinity.
+    #[must_use]
+    pub fn drawable(self) -> Self {
+        let one = |value: f32| {
+            if value.is_finite() && value != 0.0 {
+                value
+            } else {
+                1.0
+            }
+        };
+        Self {
+            x: one(self.x),
+            y: one(self.y),
+        }
+    }
+
+    /// The smaller factor: the one a paint of both axes is as sharp as.
+    #[must_use]
+    pub const fn coarsest(self) -> f32 {
+        if self.x < self.y { self.x } else { self.y }
+    }
+
+    /// Both factors multiplied by `factor`.
+    #[must_use]
+    pub const fn scaled(self, factor: f32) -> Self {
+        Self {
+            x: self.x * factor,
+            y: self.y * factor,
+        }
+    }
+
+    /// This scale kept between `low` and `high` times `fit`, factor by factor.
+    ///
+    /// The bound is relative to the fit because a factor counts output pixels
+    /// per *surface unit*, and a surface unit is the plane's own: a document may
+    /// measure its plane in slot indices, prices or points, so the factor a fit
+    /// lands on can be a thousandth or a thousand. A bound in absolute pixels
+    /// per unit would be a different zoom on every document, and on most of them
+    /// a step that jumps.
+    #[must_use]
+    pub fn within(self, fit: Self, low: f32, high: f32) -> Self {
+        Self {
+            x: self.x.clamp(fit.x * low, fit.x * high),
+            y: self.y.clamp(fit.y * low, fit.y * high),
+        }
+    }
+
+    /// This scale eased `alpha` of the way toward `target`, factor by factor.
+    ///
+    /// `alpha` of one lands on the target, and a factor that arrived within a
+    /// thousandth of its target snaps to it, so an ease settles instead of
+    /// approaching for ever.
+    #[must_use]
+    pub fn eased(self, target: Self, alpha: f32) -> Self {
+        let one = |from: f32, to: f32| {
+            let moved = from + (to - from) * alpha;
+            if (to - moved).abs() < to.abs() * 0.001 {
+                to
+            } else {
+                moved
+            }
+        };
+        Self {
+            x: one(self.x, target.x),
+            y: one(self.y, target.y),
+        }
+    }
+}
+
 /// One window mapping of a plane: the numbers the draw uses, bundled.
 ///
-/// The picture centers at the window middle plus the pan, scales by `scale`
-/// and turns clockwise by `angle` degrees.
+/// The picture centers at the window middle plus the pan, scales by `scale` on
+/// each axis and turns clockwise by `angle` degrees.
 /// [`Frame::to_screen`] and [`Frame::to_image`] are the one conversion pair,
 /// and each side of the pair carries the tag of its space, so a source point
 /// and a window point never pass for one another.
@@ -116,8 +236,8 @@ pub struct Frame {
     /// The offset of the plane center from the window middle, in window
     /// pixels.
     pub pan: WindowVector,
-    /// Output pixels per source pixel.
-    pub scale: f32,
+    /// Output pixels per source pixel, on each axis.
+    pub scale: Scale,
     /// The clockwise turn, in degrees.
     pub angle: f32,
 }
@@ -130,8 +250,8 @@ impl Frame {
     #[must_use]
     pub fn to_screen(&self, point: SurfacePoint) -> WindowPoint {
         let (sin, cos) = self.angle.to_radians().sin_cos();
-        let dx = (point.x - self.img.width / 2.0) * self.scale;
-        let dy = (point.y - self.img.height / 2.0) * self.scale;
+        let dx = (point.x - self.img.width / 2.0) * self.scale.x;
+        let dy = (point.y - self.img.height / 2.0) * self.scale.y;
         WindowPoint::new(
             self.win.width / 2.0 + self.pan.x + dx * cos - dy * sin,
             self.win.height / 2.0 + self.pan.y + dx * sin + dy * cos,
@@ -141,21 +261,50 @@ impl Frame {
     /// The source point under a window position, the inverse of
     /// [`Self::to_screen`].
     ///
-    /// A zero or non-finite `scale` reads as one, so the mapping never divides
-    /// by zero.
+    /// A zero or non-finite scale factor reads as one, so the mapping never
+    /// divides by zero.
     #[must_use]
     pub fn to_image(&self, point: WindowPoint) -> SurfacePoint {
-        let scale = if self.scale.is_finite() && self.scale > 0.0 {
-            self.scale
-        } else {
-            1.0
-        };
+        let scale = self.scale.drawable();
         let (sin, cos) = self.angle.to_radians().sin_cos();
         let dx = point.x - self.win.width / 2.0 - self.pan.x;
         let dy = point.y - self.win.height / 2.0 - self.pan.y;
         SurfacePoint::new(
-            self.img.width / 2.0 + (dx * cos + dy * sin) / scale,
-            self.img.height / 2.0 + (-dx * sin + dy * cos) / scale,
+            self.img.width / 2.0 + (dx * cos + dy * sin) / scale.x,
+            self.img.height / 2.0 + (-dx * sin + dy * cos) / scale.y,
+        )
+    }
+
+    /// The pan that keeps the surface point under `anchor` where it is while
+    /// the scale runs from this frame's to `to`.
+    ///
+    /// The anchor is a window point, and each axis solves its own ratio, so the
+    /// point under the cursor stays under it even when the two factors differ:
+    /// a wheel step on a view that states its viewport moves the picture without
+    /// sliding the anchored point away.
+    /// The solve reads the pan as the placement of the plane's centre and not
+    /// the turn, which is what the zoom ease has always done: a turned view
+    /// anchors the point the plain mapping names.
+    #[must_use]
+    pub fn anchored(&self, to: Scale, anchor: WindowPoint) -> WindowVector {
+        let (from, to) = (self.scale.drawable(), to.drawable());
+        WindowVector::new(
+            hold_axis(
+                anchor.x,
+                from.x,
+                to.x,
+                self.pan.x,
+                self.win.width,
+                self.img.width,
+            ),
+            hold_axis(
+                anchor.y,
+                from.y,
+                to.y,
+                self.pan.y,
+                self.win.height,
+                self.img.height,
+            ),
         )
     }
 
@@ -213,6 +362,18 @@ impl Frame {
         let bottom = max.y.clamp(y, self.img.height);
         crop(x, y, right - x, bottom - y)
     }
+}
+
+/// The pan of one axis that holds the surface point under `anchor` where it is
+/// while the factor runs from `from` to `to`.
+///
+/// The window offset of the plane's corner is `(win - img * factor) / 2 + pan`,
+/// so the anchored point keeps its place while the ratio of the two factors
+/// scales its distance from that corner, and the new corner is taken out again.
+fn hold_axis(anchor: f32, from: f32, to: f32, pan: f32, win: f32, img: f32) -> f32 {
+    let edge = |factor: f32| (win - img * factor) / 2.0;
+    let held = anchor - (anchor - edge(from) - pan) * (to / from);
+    held - edge(to)
 }
 
 /// A rect at the scale its pixels were rasterized at.
@@ -294,7 +455,7 @@ mod tests {
             img: SurfaceSize::new(1024.0, 512.0),
             win: WindowSize::new(800.0, 600.0),
             pan,
-            scale,
+            scale: Scale::uniform(scale),
             angle,
         }
     }
@@ -327,6 +488,82 @@ mod tests {
         let out = frame(WindowVector::new(9000.0, 9000.0), 1.0, 0.0).crop(MARGIN);
         assert!(out.width() <= 1024.0 && out.height() <= 512.0);
         assert!(out.min_x() >= 0.0 && out.min_y() >= 0.0);
+    }
+
+    #[test]
+    fn the_two_axes_carry_their_own_scale() {
+        // A view that states the box its window shows fills the window on each
+        // axis, so the two factors differ: 800 window pixels of 100 surface
+        // units across, and 600 of 400 down.
+        let squashed = Frame {
+            scale: Scale::axes(8.0, 1.5),
+            ..frame(WindowVector::zero(), 1.0, 0.0)
+        };
+        let shown = squashed.crop(0.0);
+        assert!((shown.width() - 100.0).abs() < 1e-3);
+        assert!((shown.height() - 400.0).abs() < 1e-3);
+        // The plane center is the window middle, whichever factor each axis
+        // carries.
+        let middle = squashed.to_screen(SurfacePoint::new(512.0, 256.0));
+        assert!((middle.x - 400.0).abs() < 1e-3);
+        assert!((middle.y - 300.0).abs() < 1e-3);
+        // A degenerate factor reads as one, so the inverse still answers a
+        // point instead of an infinity.
+        let flat = Frame {
+            scale: Scale::axes(0.0, f32::NAN),
+            ..frame(WindowVector::zero(), 1.0, 0.0)
+        };
+        let back = flat.to_image(WindowPoint::new(400.0, 300.0));
+        assert_eq!((back.x, back.y), (512.0, 256.0));
+    }
+
+    #[test]
+    fn a_zoom_band_is_relative_to_the_fit() {
+        // A document may measure its plane in units that fit at a thousandth of
+        // a pixel per unit, and a step of one wheel notch is still one factor:
+        // the band bounds the fit and not an absolute factor.
+        let fit = Scale::axes(5.12e-4, 7.68e-4);
+        let step = fit.scaled(1.25);
+        assert_eq!(step.within(fit, 0.01, 100.0), step);
+        // Past the band the factor holds at the bound, axis by axis.
+        let far = fit.scaled(1000.0).within(fit, 0.01, 100.0);
+        assert!((far.x - fit.x * 100.0).abs() < 1e-9);
+        assert!((far.y - fit.y * 100.0).abs() < 1e-9);
+        let back = fit.scaled(0.001).within(fit, 0.01, 100.0);
+        assert!((back.x - fit.x * 0.01).abs() < 1e-9);
+        // Each axis takes its own bound, so the ratio the fit chose survives.
+        assert!((far.x / far.y - fit.x / fit.y).abs() < 1e-6);
+    }
+
+    #[test]
+    fn an_anchor_holds_its_point_under_either_scale() {
+        // A frame whose two axes carry different factors, zoomed to another
+        // pair that differs again: the surface point under the anchor keeps its
+        // window spot on both axes, because each axis solves its own ratio.
+        let frame = frame(WindowVector::new(12.0, -7.0), 3.0, 0.0);
+        let frame = Frame {
+            scale: Scale::axes(3.0, 5.0),
+            ..frame
+        };
+        let point = SurfacePoint::new(300.0, 200.0);
+        let anchor = frame.to_screen(point);
+        for to in [
+            Scale::axes(6.0, 2.5),
+            Scale::axes(1.0, 9.0),
+            Scale::uniform(4.0),
+        ] {
+            let pan = frame.anchored(to, anchor);
+            let moved = Frame {
+                pan,
+                scale: to,
+                ..frame
+            };
+            let back = moved.to_screen(point);
+            assert!(
+                (back.x - anchor.x).abs() < 1e-3 && (back.y - anchor.y).abs() < 1e-3,
+                "the anchored point stays at {anchor:?} under {to:?}, and lands on {back:?}"
+            );
+        }
     }
 
     #[test]
@@ -448,9 +685,10 @@ mod property_tests {
 
     use super::*;
 
-    fn view() -> impl Strategy<Value = (f32, f32, f32, f32)> {
+    fn view() -> impl Strategy<Value = (f32, f32, f32, f32, f32)> {
         (
-            1.0f32..64.0,       // scale
+            1.0f32..64.0,       // scale across
+            1.0f32..64.0,       // scale down
             -360.0f32..360.0,   // angle
             -4000.0f32..4000.0, // pan x
             -4000.0f32..4000.0, // pan y
@@ -458,7 +696,7 @@ mod property_tests {
     }
 
     /// A frame over a 1024x512 plane inside an 800x600 window.
-    fn frame(pan: WindowVector, scale: f32, angle: f32) -> Frame {
+    fn frame(pan: WindowVector, scale: Scale, angle: f32) -> Frame {
         Frame {
             img: SurfaceSize::new(1024.0, 512.0),
             win: WindowSize::new(800.0, 600.0),
@@ -478,14 +716,18 @@ mod property_tests {
         assert!(painted.max_y() <= 512.0 + 1e-3);
         let (w, h) = (frame.win.width, frame.win.height);
         let limit = (1.0 + 2.0 * MARGIN) * (w * w + h * h).sqrt();
-        assert!(painted.width() * frame.scale <= limit * (1.0 + 1e-3));
-        assert!(painted.height() * frame.scale <= limit * (1.0 + 1e-3));
+        assert!(painted.width() * frame.scale.x <= limit * (1.0 + 1e-3));
+        assert!(painted.height() * frame.scale.y <= limit * (1.0 + 1e-3));
     }
 
     /// A past failure of the paint bounds, at the pan that reached them.
     #[test]
     fn a_pan_down_keeps_the_paint_in_bounds() {
-        assert_invariants(frame(WindowVector::new(0.0, -782.28406), 1.0, 0.0));
+        assert_invariants(frame(
+            WindowVector::new(0.0, -782.28406),
+            Scale::uniform(1.0),
+            0.0,
+        ));
     }
 
     /// The failure that the diagonal bound of the paint area shrank to: the
@@ -493,7 +735,11 @@ mod property_tests {
     /// because the persistence of the seeds is off.
     #[test]
     fn a_deep_turned_zoom_keeps_the_paint_in_bounds() {
-        assert_invariants(frame(WindowVector::new(0.0, 0.0), 22.561_317, 216.2562));
+        assert_invariants(frame(
+            WindowVector::new(0.0, 0.0),
+            Scale::uniform(22.561_317),
+            216.2562,
+        ));
     }
 
     proptest! {
@@ -505,14 +751,14 @@ mod property_tests {
         })]
 
         /// The two mappings undo each other, so the region lines up with the
-        /// draw.
+        /// draw, on each axis at its own factor.
         #[test]
         fn the_mapping_round_trips(
-            (scale, angle, px, py) in view(),
+            (sx, sy, angle, px, py) in view(),
             x in 0.0f32..1024.0,
             y in 0.0f32..512.0,
         ) {
-            let frame = frame(WindowVector::new(px, py), scale, angle);
+            let frame = frame(WindowVector::new(px, py), Scale::axes(sx, sy), angle);
             let point = SurfacePoint::new(x, y);
             let back = frame.to_image(frame.to_screen(point));
             prop_assert!((back.x - point.x).abs() < 1e-2);
@@ -522,8 +768,8 @@ mod property_tests {
         /// Every window corner lands inside the region the view paints, so the
         /// patch always covers the screen.
         #[test]
-        fn the_crop_covers_the_window((scale, angle, px, py) in view()) {
-            let frame = frame(WindowVector::new(px, py), scale, angle);
+        fn the_crop_covers_the_window((sx, sy, angle, px, py) in view()) {
+            let frame = frame(WindowVector::new(px, py), Scale::axes(sx, sy), angle);
             let painted = frame.crop(MARGIN);
             let needed = frame.crop(0.0);
             prop_assert!(painted.contains_rect(&needed));
@@ -535,8 +781,8 @@ mod property_tests {
         /// The painted area stays bounded by the window, so a deeper zoom
         /// costs no more pixels than a shallow one.
         #[test]
-        fn the_paint_area_stays_bounded((scale, angle, px, py) in view()) {
-            let frame = frame(WindowVector::new(px, py), scale, angle);
+        fn the_paint_area_stays_bounded((sx, sy, angle, px, py) in view()) {
+            let frame = frame(WindowVector::new(px, py), Scale::axes(sx, sy), angle);
             let painted = frame.crop(MARGIN);
             // A turned rect grows its bounding box by at most its own
             // diagonal, so that diagonal bounds both axes.
@@ -546,8 +792,8 @@ mod property_tests {
             // and the rounding of the sine and cosine pushes the product past
             // it by a few floating-point steps. The slack covers that rounding
             // and nothing else.
-            prop_assert!(painted.width() * scale <= limit * (1.0 + 1e-3));
-            prop_assert!(painted.height() * scale <= limit * (1.0 + 1e-3));
+            prop_assert!(painted.width() * sx <= limit * (1.0 + 1e-3));
+            prop_assert!(painted.height() * sy <= limit * (1.0 + 1e-3));
         }
     }
 }

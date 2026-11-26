@@ -210,7 +210,7 @@ fn tools() -> Vec<rmcp::model::Tool> {
         rmcp::model::Tool::new(
             "vv_get_status",
             "Report the open view: the mode, the plane count, the source label, the plane size \
-             and the scale.",
+             and the scale on each axis.",
             schema(serde_json::json!({}), &[]),
         )
         .with_annotations(reads()),
@@ -379,7 +379,13 @@ fn shown_status(status: &Status) -> serde_json::Value {
         "source": status.source,
         "width": status.width,
         "height": status.height,
-        "scale": status.scale,
+        // The two axes carry their own factor, because a view that states the
+        // box its window shows fills it on each axis: one number here would
+        // name neither the picture nor the box.
+        "scale": status.scale.map(|scale| serde_json::json!({
+            "x": scale.x,
+            "y": scale.y,
+        })),
     })
 }
 
@@ -508,7 +514,7 @@ mod tests {
                 source: "mcp".to_owned(),
                 width: 3.0,
                 height: 2.0,
-                scale: Some(2.0),
+                scale: Some(vv_core::region::Scale::uniform(2.0)),
             }
         }
     }
@@ -753,7 +759,8 @@ mod tests {
         assert_eq!(status["mode"], "image");
         assert_eq!(status["planes"], 1);
         assert_eq!(status["source"], "mcp");
-        assert_eq!(status["scale"], 2.0);
+        assert_eq!(status["scale"]["x"], 2.0);
+        assert_eq!(status["scale"]["y"], 2.0);
     }
 
     /// A call to a tool the server does not advertise fails as a client error.
