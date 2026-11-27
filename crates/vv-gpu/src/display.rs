@@ -64,7 +64,8 @@
 //! `vello` itself sizes its buffers with, and it over-reports: Wang's formula
 //! bounds a curve the flattener approximates by an Euler spiral and then caps at
 //! a hundred lines a piece, by 1.2 times at the tightest and 4.5 at a deep zoom
-//! (measured against the allocator the shader writes, `47f32f0`). So the budget
+//! (measured against the allocator the shader writes, see
+//! `docs/measurements/display-budget.md`). So the budget
 //! is a fraction of the real buffer that the smallest of those over-counts still
 //! holds, and a frame that will not fit is refused and shown as whatever the
 //! caller keeps behind the list: a caller with a raster
@@ -1161,7 +1162,7 @@ fn clippable(primitive: &Primitive) -> bool {
 /// over-count leaves an estimate of three quarters of the real buffer still
 /// under what the renderer holds, and the buffer itself too near it: this budget
 /// keeps a third of the buffer clear in the worst measured case (see
-/// [`Self::lines_at`] and `47f32f0`).
+/// [`Self::lines_at`] and `docs/measurements/display-budget.md`).
 const LINE_BUDGET: f64 = ((1u32 << 21) * 3 / 4) as f64;
 
 /// The most lines one primitive may ask `vello` to flatten before the encoder
@@ -1205,7 +1206,8 @@ const CUBIC_DEGREE: f64 = 0.866_025_403_78;
 
 /// The floor this pass puts under one curve, in lines.
 ///
-/// `vello_encoding` floors its own count at five, and the sweep of `47f32f0`
+/// `vello_encoding` floors its own count at five, and the sweep recorded in
+/// `docs/measurements/display-budget.md`
 /// found that short: a wave of eight units at a quarter of the fit scale
 /// flattens to six lines a curve, so an estimate floored at five answered 0.84
 /// of the lines the renderer wrote, and a budget must never answer less. Eight
@@ -2258,7 +2260,8 @@ mod tests {
     /// flattener writes of it.
     ///
     /// A flat curve needs fewer lines as it shrinks, until the count stops at the
-    /// pieces `vello` fits it with: the sweep of `47f32f0` measured six lines a
+    /// pieces `vello` fits it with: the sweep in
+    /// `docs/measurements/display-budget.md` measured six lines a
     /// curve for a wave of eight units at a quarter of the fit scale, and six
     /// again at a sixteenth. `vello_encoding` floors its own count at five, which
     /// answered less than the renderer wrote, so the floor here is eight.
