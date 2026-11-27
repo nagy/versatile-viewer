@@ -42,12 +42,24 @@
 //! A clip, a layer and a marker always stay: the stack must keep its shape, and
 //! a clip carries no ink of its own.
 //!
-//! # The frame that does not fit
+//! # The primitive that does not fit
 //!
 //! A band bounds one document's worth of work, not one primitive's: a path holds
 //! whatever the producer wrote, and `vello` flattens it whole at the frame's
-//! scale. A page-spanning path of twenty thousand curves therefore starves the
-//! same allocators at a deep zoom, and by the same silent path (see above).
+//! scale, culling only a draw whose box is entirely outside the target. A
+//! page-spanning path of twenty thousand curves therefore starves the same
+//! allocators at a deep zoom, and by the same silent path (see above).
+//! The encoder answers that one shape: a path that alone asks for more than
+//! [`PRIMITIVE_BUDGET`] is flattened to the band and clipped to it, so a frame
+//! that shows a corner of the page asks `vello` for the corner. The clip is
+//! exact where it matters — a curve whose hull misses the band becomes the chord
+//! between its own ends, and only the curves that reach the band are flattened —
+//! and it is the one place where a curve stops being flattened by the device at
+//! the frame's own zoom, so a band remembers the scale it was flattened for and a
+//! frame past [`LADDER`] times it re-encodes (see [`CLIP_PX`]).
+//!
+//! # The frame that does not fit
+//!
 //! [`Work`] is the count of lines that frame would flatten, in the tolerance law
 //! `vello` itself sizes its buffers with, so a frame that will not fit is refused
 //! and shown as whatever the caller keeps behind the list: a caller with a raster
@@ -198,6 +210,13 @@ struct Base {
     /// It is counted once per band, and a frame only applies its own scale to it
     /// instead of walking the paths again (see [`Work`]).
     work: Work,
+    /// The scale a primitive was flattened to the band at, or `None` while the
+    /// encode kept every path whole (see [`CLIP_PX`]).
+    ///
+    /// A flattened primitive is edges once and for all, so a zoom past
+    /// [`LADDER`] times this scale shows the facets and the band is encoded
+    /// again.
+    clip_scale: Option<f64>,
 }
 
 impl Base {
@@ -219,6 +238,26 @@ impl Base {
             && visible.x1 <= self.band.x1
             && visible.y1 <= self.band.y1
     }
+
+    /// Whether the flattening this base holds still reads sharp at `scale`.
+    ///
+    /// A clipped primitive is a polyline in surface units, so a frame that
+    /// magnified it shows the facets. [`CLIP_PX`] of deviation at the scale the
+    /// encode was flattened for becomes [`LADDER`] times that at the top of the
+    /// ladder, which is the most this pass lets a clipped edge drift.
+    fn holds_scale(&self, scale: f64) -> bool {
+        self.clip_scale
+            .is_none_or(|flattened| scale <= flattened * LADDER)
+    }
+}
+
+/// What one encode wrote.
+#[derive(Clone, Copy, Default)]
+struct Encoded {
+    /// What the frame that draws this encode asks `vello` to flatten.
+    work: Work,
+    /// Whether the encode flattened a path to the band (see [`CLIP_PX`]).
+    clipped: bool,
 }
 
 /// The frame the target holds.
@@ -395,13 +434,6 @@ impl SceneView {
         let plane = (frame.img.width, frame.img.height);
         let visible = window_hull(to_window, size);
         let band = band_of(visible);
-        if !self
-            .encoded
-            .as_ref()
-            .is_some_and(|base| base.holds(list, plane) && base.covers(visible))
-        {
-            self.keep(list, plane, band);
-        }
         // What the frame asks `vello` to flatten is bounded by the largest
         // factor of the placing transform, which is its largest singular value:
         // the linear part is a turn composed with the two factors, so its two
@@ -410,6 +442,11 @@ impl SceneView {
         // is the answer even when the window shows more of the coarser axis.
         let [xx, yx, xy, yy, _, _] = to_window.as_coeffs();
         let scale = xx.hypot(yx).max(xy.hypot(yy));
+        if !self.encoded.as_ref().is_some_and(|base| {
+            base.holds(list, plane) && base.covers(visible) && base.holds_scale(scale)
+        }) {
+            self.keep(list, plane, band, scale);
+        }
         // A frame past the budget is one vello paints *nothing* of, and it says
         // so to nobody: refuse it here, where the caller can still show the
         // plane, and forget the paint on screen so no later frame reuses it.
@@ -424,7 +461,7 @@ impl SceneView {
             // box this frame shows when that box fits, so a refusal is a frame
             // and not the state the view stays in (see [`Self::tighten`]).
             if self.tighten(list, band, scale) {
-                self.keep(list, plane, band);
+                self.keep(list, plane, band, scale);
             }
         }
         if self
@@ -506,7 +543,7 @@ impl SceneView {
     ///
     /// A base is the encode of one box, so a frame that outgrew it or shrank
     /// back into it hands its own box here (see [`Self::draw`]).
-    fn keep(&mut self, list: &Arc<[Primitive]>, plane: (f32, f32), band: kurbo::Rect) {
+    fn keep(&mut self, list: &Arc<[Primitive]>, plane: (f32, f32), band: kurbo::Rect, scale: f64) {
         if self
             .encoded
             .as_ref()
@@ -522,22 +559,25 @@ impl SceneView {
             self.images.clear();
         }
         self.base.reset();
-        let (kept, work) = self.survey(list, band);
-        self.encode(list, plane, &kept);
+        let (kept, _) = self.survey(list, band);
+        let encoded = self.encode(list, plane, &kept, band, scale);
         self.encoded = Some(Base {
             list: Arc::clone(list),
             plane,
             band,
-            work,
+            work: encoded.work,
+            clip_scale: encoded.clipped.then_some(scale),
         });
     }
 
-    /// The primitives of `list` whose ink reaches `band`, in list order, and
-    /// what together they ask `vello` to flatten.
+    /// The primitives of `list` whose ink reaches `band`, in list order, each
+    /// with what it asks `vello` to flatten, and the sum of those asks.
     ///
     /// The counts of a list are kept, so only the primitives no band has
-    /// reached for are walked (see [`Counts`]).
-    fn survey(&mut self, list: &Arc<[Primitive]>, band: kurbo::Rect) -> (Vec<usize>, Work) {
+    /// reached for are walked (see [`Counts`]). A primitive keeps one count for
+    /// every band, because the count is what the whole path asks for: a band
+    /// that keeps a `vello` path whole pays all of it (see [`Self::encode`]).
+    fn survey(&mut self, list: &Arc<[Primitive]>, band: kurbo::Rect) -> (Vec<(usize, Work)>, Work) {
         let counts = match &mut self.counts {
             Some(counts) if counts.holds(list) => counts,
             room => room.insert(Counts::new(list)),
@@ -589,8 +629,33 @@ impl SceneView {
     /// A primitive the band does not reach is dropped, because `vello` would
     /// pay for it in every frame: it flattens the curves of the whole encode and
     /// its bump allocators are fixed (see the module docstring).
-    fn encode(&mut self, list: &[Primitive], plane: (f32, f32), kept: &[usize]) {
-        for &index in kept {
+    /// A path that alone asks for more than [`PRIMITIVE_BUDGET`] is the other
+    /// half of that rule: it is flattened to the band and clipped to it, so the
+    /// frame that shows a corner of it pays for the corner and not for the path
+    /// (see [`Self::clipped`]).
+    fn encode(
+        &mut self,
+        list: &[Primitive],
+        plane: (f32, f32),
+        kept: &[(usize, Work)],
+        band: kurbo::Rect,
+        scale: f64,
+    ) -> Encoded {
+        let mut work = Work::default();
+        let mut clipped = false;
+        for &(index, own) in kept {
+            // The frame's own scale is what says whether a path is too heavy to
+            // hand over whole: a curve costs more the deeper the window zooms
+            // into it (see [`Work::lines_at`]).
+            if let Primitive::Path { .. } = &list[index]
+                && own.lines_at(scale) > PRIMITIVE_BUDGET
+                && let Some(flattened) = self.clipped(&list[index], band, CLIP_PX / scale)
+            {
+                work += flattened;
+                clipped = true;
+                continue;
+            }
+            work += own;
             match &list[index] {
                 Primitive::Rect { rect, paint } => {
                     // A rect carries no transform, so both its shape and its
@@ -663,6 +728,95 @@ impl SceneView {
                 }
             }
         }
+        Encoded { work, clipped }
+    }
+
+    /// Encode one path as the band's own part of it, and answer what the frame
+    /// then asks `vello` to flatten.
+    ///
+    /// `tolerance` is in surface units: the deviation a flattened curve may show
+    /// at the scale this encode is made for.
+    ///
+    /// The path is flattened to edges and clipped to the band, so the ink the
+    /// window cannot show is never handed to the renderer: `vello` flattens a
+    /// path whole at the frame's scale whatever part of it the window holds (see
+    /// the module docstring), and a page-spanning path is what that costs.
+    ///
+    /// A fill is clipped as the closed shape it is. A stroke is outlined first
+    /// and the outline is clipped as a fill, because the outline is what paints
+    /// and the centre line is not: `vello` expands a stroke on the device, and
+    /// this CPU outline is the one thing that makes a clipped stroke possible.
+    ///
+    /// `None` answers a path this pass cannot clip and the caller keeps whole: a
+    /// dashed stroke, whose dashes are laid along the whole of the path and would
+    /// shift when a piece of it is left out, or a placement no box in the path's
+    /// own units bounds.
+    fn clipped(
+        &mut self,
+        primitive: &Primitive,
+        band: kurbo::Rect,
+        tolerance: f64,
+    ) -> Option<Work> {
+        let Primitive::Path {
+            path,
+            transform,
+            fill,
+            fill_rule,
+            stroke,
+        } = primitive
+        else {
+            return None;
+        };
+        if stroke
+            .as_ref()
+            .is_some_and(|outline| !outline.style.dash_pattern.is_empty())
+        {
+            return None;
+        }
+        let stretch = longest_axis(transform);
+        if !(stretch.is_finite() && stretch > 0.0) {
+            return None;
+        }
+        let local = tolerance / stretch;
+        let mut work = Work::default();
+        if let Some(paint) = fill {
+            let edges = edges(path, local_box(band, transform, 0.0)?, local);
+            let shape = clip_polygons(&placed(&edges, *transform), band);
+            work += edges_work(&shape);
+            if !shape.is_empty() {
+                self.paint(
+                    vello_fill_rule(*fill_rule),
+                    Affine::IDENTITY,
+                    paint,
+                    Some(Affine::IDENTITY),
+                    &shape,
+                );
+            }
+        }
+        if let Some(outline) = stroke {
+            // A join reaches past the outline by the miter limit, so the box
+            // that decides which curves to flatten holds the widest one.
+            let reach = outline.style.width * outline.style.miter_limit.clamp(1.0, 16.0);
+            let edges = edges(path, local_box(band, transform, reach)?, local);
+            let outline_shape = kurbo::stroke(
+                edges.iter(),
+                &outline.style,
+                &kurbo::StrokeOpts::default(),
+                local,
+            );
+            let shape = clip_polygons(&placed(&outline_shape, *transform), band);
+            work += edges_work(&shape);
+            if !shape.is_empty() {
+                self.paint(
+                    Fill::NonZero,
+                    Affine::IDENTITY,
+                    &outline.paint,
+                    Some(Affine::IDENTITY),
+                    &shape,
+                );
+            }
+        }
+        Some(work)
     }
 
     /// Encode one glyph run, or nothing when its bytes name no face.
@@ -940,6 +1094,32 @@ fn longest_axis(transform: &Affine) -> f64 {
 /// the raster path instead.
 const LINE_BUDGET: f64 = ((1u32 << 21) / 2) as f64;
 
+/// The most lines one primitive may ask `vello` to flatten before the encoder
+/// clips it to the band.
+///
+/// A path is a document's own geometry, so nothing bounds what a producer wrote:
+/// one page-spanning path of twenty thousand curves asks for more than a whole
+/// band. A sixteenth of [`LINE_BUDGET`] is where a primitive is worth the walk of
+/// its own clipping, and sixteen of them still fit a band that is not refused.
+const PRIMITIVE_BUDGET: f64 = LINE_BUDGET / 16.0;
+
+/// The deviation, in device pixels, a clipped curve may show at the scale its
+/// band was encoded for.
+///
+/// A clipped primitive becomes edges, so this is the one place where a curve
+/// stops being flattened by `vello` at the frame's own zoom and becomes a
+/// polyline. A quarter pixel is under what area sampling resolves, and
+/// [`LADDER`] bounds how far a later zoom may stretch it.
+const CLIP_PX: f64 = 0.25;
+
+/// The factor a frame's scale may grow past the one its band was flattened for
+/// before the band is encoded again.
+///
+/// [`CLIP_PX`] is the deviation at the encode's scale, so the top of the ladder
+/// shows half a pixel and a deeper frame is refused by nothing: it re-encodes,
+/// and only the curves that reach the new band are walked again.
+const LADDER: f64 = 2.0;
+
 /// The reciprocal square root of the tolerance `vello` flattens to.
 ///
 /// It is the tolerance `vello_encoding` sizes its own buffers with — 0.2 device
@@ -1074,9 +1254,9 @@ impl Counts {
         Arc::ptr_eq(&self.list, list)
     }
 
-    /// The primitives whose ink reaches `band`, in list order, and what they
-    /// ask `vello` to flatten together.
-    fn survey(&mut self, band: kurbo::Rect) -> (Vec<usize>, Work) {
+    /// The primitives whose ink reaches `band`, in list order, each with what it
+    /// asks `vello` to flatten, and the sum of those asks.
+    fn survey(&mut self, band: kurbo::Rect) -> (Vec<(usize, Work)>, Work) {
         let Counts { list, per } = self;
         let mut kept = Vec::new();
         let mut work = Work::default();
@@ -1092,12 +1272,13 @@ impl Counts {
             if !reaches(bounds, band) {
                 continue;
             }
-            kept.push(index);
-            work += *counted.work.get_or_insert_with(|| {
+            let asks = *counted.work.get_or_insert_with(|| {
                 let mut asks = Work::default();
                 count(&mut asks, primitive);
                 asks
             });
+            kept.push((index, asks));
+            work += asks;
         }
         (kept, work)
     }
@@ -1228,6 +1409,236 @@ fn count_path(work: &mut Work, path: &kurbo::BezPath, transform: Option<&Affine>
             }
         }
     }
+}
+
+/// `path` as edges: every curve the box `local` misses becomes the chord
+/// between its own ends, and every curve that reaches the box is flattened to
+/// `tolerance`.
+///
+/// `local` is the band in the path's own units, and `tolerance` is in those
+/// units too, so one walk of the path answers edges a single clip can use at any
+/// placement.
+///
+/// The substitution is exact rather than an approximation: a curve lies inside
+/// the hull of its control points, so a hull the box misses cannot bulge into it,
+/// and a chord between those ends lies in the same hull. Neither the curve nor its
+/// chord reaches the band, so the clip drops both, and the framed part of the
+/// path is the same either way. Only the curves that do reach the band are
+/// walked, which is what keeps a deep zoom cheap.
+fn edges(path: &kurbo::BezPath, local: kurbo::Rect, tolerance: f64) -> kurbo::BezPath {
+    let mut out = kurbo::BezPath::new();
+    let mut start = kurbo::Point::ZERO;
+    let mut from = kurbo::Point::ZERO;
+    for element in path.elements() {
+        match *element {
+            PathEl::MoveTo(point) => {
+                out.move_to(point);
+                start = point;
+                from = point;
+            }
+            PathEl::LineTo(point) => {
+                out.line_to(point);
+                from = point;
+            }
+            PathEl::QuadTo(control, point) => {
+                let hull = hull_of(&[from, control, point]);
+                if reaches(Some(hull), local) {
+                    flatten_into(
+                        &[PathEl::MoveTo(from), PathEl::QuadTo(control, point)],
+                        tolerance,
+                        &mut out,
+                    );
+                } else {
+                    out.line_to(point);
+                }
+                from = point;
+            }
+            PathEl::CurveTo(control_a, control_b, point) => {
+                let hull = hull_of(&[from, control_a, control_b, point]);
+                if reaches(Some(hull), local) {
+                    flatten_into(
+                        &[
+                            PathEl::MoveTo(from),
+                            PathEl::CurveTo(control_a, control_b, point),
+                        ],
+                        tolerance,
+                        &mut out,
+                    );
+                } else {
+                    out.line_to(point);
+                }
+                from = point;
+            }
+            PathEl::ClosePath => {
+                out.close_path();
+                from = start;
+            }
+        }
+    }
+    out
+}
+
+/// The box that holds `points`.
+fn hull_of(points: &[kurbo::Point]) -> kurbo::Rect {
+    let mut hull = kurbo::Rect::new(points[0].x, points[0].y, points[0].x, points[0].y);
+    for point in &points[1..] {
+        hull = hull.union(kurbo::Rect::new(point.x, point.y, point.x, point.y));
+    }
+    hull
+}
+
+/// Push the lines of `elements` flattened to `tolerance` into `out`.
+fn flatten_into(elements: &[PathEl], tolerance: f64, out: &mut kurbo::BezPath) {
+    kurbo::flatten(elements.iter().copied(), tolerance, |element| {
+        if let PathEl::LineTo(point) = element {
+            out.line_to(point);
+        }
+    });
+}
+
+/// `path` placed in surface units.
+///
+/// The copy is what `apply_affine` needs and what the clip keeps: the edges of a
+/// path are walked once per encode and dropped once the encode is made.
+fn placed(path: &kurbo::BezPath, transform: Affine) -> kurbo::BezPath {
+    let mut out = path.clone();
+    out.apply_affine(transform);
+    out
+}
+
+/// The band in the units of a path placed by `transform`, reached by `reach`,
+/// or `None` for a placement no box bounds.
+///
+/// A box of the band's inverse image is a superset of it, so a curve this box
+/// misses misses the band too, and one it keeps is only walked and clipped: the
+/// answer is conservative in cost and exact in geometry.
+fn local_box(band: kurbo::Rect, transform: &Affine, reach: f64) -> Option<kurbo::Rect> {
+    let inverse = transform.inverse();
+    if inverse
+        .as_coeffs()
+        .iter()
+        .any(|coefficient| !coefficient.is_finite())
+    {
+        return None;
+    }
+    let boxed = inverse.transform_rect_bbox(band);
+    boxed.is_finite().then(|| boxed.inflate(reach, reach))
+}
+
+/// The polygons of `path` that lie inside `band`, `path` read as closed.
+///
+/// Sutherland–Hodgman, one side of the rect at a time: a rect is convex, so each
+/// pass is a walk of the polygon's edges and the four of them answer exactly the
+/// part of it the rect holds.
+/// A subpath survives as one polygon or as nothing, so a hole stays a hole under
+/// either fill rule, and the order of the vertices never reverses.
+fn clip_polygons(path: &kurbo::BezPath, band: kurbo::Rect) -> kurbo::BezPath {
+    let mut out = kurbo::BezPath::new();
+    let mut polygon: Vec<kurbo::Point> = Vec::new();
+    for element in path.elements() {
+        match *element {
+            PathEl::MoveTo(point) => {
+                push_polygon(&mut polygon, band, &mut out);
+                polygon.push(point);
+            }
+            // `edges` writes lines, so a curve here is the one shape this clip
+            // cannot split: its chord is the edge a fill would draw between the
+            // same ends.
+            PathEl::LineTo(point) | PathEl::QuadTo(_, point) | PathEl::CurveTo(_, _, point) => {
+                polygon.push(point);
+            }
+            PathEl::ClosePath => push_polygon(&mut polygon, band, &mut out),
+        }
+    }
+    push_polygon(&mut polygon, band, &mut out);
+    out
+}
+
+/// Clip `polygon` to `band` and append it to `out`, then empty it.
+fn push_polygon(polygon: &mut Vec<kurbo::Point>, band: kurbo::Rect, out: &mut kurbo::BezPath) {
+    let clipped = clip_polygon(polygon, band);
+    polygon.clear();
+    if clipped.len() < 3 {
+        return;
+    }
+    out.move_to(clipped[0]);
+    for point in &clipped[1..] {
+        out.line_to(*point);
+    }
+    out.close_path();
+}
+
+/// The part of `points` inside `band`, read as a closed polygon.
+fn clip_polygon(points: &[kurbo::Point], band: kurbo::Rect) -> Vec<kurbo::Point> {
+    if points.len() < 3 {
+        return Vec::new();
+    }
+    let mut polygon = points.to_vec();
+    polygon = clip_half(
+        &polygon,
+        |point| point.x >= band.x0,
+        |a, b| cross_x(a, b, band.x0),
+    );
+    polygon = clip_half(
+        &polygon,
+        |point| point.x <= band.x1,
+        |a, b| cross_x(a, b, band.x1),
+    );
+    polygon = clip_half(
+        &polygon,
+        |point| point.y >= band.y0,
+        |a, b| cross_y(a, b, band.y0),
+    );
+    polygon = clip_half(
+        &polygon,
+        |point| point.y <= band.y1,
+        |a, b| cross_y(a, b, band.y1),
+    );
+    polygon
+}
+
+/// The part of `polygon` on the side `inside` names, one pass of a clip.
+fn clip_half(
+    polygon: &[kurbo::Point],
+    inside: impl Fn(kurbo::Point) -> bool,
+    cross: impl Fn(kurbo::Point, kurbo::Point) -> kurbo::Point,
+) -> Vec<kurbo::Point> {
+    let mut out = Vec::with_capacity(polygon.len() + 4);
+    for (index, &current) in polygon.iter().enumerate() {
+        // The edge before the first vertex closes the polygon, because a fill
+        // closes a subpath whether the producer wrote it or not.
+        let previous = polygon[(index + polygon.len() - 1) % polygon.len()];
+        let (current_inside, previous_inside) = (inside(current), inside(previous));
+        if current_inside != previous_inside {
+            out.push(cross(previous, current));
+        }
+        if current_inside {
+            out.push(current);
+        }
+    }
+    out
+}
+
+/// Where the edge `a` to `b` crosses the vertical line `x`.
+fn cross_x(a: kurbo::Point, b: kurbo::Point, x: f64) -> kurbo::Point {
+    let t = (x - a.x) / (b.x - a.x);
+    kurbo::Point::new(x, a.y + t * (b.y - a.y))
+}
+
+/// Where the edge `a` to `b` crosses the horizontal line `y`.
+fn cross_y(a: kurbo::Point, b: kurbo::Point, y: f64) -> kurbo::Point {
+    let t = (y - a.y) / (b.y - a.y);
+    kurbo::Point::new(a.x + t * (b.x - a.x), y)
+}
+
+/// What `vello` flattens for a path that is already edges, in surface units.
+///
+/// Every vertex is one line, and the close of a subpath is one more, which is
+/// what [`count_path`] answers for a path of no curves.
+fn edges_work(path: &kurbo::BezPath) -> Work {
+    let mut work = Work::default();
+    count_path(&mut work, path, None, 0.0);
+    work
 }
 
 /// The one-color brush of a solid paint.
@@ -1495,6 +1906,7 @@ mod tests {
             plane,
             band: band_of(visible),
             work: Work::default(),
+            clip_scale: None,
         };
         assert!(
             base.covers(visible),
@@ -1750,6 +2162,170 @@ mod tests {
         primitive
     }
 
+    /// A curve the box misses becomes the chord between its own ends, and the
+    /// substitution is exact: the curve lies in the hull of its control points, so
+    /// a hull the box misses cannot reach it.
+    #[test]
+    fn a_curve_the_box_misses_becomes_its_chord() {
+        let mut path = kurbo::BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.curve_to((1.0, 10.0), (9.0, 10.0), (10.0, 0.0));
+        // A box that holds the curve, and one a thousand units away from it.
+        let near = kurbo::Rect::new(-1.0, -1.0, 11.0, 11.0);
+        let far = kurbo::Rect::new(1000.0, 1000.0, 1001.0, 1001.0);
+
+        let flattened = edges(&path, near, 0.01);
+        assert!(
+            flattened
+                .elements()
+                .iter()
+                .all(|element| !matches!(element, PathEl::CurveTo(..))),
+            "a curve the box reaches is flattened"
+        );
+        assert!(
+            flattened.elements().len() > 4,
+            "a flattened curve is a run of lines, not one of them"
+        );
+
+        let chaffed = edges(&path, far, 0.01);
+        let elements: Vec<PathEl> = chaffed.elements().to_vec();
+        assert_eq!(
+            elements,
+            vec![
+                PathEl::MoveTo((0.0, 0.0).into()),
+                PathEl::LineTo((10.0, 0.0).into())
+            ],
+            "a curve the box misses is the chord between its ends"
+        );
+    }
+
+    /// The clip keeps the part of a polygon the band holds, and the whole of a
+    /// polygon the band holds.
+    #[test]
+    fn a_polygon_is_kept_to_the_band() {
+        let band = kurbo::Rect::new(0.0, 0.0, 100.0, 100.0);
+        let inside = rect_path(kurbo::Rect::new(25.0, 25.0, 75.0, 75.0));
+        let kept = clip_polygons(&inside, band);
+        assert_eq!(
+            kept.elements().len(),
+            5,
+            "a polygon inside the band is four sides and a close: {kept:?}"
+        );
+        for element in kept.elements() {
+            let (PathEl::MoveTo(point) | PathEl::LineTo(point)) = *element else {
+                continue;
+            };
+            assert!(
+                band.contains(point),
+                "every vertex of a kept polygon is inside the band: {point:?}"
+            );
+        }
+
+        // A square that straddles the right side is cut to the band, and the cut
+        // keeps its area: the part of the square the band holds is half of it.
+        let straddling = rect_path(kurbo::Rect::new(50.0, 25.0, 150.0, 75.0));
+        let kept = clip_polygons(&straddling, band);
+        assert!(
+            (area(&kept) - 2500.0).abs() < 1e-9,
+            "the clip keeps the half of the square the band holds: {}",
+            area(&kept)
+        );
+    }
+
+    /// A subpath the band misses is dropped and one it holds is kept, so a hole
+    /// stays a hole and the fill rule still says what the producer meant.
+    #[test]
+    fn a_clipped_hole_survives_the_clip() {
+        let band = kurbo::Rect::new(0.0, 0.0, 100.0, 100.0);
+        let mut path = rect_path(kurbo::Rect::new(10.0, 10.0, 90.0, 90.0));
+        // A hole of the opposite turn, and a subpath the band never reaches.
+        path.extend(
+            rect_path(kurbo::Rect::new(30.0, 30.0, 50.0, 50.0))
+                .elements()
+                .iter()
+                .rev()
+                .copied(),
+        );
+        path.extend(
+            rect_path(kurbo::Rect::new(300.0, 300.0, 400.0, 400.0))
+                .elements()
+                .iter()
+                .copied(),
+        );
+
+        let kept = clip_polygons(&path, band);
+        let mut turns: Vec<f64> = Vec::new();
+        let mut polygon: Vec<kurbo::Point> = Vec::new();
+        for element in kept.elements() {
+            match *element {
+                PathEl::MoveTo(point) => {
+                    if polygon.len() > 2 {
+                        turns.push(turn(&polygon));
+                    }
+                    polygon.clear();
+                    polygon.push(point);
+                }
+                PathEl::LineTo(point) => polygon.push(point),
+                PathEl::ClosePath => {
+                    turns.push(turn(&polygon));
+                    polygon.clear();
+                }
+                PathEl::QuadTo(..) | PathEl::CurveTo(..) => {}
+            }
+        }
+        assert_eq!(turns.len(), 2, "the outer shape and its hole survive");
+        assert!(
+            turns[0].signum() != turns[1].signum(),
+            "the hole still turns against its shape: {turns:?}"
+        );
+    }
+
+    /// The band of a flattened encode is encoded again when a zoom doubles the
+    /// scale it was flattened for, and not before.
+    #[test]
+    fn a_flattened_band_is_encoded_again_past_the_ladder() {
+        let base = |clip_scale| Base {
+            list: Arc::from(Vec::<Primitive>::new()),
+            plane: (400.0, 8000.0),
+            band: kurbo::Rect::new(0.0, 0.0, 100.0, 75.0),
+            work: Work::default(),
+            clip_scale,
+        };
+        let flattened = base(Some(4.0));
+        assert!(
+            flattened.holds_scale(4.0),
+            "a band is sharp at its own scale"
+        );
+        assert!(
+            flattened.holds_scale(4.0 * LADDER),
+            "and at the top of the ladder its deviation allows"
+        );
+        assert!(
+            !flattened.holds_scale(4.0 * LADDER * 1.01),
+            "past it the facets show and the band is encoded again"
+        );
+        assert!(
+            base(None).holds_scale(4096.0),
+            "a band that clipped nothing keeps every frame"
+        );
+    }
+
+    /// The signed area of a closed path, in square surface units.
+    fn area(path: &kurbo::BezPath) -> f64 {
+        kurbo::Shape::area(path)
+    }
+
+    /// The signed area of a polygon, whose turn names the winding of a subpath.
+    fn turn(points: &[kurbo::Point]) -> f64 {
+        let mut path = kurbo::BezPath::new();
+        path.move_to(points[0]);
+        for point in &points[1..] {
+            path.line_to(*point);
+        }
+        path.close_path();
+        area(&path)
+    }
+
     /// A kept count answers what a walk of the same band answers, for every band
     /// a glide and a zoom ask for.
     ///
@@ -1785,12 +2361,14 @@ mod tests {
             );
             assert!(
                 kept.iter()
-                    .all(|&index| reaches(bounds_of(&list[index]), band)),
+                    .all(|&(index, _)| reaches(bounds_of(&list[index]), band)),
                 "a kept primitive is one the band reaches, at {band:?}"
             );
             assert!(
-                (0..list.len())
-                    .all(|index| kept.contains(&index) == reaches(bounds_of(&list[index]), band)),
+                (0..list.len()).all(|index| {
+                    kept.iter().any(|&(kept, _)| kept == index)
+                        == reaches(bounds_of(&list[index]), band)
+                }),
                 "every primitive the band reaches is kept, at {band:?}"
             );
         }
@@ -1815,7 +2393,11 @@ mod tests {
         let mut counts = Counts::new(&list);
         let first_page = kurbo::Rect::new(-400.0, -100.0, 400.0, 100.0);
         let (kept, _) = counts.survey(first_page);
-        assert_eq!(kept, vec![0], "the band keeps the page it shows");
+        assert_eq!(
+            kept.iter().map(|&(index, _)| index).collect::<Vec<_>>(),
+            vec![0],
+            "the band keeps the page it shows"
+        );
         assert_eq!(counts.counted(), 1, "and counts that page alone");
         assert_eq!(counts.measured(), 3, "while it measured every box it asks");
     }

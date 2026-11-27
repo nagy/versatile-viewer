@@ -2551,6 +2551,40 @@ fn a_listed_page_paints_what_the_raster_path_paints() {
     );
 }
 
+/// Paint one frame of `list` through `pass` and read the window back, or `None`
+/// when the pass refuses the frame.
+///
+/// The pass is the caller's, so a test can ask the same one for a zoom after a
+/// fit and read what the pass kept across the two.
+fn show_list_frame(
+    canvas: &mut Canvas,
+    pass: &mut vv_gpu::display::SceneView,
+    list: &std::sync::Arc<[vv_source::scene::Primitive]>,
+    frame: &vv_core::region::Frame,
+) -> Option<Pixels> {
+    canvas.begin(CLEAR);
+    let painted = pass
+        .draw(
+            &canvas.device,
+            &canvas.queue,
+            list,
+            Request {
+                frame,
+                size: canvas.size,
+                fallback: Fallback::Nothing,
+            },
+        )
+        .expect("the pass answers")?;
+    canvas.renderer.texture(
+        painted.texture,
+        painted.src,
+        painted.quad,
+        Color::WHITE,
+        Filter::Linear,
+    );
+    Some(canvas.print())
+}
+
 /// Paint a list into `canvas` at one output pixel per unit, and read it back.
 ///
 /// A plane under a frame of scale 1.0 and no pan puts one unit on one pixel,
@@ -2954,18 +2988,17 @@ fn heavy_page() -> Vec<u8> {
     })
 }
 
-/// A frame past `vello`'s flattening limit is refused instead of painted
-/// blank.
+/// A frame that shows a corner of a page-spanning path paints that corner.
 ///
-/// `vello` abandons a frame whose intermediate buffers run out, writes nothing
-/// to the target, and reports nothing (`Renderer::render_to_texture` is its
-/// non-robust path), so the pass has to know before it paints: it estimates the
-/// lines the frame would flatten (`BumpEstimator`) and answers `None`, which
-/// makes the view draw the plane texture and the region patch — the picture the
-/// source rasterizes at the window's own scale, with no such limit.
+/// `vello` flattens a path whole at the frame's scale, so a page of twenty
+/// thousand curves asks for more lines than its buffers hold at a deep zoom, and
+/// a frame past them is abandoned without a word (`Renderer::render_to_texture`
+/// is vello's non-robust path). The encoder therefore clips a path that alone
+/// asks for more than `PRIMITIVE_BUDGET` to the band, flattened at the scale the
+/// band was encoded for: the frame that shows a corner asks for the corner.
 #[test]
 #[ignore = "needs a Vulkan device"]
-fn a_frame_past_the_flatten_limit_is_refused() {
+fn a_deep_frame_paints_the_ink_the_band_holds() {
     use vv_core::{
         dim::{SurfaceSize, WindowSize, WindowVector},
         region,
@@ -2990,49 +3023,50 @@ fn a_frame_past_the_flatten_limit_is_refused() {
         .renderer
         .display_pass(&canvas.device)
         .expect("a display-list pass");
-    assert!(
-        pass.draw(
-            &canvas.device,
-            &canvas.queue,
-            &list,
-            Request {
-                frame: &frame(400.0),
-                size: canvas.size,
-                fallback: Fallback::Nothing,
-            },
-        )
-        .expect("the pass answers")
-        .is_none(),
-        "a frame that cannot fit the renderer is refused, not painted blank"
-    );
 
-    // The same page at one to one is a frame the pass paints.
-    let near = pass
-        .draw(
-            &canvas.device,
-            &canvas.queue,
-            &list,
-            Request {
-                frame: &frame(1.0),
-                size: canvas.size,
-                fallback: Fallback::Nothing,
-            },
-        )
-        .expect("the pass answers")
+    // One to one is a frame the pass paints, and its middle is the paper the
+    // document states.
+    let pixels = show_list_frame(&mut canvas, &mut pass, &list, &frame(1.0))
         .expect("the near frame fits the renderer");
-    canvas.begin(CLEAR);
-    canvas.renderer.texture(
-        near.texture,
-        near.src,
-        near.quad,
-        Color::WHITE,
-        Filter::Linear,
-    );
-    let pixels = canvas.print();
     assert_eq!(
         pixels.at(128, 128),
         [255, 0, 0, 255],
         "the paper of the page, from the list"
+    );
+
+    // Four hundred times over the same point is a frame the whole path cannot
+    // fit, and the corner of it that this window shows is a frame it can: the
+    // clip is the whole difference between the two.
+    let pixels = show_list_frame(&mut canvas, &mut pass, &list, &frame(400.0))
+        .expect("the ink the band holds fits the renderer");
+    assert_ne!(
+        pixels.at(128, 128),
+        [CLEAR.r, CLEAR.g, CLEAR.b, CLEAR.a],
+        "a deep frame paints the ink the band holds, and not the clear color"
+    );
+
+    // A frame that shows a sixth of the page clips the same path and keeps a
+    // thousand of its curves, so it is the frame where the geometry of the clip
+    // can be read: a raster of the same box is the same picture, which is what
+    // the chord and the flattening have to preserve. The window shows 256 pixels
+    // of the plane at eight to one, so the box is the plane's middle and the
+    // scaling is the only thing that puts it there.
+    let shown = 256.0 / 8.0;
+    let crop = region::crop(
+        plane.w / 2.0 - shown / 2.0,
+        plane.h / 2.0 - shown / 2.0,
+        shown,
+        shown,
+    );
+    let raster = surface
+        .render(View::region(0, crop, 8.0))
+        .expect("the box renders");
+    let pixels = show_list_frame(&mut canvas, &mut pass, &list, &frame(8.0))
+        .expect("a sixth of the page fits the renderer");
+    let mean = mean_difference(&pixels, &raster, (256, 256));
+    assert!(
+        mean <= 8,
+        "the clipped list paints what the raster of its box paints: mean difference {mean}"
     );
 }
 
@@ -4034,15 +4068,33 @@ fn a_zoom_back_in_answers_the_list_again() {
     );
 }
 
-/// A page of [`heavy_plane`]'s curves with a solid square in its middle, so a
-/// paint of the list has one window pixel that names it.
-fn heavy_page_with_a_square(red: [u8; 4]) -> std::sync::Arc<[vv_source::scene::Primitive]> {
+/// A page of [`heavy_plane`]'s curves, stroked with dashes, and a solid square in
+/// its middle.
+///
+/// The square is the one window pixel the paint of this list must put in the
+/// middle of the window. The dashes are why the list can still be refused past
+/// the budget: a dash is laid along the whole length of a path, so a piece of it
+/// the encoder leaves out would move every dash after it, and the pass keeps a
+/// dashed stroke whole (see `SceneView::clipped`).
+fn dashed_page_with_a_square(red: [u8; 4]) -> std::sync::Arc<[vv_source::scene::Primitive]> {
     use vv_core::{
         region,
-        scene::{self, Paint, Primitive},
+        scene::{self, Paint, Primitive, Stroke},
     };
 
     let mut primitives: Vec<Primitive> = heavy_plane(1, 15_000).to_vec();
+    let Primitive::Path { fill, stroke, .. } = &mut primitives[0] else {
+        panic!("a page of the plane is a path");
+    };
+    *fill = None;
+    *stroke = Some(Stroke {
+        style: kurbo::Stroke {
+            width: 2.0,
+            dash_pattern: kurbo::Dashes::from_slice(&[4.0, 2.0]),
+            ..kurbo::Stroke::new(2.0)
+        },
+        paint: Paint::Solid(Color::new(red[0], red[1], red[2], red[3])),
+    });
     primitives.push(Primitive::Rect {
         rect: scene::rect_of(region::crop(75.0, 75.0, 50.0, 50.0)),
         paint: Paint::Solid(Color::new(red[0], red[1], red[2], red[3])),
@@ -4055,11 +4107,13 @@ fn heavy_page_with_a_square(red: [u8; 4]) -> std::sync::Arc<[vv_source::scene::P
 ///
 /// A frame whose flattening runs past `LINE_BUDGET` is one `vello` paints
 /// nothing of, and it reports nothing, so the pass refuses it (see
-/// `vv_gpu::display`). What the refusal shows belongs to the caller: one that
-/// holds a raster of the plane asks [`Fallback::Nothing`] and paints that raster
-/// at the window's own scale, and one whose picture arrived as a list alone asks
-/// [`Fallback::LastPaint`] and gets the encode on screen, placed by the transform
-/// between the two frames: stale in sharpness and still the picture.
+/// `vv_gpu::display`). The list here strokes a page-spanning path with dashes,
+/// which is the shape the encoder cannot clip to the band, so a deep frame of it
+/// still asks for the whole path. What the refusal shows belongs to the caller:
+/// one that holds a raster of the plane asks [`Fallback::Nothing`] and paints
+/// that raster at the window's own scale, and one whose picture arrived as a list
+/// alone asks [`Fallback::LastPaint`] and gets the encode on screen, placed by the
+/// transform between the two frames: stale in sharpness and still the picture.
 #[test]
 #[ignore = "needs a Vulkan device"]
 fn a_refused_frame_keeps_the_paint_it_has() {
@@ -4069,7 +4123,7 @@ fn a_refused_frame_keeps_the_paint_it_has() {
     };
 
     let red = [255, 0, 0, 255];
-    let list = heavy_page_with_a_square(red);
+    let list = dashed_page_with_a_square(red);
     let plane = SurfaceSize::new(PAGE_HEIGHT as f32, PAGE_HEIGHT as f32);
     let frame = |scale: f32| region::Frame {
         img: plane,
