@@ -687,6 +687,8 @@ impl Viewer {
                 crop_tx,
                 crop_rx,
                 scene: None,
+                scene_box: None,
+                scene_wanted: false,
                 scene_pending: false,
             },
             scene_pass: ListPass::default(),
@@ -2569,6 +2571,10 @@ impl Viewer {
         // uploads the patch it paints.
         if self.st.mode == Mode::Image {
             self.st.drain_crops();
+            // A source that lists one box of its plane is asked for the box this
+            // window shows, which a caller that adopted it had no window to name
+            // (see `ViewState::request_box_scene`).
+            self.st.request_box_scene(Vec2::new(win_w, win_h));
             self.st
                 .tick_crop(Instant::now(), Vec2::new(win_w, win_h), &r.uploader());
         }

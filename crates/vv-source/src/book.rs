@@ -23,6 +23,12 @@
 //! region patch at a settled zoom converts back to points and rasterizes only
 //! the page parts the window shows.
 //!
+//! A listed book answers the pages a box reaches and never the whole plane
+//! ([`BookSurface::display_box`]): the plane of a manual is every page of it, so
+//! a list of the plane would be the document, while a list of the box a window
+//! shows is a spread and the ink beside it. The image view asks for the box its
+//! frame shows, so a hundred page manual costs what a two page article costs.
+//!
 //! The grid never uses this wrapper: a cell shows page 0 and nothing else.
 //!
 //! [`BookSurface::spread_count`] and [`BookSurface::spread_box`] publish the
@@ -72,19 +78,6 @@ pub const ROW_GAP: f32 = 0.0;
 
 /// The slots of one spread, left and right.
 pub const SLOTS: usize = 2;
-
-/// The most pages a book lists instead of rasterizing.
-///
-/// A book is one plane, and a list is written for the whole of the plane it
-/// names, so a listed book holds a list per page and every page of it at once.
-/// That is the right answer for an article and the wrong one for a five hundred
-/// page manual: the walk costs a few milliseconds a page and the encoded scene
-/// grows with every one of them.
-/// Past this count the book keeps the raster path, which paints only the spread
-/// the window shows.
-/// The real answer is one list per spread and a view that draws the spread it
-/// shows, which is its own decision and not a bigger constant here.
-pub const LIST_PAGES: usize = 64;
 
 /// The most output pixels one render makes.
 ///
@@ -399,21 +392,44 @@ impl Surface for BookSurface {
         if plane != 0 {
             return Err(SurfaceError::Plane(plane));
         }
-        let pages = self.inner.plane_count();
-        if pages > LIST_PAGES {
-            tracing::debug!(pages, limit = LIST_PAGES, "book display list");
-            return Ok(None);
+        // A book is one plane of every page, so a list of the plane is the whole
+        // document: a reader that answers lists asks for the box its window shows
+        // instead (see [`Self::display_box`]).
+        Ok(None)
+    }
+
+    fn lists_a_box(&self) -> bool {
+        true
+    }
+
+    /// The pages whose slots `part` reaches, placed in those slots.
+    ///
+    /// A page outside `part` is a page no window this list is asked for can
+    /// show, so leaving it out is what keeps a five hundred page manual as cheap
+    /// as a two page article: the list holds a spread and the ink beside it, not
+    /// the document.
+    /// A page inside `part` that answers no list still keeps the book a raster
+    /// for this part, because a list that dropped it would show a hole the raster
+    /// would have filled.
+    fn display_box(
+        &self,
+        plane: usize,
+        part: Crop,
+    ) -> Result<Option<Arc<[Primitive]>>, SurfaceError> {
+        if plane != 0 {
+            return Err(SurfaceError::Plane(plane));
         }
-        // A page of the book is a list of its own, so the book's list is those
-        // lists placed in their slots.
         let mut out = Vec::new();
-        for page in 0..pages {
-            let Some(list) = self.inner.display(page)? else {
-                // One page that a list cannot express keeps the whole book on
-                // the raster path, because the list is the whole plane.
+        for page in 0..self.inner.plane_count() {
+            let Some(slot) = self.page_slot(page) else {
                 return Ok(None);
             };
-            let Some(slot) = self.page_slot(page) else {
+            if !slot.intersects(&part) {
+                continue;
+            }
+            let Some(list) = self.inner.display(page)? else {
+                // One page that a list cannot express keeps the whole book on
+                // the raster path, because a list without it is not the book.
                 return Ok(None);
             };
             // A page's list is in points and its slot in base units, so the
@@ -823,7 +839,7 @@ mod tests {
         }
     }
 
-    /// Every page of a listed book lands in its own slot, in base units.
+    /// Every page a box reaches lands in its own slot, in base units.
     ///
     /// A page's list is in points and its slot in base units, so the placement
     /// converts the page's own units and only then moves it: the scale belongs
@@ -842,9 +858,12 @@ mod tests {
             "the fixture bakes a base scale below one: {}",
             book.units_per_point()
         );
-        let list = book.display(0).expect("a list").expect("the book lists");
-        assert_eq!(list.len(), pages.len(), "one paper per page: {list:?}");
         let size = book.size();
+        let list = book
+            .display_box(0, region::crop(0.0, 0.0, size.w, size.h))
+            .expect("a list")
+            .expect("the book lists");
+        assert_eq!(list.len(), pages.len(), "one paper per page: {list:?}");
         let mut seen: Vec<Crop> = Vec::new();
         for (page, primitive) in list.iter().enumerate() {
             let slot = book.page_slot(page).expect("a slot");
@@ -874,16 +893,66 @@ mod tests {
         }
     }
 
-    /// A book past the page limit keeps the raster path.
+    /// A book answers no list for its plane, and a list of the pages a box
+    /// reaches for a box: a five hundred page manual costs a spread and not the
+    /// document.
     #[test]
-    fn a_book_past_the_limit_answers_no_list() {
-        let pages = vec![(10.0, 10.0); LIST_PAGES + 1];
+    fn a_book_lists_the_pages_a_box_reaches() {
+        let pages = vec![(100.0, 150.0); 300];
         let book = BookSurface::new(Arc::new(Listed(pages))).expect("a book");
-        assert!(book.display(0).expect("an answer").is_none());
+        assert!(
+            book.lists_a_box(),
+            "a book is the source that lists one part of its plane"
+        );
+        assert!(
+            book.display(0).expect("an answer").is_none(),
+            "a list of the whole plane is the whole document, which a book does not answer"
+        );
+
+        // A box inside the third spread, clear of the boundary it shares with the
+        // spread above it: a spread is two pages, so the list holds both of them
+        // and no page of the spreads before or after.
+        let spread = book.spread_box(3).expect("a spread");
+        let inside = region::crop(
+            spread.min_x(),
+            spread.min_y() + 1.0,
+            spread.width(),
+            spread.height() - 2.0,
+        );
+        let list = book
+            .display_box(0, inside)
+            .expect("a list")
+            .expect("the spread lists");
+        assert_eq!(list.len(), SLOTS, "one spread is two papers: {list:?}");
+        // The placement of every paper is the slot of a page of that spread, so
+        // the box chose the pages and nothing else moved them.
+        let mut landed: Vec<(f64, f64)> = list
+            .iter()
+            .map(|primitive| {
+                let Primitive::Path { transform, .. } = primitive else {
+                    panic!("a placed paper is a path");
+                };
+                let [_xx, _yx, _xy, _yy, x, y] = transform.as_coeffs();
+                (x, y)
+            })
+            .collect();
+        landed.sort_by(|a, b| a.partial_cmp(b).expect("a slot is a number"));
+        let mut slots: Vec<(f64, f64)> = book
+            .pages(3)
+            .expect("the spread exists")
+            .into_iter()
+            .flatten()
+            .map(|page| {
+                let slot = book.page_slot(page).expect("a slot of the spread");
+                (f64::from(slot.min_x()), f64::from(slot.min_y()))
+            })
+            .collect();
+        slots.sort_by(|a, b| a.partial_cmp(b).expect("a slot is a number"));
+        assert_eq!(landed, slots, "the spread lands in its own slots");
     }
 
-    /// One page that a list cannot express keeps the whole book on the raster
-    /// path, because the list is the whole plane.
+    /// One page inside the box that a list cannot express keeps the book a
+    /// raster for that box, because a list without that page is not the book.
     #[test]
     fn one_unlisted_page_keeps_the_book_a_raster() {
         /// A source whose second page answers no list.
@@ -925,6 +994,19 @@ mod tests {
         }
 
         let book = BookSurface::new(Arc::new(Half(vec![(10.0, 10.0); 2]))).expect("a book");
-        assert!(book.display(0).expect("an answer").is_none());
+        let whole = book.size();
+        assert!(
+            book.display_box(0, region::crop(0.0, 0.0, whole.w, whole.h))
+                .expect("an answer")
+                .is_none(),
+            "the page that cannot list takes the book with it"
+        );
+        // The page alone is still a list, which is what a window that shows only
+        // that page asks for.
+        let first = book.page_slot(0).expect("a slot");
+        assert!(
+            book.display_box(0, first).expect("an answer").is_some(),
+            "a box that misses the page which cannot list lists the one it holds"
+        );
     }
 }

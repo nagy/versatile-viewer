@@ -44,7 +44,8 @@ use crate::{
     grid::{DecodeFailure, EntrySource, Grid},
     input::Input,
     loader::Loader,
-    region, region_sel,
+    region::{self, Crop},
+    region_sel,
     render::Renderer,
     rotate,
     scene::Primitive,
@@ -424,6 +425,21 @@ pub struct ViewState {
     /// None for every source that answers a raster, which keeps the region
     /// patch and the whole-plane texture as the path those sources take.
     pub scene: Option<Arc<[Primitive]>>,
+    /// The box of the plane that [`Self::scene`] answers, or `None` for a list of
+    /// the whole plane.
+    ///
+    /// A source that lists one box at a time (a book, see
+    /// [`Surface::display_box`]) answers the ink of that box and nothing else, so
+    /// the view asks again once the window's own box leaves this one. A source
+    /// that lists a whole plane answers the same list for every box, so this
+    /// stays `None` and one build serves the plane.
+    pub scene_box: Option<Crop>,
+    /// Whether the next frame should ask for a list with the box it shows.
+    ///
+    /// A list of one box needs the window, which a caller that adopts a source
+    /// does not have: the adopt asks for the list and the next frame, which shows
+    /// the window, hands it the box (see [`Self::request_box_scene`]).
+    pub scene_wanted: bool,
     /// Whether a worker builds the list of the plane the view holds now.
     pub scene_pending: bool,
 }
@@ -539,9 +555,13 @@ pub enum CropMsg {
     ///
     /// `None` says the source answers a raster, which keeps the region patch
     /// and the whole-plane texture as the path the view takes.
+    /// `part` is the box that list answers, and `None` a list of the whole
+    /// plane: the view installs an answer for the box it asked for last and
+    /// drops one for a box it left (see [`ViewState::scene_box`]).
     Scene {
         generation: u64,
         plane: Size,
+        part: Option<Crop>,
         list: Option<Arc<[Primitive]>>,
     },
 }
@@ -864,6 +884,8 @@ impl ViewState {
     pub fn close_crop(&mut self) {
         self.source = None;
         self.scene = None;
+        self.scene_box = None;
+        self.scene_wanted = false;
         self.scene_pending = false;
         self.list_drawn = false;
         self.viewport = None;
@@ -995,6 +1017,10 @@ impl ViewState {
     /// parses its content stream.
     /// One build in flight: a plane that moves again asks once the first answer
     /// lands, and the list on screen stays until the new one does.
+    ///
+    /// A source that lists one box of its plane answers no list here: only a
+    /// frame knows the window, so it asks with the box it shows (see
+    /// [`Self::request_box_scene`]).
     pub fn request_scene(&mut self) {
         if self.scene_pending {
             return;
@@ -1002,13 +1028,40 @@ impl ViewState {
         let Some(source) = self.source.clone() else {
             return;
         };
+        if source.lists_a_box() {
+            // The list of this source is the list of a box, and a box belongs to
+            // a frame: the next frame hands one in (see
+            // [`Self::request_box_scene`]).
+            self.scene_wanted = true;
+            return;
+        }
+        self.ask_scene(None);
+    }
+
+    /// Ask a worker for the list of `part` of the plane, or of the whole plane
+    /// for `None`.
+    ///
+    /// One build in flight: the flag is what the next ask reads, and an answer
+    /// for a box the view left clears it without landing (see [`CropMsg::Scene`]).
+    fn ask_scene(&mut self, part: Option<Crop>) {
+        if self.scene_pending {
+            return;
+        }
+        let Some(source) = self.source.clone() else {
+            return;
+        };
         self.scene_pending = true;
+        self.scene_wanted = false;
+        self.scene_box = part;
         let (generation, tx) = (self.crop_gen, self.crop_tx.clone());
         let plane = self.source_plane;
         let size = self.img;
         rayon::spawn(move || {
             let started = Instant::now();
-            let list = source.display(plane).ok().flatten();
+            let list = match part {
+                Some(part) => source.display_box(plane, part).ok().flatten(),
+                None => source.display(plane).ok().flatten(),
+            };
             // The build is the one step of a list this viewer cannot see: a
             // document walks its tree and a map lays itself out, and a slow one
             // shows as a picture that arrives late.
@@ -1023,9 +1076,54 @@ impl ViewState {
             let _ = tx.send(CropMsg::Scene {
                 generation,
                 plane: size,
+                part,
                 list,
             });
         });
+    }
+
+    /// Ask a worker for the display list the window shows, when the list on
+    /// screen answers another box.
+    ///
+    /// A book is one plane of every page, so a list of the plane is the whole
+    /// document and a list of the box the window shows is a spread and the ink
+    /// beside it (see [`Surface::display_box`]). The box is
+    /// [`crate::display::band_for`]'s, which is the box the display pass culls
+    /// its encode to, so the source and the renderer agree on what a frame can
+    /// show and no page is listed for a window that cannot reach it.
+    ///
+    /// A source that lists a whole plane is asked once, and its list holds every
+    /// box: this returns without a build for every frame after the first.
+    pub fn request_box_scene(&mut self, win: Vec2) {
+        if self.scene_pending {
+            return;
+        }
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        if !source.lists_a_box() {
+            if self.scene_wanted {
+                self.request_scene();
+            }
+            return;
+        }
+        let Some(frame) = self.frame(win) else {
+            return;
+        };
+        let Some(band) = crate::display::band_for(&frame) else {
+            return;
+        };
+        // The box the last answer was asked for, whether that answer was a list
+        // or a source that lists nothing: a book whose page cannot list keeps the
+        // raster path for that box instead of asking for it every frame.
+        if self
+            .scene_box
+            .is_some_and(|asked| asked.contains_rect(&band))
+            && !self.scene_wanted
+        {
+            return;
+        }
+        self.ask_scene(Some(band));
     }
 
     /// Ask a worker for the source of an entry, so the view can repaint the
@@ -1205,14 +1303,19 @@ impl ViewState {
                 CropMsg::Scene {
                     generation,
                     plane,
+                    part,
                     list,
                 } => {
                     // Any answer ends the build, stale or not: a flag left set
                     // by a dropped answer would refuse every later ask.
                     self.scene_pending = false;
-                    // A list of a plane the view left would draw the layout of
-                    // the frame before it, so only the current one lands.
-                    if generation == self.crop_gen && same_plane(plane, self.img) {
+                    // A list of a plane or a box the view left would draw the
+                    // layout of the frame before it, so only the current one
+                    // lands.
+                    if generation == self.crop_gen
+                        && same_plane(plane, self.img)
+                        && part == self.scene_box
+                    {
                         self.scene = list;
                     } else {
                         // The launch asks for a list before the first frame
@@ -2473,6 +2576,71 @@ mod tests {
         );
     }
 
+    /// A source that lists one box of its plane, and remembers what it was
+    /// asked for, so a test can watch the box follow the window.
+    struct Boxed {
+        /// Every box the source was asked for, so a test can count the builds.
+        asked: Arc<std::sync::Mutex<Vec<Crop>>>,
+        /// Whether the source answers a list at all.
+        lists: bool,
+    }
+
+    impl Surface for Boxed {
+        fn plane_count(&self) -> usize {
+            1
+        }
+
+        fn bounds(&self, plane: usize) -> Result<Size, SurfaceError> {
+            if plane != 0 {
+                return Err(SurfaceError::Plane(plane));
+            }
+            Ok(Size { w: 100.0, h: 800.0 })
+        }
+
+        fn render_whole(&self, _plane: usize, _scale: f32) -> Result<DecodedImage, SurfaceError> {
+            Err(SurfaceError::Unsupported(
+                "a list source barely rasterizes".into(),
+            ))
+        }
+
+        fn progressive(
+            &self,
+        ) -> Result<Option<Box<dyn crate::surface::ChunkSource>>, SurfaceError> {
+            Ok(None)
+        }
+
+        fn display(
+            &self,
+            _plane: usize,
+        ) -> Result<Option<Arc<[crate::scene::Primitive]>>, SurfaceError> {
+            Ok(None)
+        }
+
+        fn display_box(
+            &self,
+            plane: usize,
+            part: Crop,
+        ) -> Result<Option<Arc<[crate::scene::Primitive]>>, SurfaceError> {
+            self.bounds(plane)?;
+            self.asked.lock().expect("the asks").push(part);
+            if !self.lists {
+                return Ok(None);
+            }
+            Ok(Some(Arc::from(vec![crate::scene::Primitive::Rect {
+                rect: crate::scene::rect_of(part),
+                paint: crate::scene::Paint::Solid(Color::new(1, 2, 3, 255)),
+            }])))
+        }
+
+        fn lists_a_box(&self) -> bool {
+            true
+        }
+
+        fn can_refine(&self) -> bool {
+            true
+        }
+    }
+
     /// A source that answers one rect, so a test can watch the list land.
     struct Listed;
 
@@ -2606,6 +2774,8 @@ mod tests {
             crop_tx,
             crop_rx,
             scene: None,
+            scene_box: None,
+            scene_wanted: false,
             scene_pending: false,
         }
     }
@@ -2746,6 +2916,108 @@ mod tests {
         assert!(
             wait_for_scene(&mut st),
             "the list of the measured plane lands"
+        );
+    }
+
+    /// A source that lists one box is asked for the box the window shows, and
+    /// asked again only when the window leaves that box.
+    ///
+    /// A book is one plane of every page, so a list of the plane is the whole
+    /// document: the view asks for the band of the frame (see
+    /// `display::band_for`), which is the box the pass culls its own encode to,
+    /// and it keeps that list while the pan stays inside it.
+    #[test]
+    fn a_boxed_list_follows_the_window() {
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut st = view_state();
+        st.img = Size { w: 100.0, h: 800.0 };
+        st.view_scale = Some(region::Scale::uniform(1.0));
+        let win = Vec2::new(200.0, 200.0);
+        // A window 200 pixels tall over a plane 800 units tall at one to one: this
+        // pan puts the top spread under it.
+        st.pan = Vec2::new(0.0, 300.0);
+        // The adopt has no window, so it asks for nothing yet.
+        st.adopt_source(Some(Arc::new(Boxed {
+            asked: Arc::clone(&asked),
+            lists: true,
+        })));
+        assert!(st.scene_wanted, "the first frame carries the box");
+        assert!(
+            asked.lock().expect("the asks").is_empty(),
+            "an adopt asks no worker without a window"
+        );
+
+        // The first frame names the box, and the list lands.
+        st.request_box_scene(win);
+        assert!(wait_for_scene(&mut st), "the list of that box lands");
+        let first = asked.lock().expect("the asks").clone();
+        assert_eq!(first.len(), 1, "one build for one box");
+        let band = first[0];
+        assert!(
+            band.contains(dim::surface_point(Vec2::new(50.0, 200.0))),
+            "the box holds the pixel the window's middle shows: {band:?}"
+        );
+
+        // A pan inside the box asks nothing: the box is padded by half the
+        // window, which is what a glide over one spread costs.
+        st.pan = Vec2::new(0.0, 200.0);
+        st.request_box_scene(win);
+        assert!(st.scene.is_some(), "the list on screen still holds");
+        assert_eq!(
+            asked.lock().expect("the asks").len(),
+            1,
+            "a pan inside the box asks for no build"
+        );
+
+        // A pan out of the box asks for the box the window shows now.
+        st.pan = Vec2::new(0.0, 150.0);
+        st.scene = None;
+        st.request_box_scene(win);
+        assert!(wait_for_scene(&mut st), "the list of the new box lands");
+        let asks = asked.lock().expect("the asks").clone();
+        assert_eq!(asks.len(), 2, "one build for the box the window left");
+        assert!(
+            asks[1].contains(dim::surface_point(Vec2::new(50.0, 250.0))),
+            "the new box holds the pixel the window shows now: {:?}",
+            asks[1]
+        );
+    }
+
+    /// A source that answers no list for a box keeps the raster path for that box
+    /// instead of asking a worker again on every frame.
+    ///
+    /// The frame asks whenever the box the window shows is not one it already
+    /// asked for, so an answer of "none" must count as the answer for that box:
+    /// a page a list cannot express would otherwise cost a build per frame.
+    #[test]
+    fn a_box_that_lists_nothing_is_asked_once() {
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut st = view_state();
+        st.img = Size { w: 100.0, h: 800.0 };
+        st.view_scale = Some(region::Scale::uniform(1.0));
+        let win = Vec2::new(200.0, 200.0);
+        st.pan = Vec2::new(0.0, 300.0);
+        st.adopt_source(Some(Arc::new(Boxed {
+            asked: Arc::clone(&asked),
+            lists: false,
+        })));
+        for _ in 0..3 {
+            st.request_box_scene(win);
+            // The answer lands before the frame after it, so a loop would show
+            // up as a third ask.
+            for _ in 0..200 {
+                st.drain_crops();
+                if !st.scene_pending {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+        assert!(st.scene.is_none(), "the box answers no list");
+        assert_eq!(
+            asked.lock().expect("the asks").len(),
+            1,
+            "a box that lists nothing is asked once"
         );
     }
 

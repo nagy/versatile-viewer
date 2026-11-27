@@ -2322,8 +2322,12 @@ fn a_listed_book_places_its_pages() {
     let blue = "0 0 1 rg\n0 0 64 64 re f\n";
     std::fs::write(&path, pdf_with(2, red, blue)).expect("write the pdf");
     let surface = vv_source::surface::open_book_surface(&path).expect("a book");
+    let plane = surface.bounds(0).expect("the book measures");
+    // A box that holds the whole plane, which is the list of every page a reader
+    // wrapping the whole book asks for.
+    let whole = region::crop(0.0, 0.0, plane.w, plane.h);
     let list = surface
-        .display(0)
+        .display_box(0, whole)
         .expect("a list")
         .expect("a book of two pages lists");
     assert!(
@@ -2333,7 +2337,6 @@ fn a_listed_book_places_its_pages() {
 
     let mut canvas = canvas!(256, 256);
     canvas.begin(CLEAR);
-    let plane = surface.bounds(0).expect("the book measures");
     let frame = region::Frame {
         img: SurfaceSize::new(plane.w, plane.h),
         win: WindowSize::new(256.0, 256.0),
@@ -2418,13 +2421,17 @@ fn a_listed_book_places_its_pages_below_one_base_unit() {
         "the fixture bakes a base scale below one: {}",
         surface.units_per_point()
     );
-    let list = surface.display(0).expect("a list").expect("the book lists");
+    let plane = surface.bounds(0).expect("the book measures");
+    let whole = region::crop(0.0, 0.0, plane.w, plane.h);
+    let list = surface
+        .display_box(0, whole)
+        .expect("a list")
+        .expect("the book lists");
     assert!(!list.is_empty(), "the pages ride the list");
 
     let (win_w, win_h) = (512.0f32, 512.0f32);
     let mut canvas = canvas!(512, 512);
     canvas.begin(CLEAR);
-    let plane = surface.bounds(0).expect("the book measures");
     let frame = region::Frame {
         img: SurfaceSize::new(plane.w, plane.h),
         win: WindowSize::new(win_w, win_h),
@@ -2473,6 +2480,126 @@ fn a_listed_book_places_its_pages_below_one_base_unit() {
             pixels.at(x, y)
         );
     }
+}
+
+/// A book of three hundred pages lists the spread its window shows, and that
+/// spread is the picture the raster path paints.
+///
+/// A book is one plane of every page, so a list of the plane is the whole
+/// document: `display` answers none of it and `display_box` answers the pages the
+/// box reaches, which is what keeps a long manual as cheap as a short article.
+/// This is the one place the two numbers meet: the spread's list is a page and
+/// the ink beside it, and the raster of the same box is the picture it must
+/// paint.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_long_book_lists_the_spread_its_window_shows() {
+    use vv_core::{
+        dim::{SurfaceSize, WindowSize, WindowVector},
+        region,
+        scene::Primitive,
+    };
+
+    // Three hundred pages, each its own shade, so a page that lands in the wrong
+    // slot shows as another color.
+    let shade = |page: usize| f64::from(page as u8 % 8 + 1) / 9.0;
+    let document = pdf_with_box(300, [0, 0, 64, 64], |page| {
+        format!("{0} 0 0 rg\n0 0 64 64 re f\n", shade(page))
+    });
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("manual.pdf");
+    std::fs::write(&path, document).expect("write the pdf");
+    let surface = vv_source::surface::open_book_surface(&path).expect("a book");
+    assert_eq!(surface.plane_count(), 1, "a book is one plane");
+    assert!(
+        surface.display(0).expect("an answer").is_none(),
+        "a list of the plane would be the whole document"
+    );
+
+    let plane = surface.bounds(0).expect("the book measures");
+    let spread = surface.spread_box(7).expect("a spread");
+    // A box inside the spread, clear of the boundary it shares with the spread
+    // above it, so the pages it reaches are exactly the spread's own.
+    let inside = region::crop(
+        spread.min_x(),
+        spread.min_y() + 1.0,
+        spread.width(),
+        spread.height() - 2.0,
+    );
+    let list = surface
+        .display_box(0, inside)
+        .expect("an answer")
+        .expect("the spread lists");
+
+    // What the spread costs, against what the document would: every primitive of
+    // a page of this document is one paper rect, so the elements of the list are
+    // the ink it carries.
+    let elements = |list: &[Primitive]| -> usize {
+        list.iter()
+            .map(|primitive| match primitive {
+                Primitive::Path { path, .. } => path.elements().len(),
+                Primitive::Rect { .. }
+                | Primitive::Image { .. }
+                | Primitive::Glyphs { .. }
+                | Primitive::PushClip { .. }
+                | Primitive::PopClip
+                | Primitive::PushLayer { .. }
+                | Primitive::PopLayer => 1,
+            })
+            .sum()
+    };
+    let spread_cost = elements(&list);
+    let whole = region::crop(0.0, 0.0, plane.w, plane.h);
+    let document_cost = elements(
+        &surface
+            .display_box(0, whole)
+            .expect("an answer")
+            .expect("the document lists"),
+    );
+    assert!(
+        spread_cost * 100 < document_cost,
+        "a spread costs under a hundredth of the document: {spread_cost} against {document_cost} \
+         for 300 pages"
+    );
+
+    // The frame that shows that spread: the box fills the window, so the pan is
+    // what puts the spread's middle on the window's middle.
+    let scale = 256.0 / spread.height();
+    let frame = region::Frame {
+        img: SurfaceSize::new(plane.w, plane.h),
+        win: WindowSize::new(256.0, 256.0),
+        pan: WindowVector::new(
+            0.0,
+            (spread.min_y() + spread.height() / 2.0 - plane.h / 2.0) * -scale,
+        ),
+        scale: vv_core::region::Scale::uniform(scale),
+        angle: 0.0,
+    };
+    let mut canvas = canvas!(256, 256);
+    let mut pass = canvas
+        .renderer
+        .display_pass(&canvas.device)
+        .expect("a display-list pass");
+    let pixels = show_list_frame(&mut canvas, &mut pass, &list, &frame)
+        .expect("the spread fits the renderer");
+
+    // And the raster of the same box is the same picture, so the pages the box
+    // chose are the pages the window shows.
+    let raster = surface
+        .render(View::region(0, frame.crop(0.0), scale))
+        .expect("the box renders");
+    // The box and the scale round to whole pixels on their own, so the raster is
+    // the window within a pixel on each side: the corner both start at is the
+    // same one, so the comparison reads the pixels they share.
+    let shared = (
+        raster.width().raw() as usize,
+        raster.height().raw() as usize,
+    );
+    let mean = mean_difference(&pixels, &raster, shared);
+    assert!(
+        mean <= 8,
+        "the spread the box lists is the spread the raster paints: mean difference {mean}"
+    );
 }
 
 /// A 200 by 100 page with a red square and a two by one picture in a box.
@@ -3070,15 +3197,14 @@ fn a_deep_frame_paints_the_ink_the_band_holds() {
     );
 }
 
-/// A book zoomed in past the point where its whole list fits `vello`'s
-/// allocators still paints the page the window shows.
+/// A book zoomed deep into its cover still paints the page the window shows.
 ///
-/// `vello` flattens every encoded curve and its bump allocators hold a fixed
-/// number of lines, picked for a bench scene, so a book — one plane holding
-/// every page, so one list — paints *nothing at all* past a few zoom steps, and
-/// reports no error while it does. The pass keeps only the band the window
-/// reaches (see `vv_gpu::display`), so the cover paints here however many pages
-/// the book hides beside it.
+/// Two things keep a book honest at a deep zoom. The source lists the box the
+/// window shows, so the cover's list is the cover (`display_box`), and the pass
+/// keeps only the primitives of the band the window reaches (see
+/// `vv_gpu::display`), so the pages beside the cover cost nothing. `vello` would
+/// otherwise flatten every page of the plane at this scale, and its fixed
+/// allocators paint nothing at all when that runs past them.
 #[test]
 #[ignore = "needs a Vulkan device"]
 fn a_zoomed_book_paints_the_page_it_shows() {
@@ -3092,8 +3218,14 @@ fn a_zoomed_book_paints_the_page_it_shows() {
     let path = dir.path().join("dense-book.pdf");
     std::fs::write(&path, dense_book()).expect("write the pdf");
     let surface = vv_source::surface::open_book_surface(&path).expect("a book");
-    let list = surface.display(0).expect("a list").expect("the book lists");
     let plane = surface.bounds(0).expect("the book measures");
+    let cover = surface.page_box(0).expect("the cover's slot");
+    // The box a deep frame of the cover shows is the cover and the ink beside it,
+    // which is the list a reader of that frame asks for.
+    let list = surface
+        .display_box(0, cover)
+        .expect("a list")
+        .expect("the cover lists");
     // A page's paper comes first in its own list, and a book places every page,
     // so the first primitive of the book is the cover's paper: a rect of the page
     // carried as a path, because a rect states no transform of its own.

@@ -974,6 +974,39 @@ fn window_hull(to_window: Affine, size: (u32, u32)) -> kurbo::Rect {
     hull
 }
 
+/// The box of a plane that `frame` shows, padded by [`BAND_MARGIN`] on each
+/// side, or `None` for a frame whose window maps onto no box.
+///
+/// This is the box [`SceneView`] culls its encode to, and the box a source that
+/// lists one part of its plane is asked for (see
+/// [`vv_source::surface::Surface::display_box`]): one policy for both, so a
+/// source never builds a list of ink the frame cannot show.
+///
+/// The frame names its own window, so the caller needs nothing beside it.
+#[must_use]
+pub fn band_for(frame: &region::Frame) -> Option<region::Crop> {
+    let size = (
+        frame.win.width.max(0.0).round() as u32,
+        frame.win.height.max(0.0).round() as u32,
+    );
+    let band = band_of(window_hull(to_window(frame), size));
+    let finite =
+        band.x0.is_finite() && band.y0.is_finite() && band.x1.is_finite() && band.y1.is_finite();
+    finite.then(|| {
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "a surface box is f32 everywhere else in the tree, and a box that does not \
+                      fit an f32 is a frame no source can list"
+        )]
+        region::crop(
+            band.x0 as f32,
+            band.y0 as f32,
+            band.width() as f32,
+            band.height() as f32,
+        )
+    })
+}
+
 /// The band an encode keeps for the window `visible` names: that box, padded by
 /// [`BAND_MARGIN`] of its size on each side.
 ///

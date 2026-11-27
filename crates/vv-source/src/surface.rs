@@ -223,6 +223,44 @@ pub trait Surface: Send + Sync {
         Ok(None)
     }
 
+    /// The primitives of `plane` that `part` reaches, in surface units, or `None`
+    /// when this backend answers a raster only.
+    ///
+    /// A list holds no region of its own, so this is the same list `display`
+    /// answers with the primitives of the boxes `part` misses left out: a caller
+    /// that pans asks again once its window leaves `part` (see
+    /// [`Self::lists_a_box`]).
+    /// A book is the source this exists for: its plane is every page of the
+    /// document, so a list of the plane holds the whole manual, while a window
+    /// that shows one spread needs a page and the one beside it.
+    ///
+    /// The default answers [`Self::display`], which is the whole plane and so
+    /// the truthful answer for every part of it.
+    ///
+    /// # Errors
+    ///
+    /// The function errors when the plane index is out of range, or when
+    /// building the list fails.
+    fn display_box(
+        &self,
+        plane: usize,
+        _part: Crop,
+    ) -> Result<Option<Arc<[Primitive]>>, SurfaceError> {
+        self.display(plane)
+    }
+
+    /// Whether [`Self::display_box`] answers the box it is asked for, and not
+    /// the whole plane.
+    ///
+    /// A source that answers a whole plane holds the same list for every box, so
+    /// a caller asks it once per plane and keeps the answer. A source that
+    /// scopes answers less than the plane, and a caller must ask again when its
+    /// window leaves the box it asked for: this is what tells the two apart
+    /// without reading the list.
+    fn lists_a_box(&self) -> bool {
+        false
+    }
+
     /// Whether the loader sends a fast low-resolution preview before the
     /// full-quality render.
     /// True for slow rasterizers (rasterizing takes a moment).
