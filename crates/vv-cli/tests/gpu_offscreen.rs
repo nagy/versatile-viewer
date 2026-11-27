@@ -3510,6 +3510,125 @@ fn a_stroke_rect_stays_inside_its_rect() {
     assert_eq!(pixels.at(16, 16), [0, 0, 0, 255], "hollow middle");
 }
 
+/// A selected cell wears a two-tone ring, so it reads on a page of any shade.
+///
+/// The selection covers thumbnails of every color there is: a document's page is
+/// white, a photograph can be black, and a scanned page sits in the mid-grey
+/// between them.
+/// A ring of one color disappears on a picture of that color, and so does the
+/// complement of the picture, which maps 50% grey onto itself, so the ring
+/// carries two tones: black outside and white inside.
+/// The pages here are mid-grey, which neither tone can be confused with, and
+/// each band is 4 px, so the whole ring is 8 px.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_selected_cell_wears_a_two_tone_ring() {
+    /// The 50% grey page both cells show, which no tone of the ring matches.
+    const PAGE: Color = Color::new(128, 128, 128, 255);
+    const BLACK: Color = Color::BLACK;
+    const WHITE: Color = Color::WHITE;
+    /// The square a cell holds while its decode is on its way.
+    const PENDING: Color = Color::new(28, 28, 28, 255);
+    let Some(canvas) = Canvas::new(256, 256) else {
+        skip_without_adapter();
+        return;
+    };
+    let dir = tempfile::tempdir().expect("a temp dir");
+    for name in ["a.svg", "b.svg"] {
+        std::fs::write(
+            dir.path().join(name),
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="#808080"/></svg>"##,
+        )
+        .expect("write the svg");
+    }
+    let launch = vv_view::viewer::Launch::open(dir.path(), true).expect("the launch opens");
+    let mut viewer = vv_view::viewer::Viewer::new(
+        canvas.device.clone(),
+        canvas.queue.clone(),
+        FORMAT,
+        canvas.device.limits().max_texture_dimension_2d,
+        launch,
+        canvas.size,
+    );
+    let mut host = QuietHost;
+    let mut landed = None;
+    for _ in 0..240 {
+        let view = canvas
+            .target
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        viewer
+            .render(&mut host, &view, canvas.size, 0.016)
+            .expect("the frame renders");
+        let pixels = canvas.read();
+        if count(&pixels, PENDING) == 0 {
+            landed = Some(pixels);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
+    let pixels = landed.expect("the thumbnails land");
+    // The ring is the only black ink on a grey page, and it covers the outer
+    // band of the cursor's cell, so its own box is the thumb it marks.
+    let mut box_ = (usize::MAX, usize::MAX, 0, 0);
+    for y in 0..256 {
+        for x in 0..256 {
+            if pixels.at(x, y) == BLACK.to_bytes() {
+                box_ = (box_.0.min(x), box_.1.min(y), box_.2.max(x), box_.3.max(y));
+            }
+        }
+    }
+    let (x0, y0, x1, y1) = box_;
+    let (mid_x, mid_y) = (x0.midpoint(x1), y0.midpoint(y1));
+    // Four pixels of black, then four of white, then the page: the two tones
+    // sit against each other and the ring stays inside the cell it marks.
+    assert_eq!(pixels.at(mid_x, y0), BLACK.to_bytes(), "the outer band");
+    assert_eq!(
+        pixels.at(mid_x, y0 + 3),
+        BLACK.to_bytes(),
+        "the outer band is 4 px"
+    );
+    assert_eq!(
+        pixels.at(mid_x, y0 + 4),
+        WHITE.to_bytes(),
+        "the inner band starts"
+    );
+    assert_eq!(
+        pixels.at(mid_x, y0 + 7),
+        WHITE.to_bytes(),
+        "the inner band is 4 px"
+    );
+    assert_eq!(
+        pixels.at(mid_x, y0 + 8),
+        PAGE.to_bytes(),
+        "the page under the ring"
+    );
+    assert_eq!(
+        pixels.at(mid_x, mid_y),
+        PAGE.to_bytes(),
+        "the ring is hollow"
+    );
+    assert_eq!(
+        pixels.at(x0, mid_y),
+        BLACK.to_bytes(),
+        "the left band reads black"
+    );
+    assert_eq!(
+        pixels.at(x0 + 4, mid_y),
+        WHITE.to_bytes(),
+        "and the left inner band white"
+    );
+    assert_eq!(
+        pixels.at(x0 - 1, mid_y),
+        CLEAR.to_bytes(),
+        "the gap outside the thumb"
+    );
+    assert_eq!(
+        pixels.at(mid_x, y0 - 1),
+        CLEAR.to_bytes(),
+        "above the thumb"
+    );
+}
+
 /// A document launch paints its first spread without a whole-plane render.
 ///
 /// A book holds every page in one plane, so a scale-1.0 render of it costs one

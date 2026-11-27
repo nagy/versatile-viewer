@@ -36,7 +36,7 @@ use bytemuck::{Pod, Zeroable};
 use vv_core::theme::Theme;
 
 use crate::{
-    dim::Rect,
+    dim::{self, Rect},
     draw::{Color, Quad, Turn, Vec2},
     gpu::{FrameError, Gpu},
     texture::{Filter, Texture, TextureError, Uploader},
@@ -325,6 +325,32 @@ impl QuadInstance {
     }
 }
 
+/// The four bands of a rectangle's outline, tiled so that no two overlap.
+///
+/// The two horizontals run the whole width and the two verticals span only the
+/// gap between them, so the ring closes at every corner with no notch and no
+/// second coat. A double coat of one opaque color is invisible, and a double
+/// coat of a translucent one is not: it darkens every corner of the ring.
+fn ring(rect: Rect, thickness: f32) -> [Quad; 4] {
+    let (width, height) = (rect.width(), rect.height());
+    // A ring never grows past the middle of the rect it outlines, so a thin
+    // cell draws a thin ring instead of four overlapping bands.
+    let thickness = thickness.min(width / 2.0).min(height / 2.0);
+    let (left, top) = (rect.min_x(), rect.min_y());
+    let span = height - 2.0 * thickness;
+    [
+        Quad::rect(dim::rect(left, top, width, thickness)),
+        Quad::rect(dim::rect(left, top + height - thickness, width, thickness)),
+        Quad::rect(dim::rect(left, top + thickness, thickness, span)),
+        Quad::rect(dim::rect(
+            left + width - thickness,
+            top + thickness,
+            thickness,
+            span,
+        )),
+    ]
+}
+
 /// One run of instances that share a bind group.
 struct DrawCall {
     group: Arc<wgpu::BindGroup>,
@@ -525,39 +551,12 @@ impl Renderer {
     ///
     /// The ring covers the outer band of the rect, so a cell ring never spills
     /// into the gap between two cells.
-    /// The four edges meet at the corners, so the ring closes with no notch.
+    /// The four bands of [`ring`] tile the outline, so the corners close with
+    /// no notch and take one coat.
     pub fn stroke_rect(&mut self, rect: Rect, thickness: f32, color: Color) {
-        // A line of `thickness` sits centered on its segment. The top and the
-        // bottom run the whole width so they close both corners, and the two
-        // sides span only the gap between them.
-        let half = thickness / 2.0;
-        let (left, right) = (rect.min_x() + half, rect.max_x() - half);
-        let (top, bottom) = (rect.min_y() + half, rect.max_y() - half);
-        // The horizontal edges take the band's center line, from edge to edge.
-        self.line(
-            Vec2::new(rect.min_x(), top),
-            Vec2::new(rect.max_x(), top),
-            thickness,
-            color,
-        );
-        self.line(
-            Vec2::new(rect.min_x(), bottom),
-            Vec2::new(rect.max_x(), bottom),
-            thickness,
-            color,
-        );
-        self.line(
-            Vec2::new(left, top),
-            Vec2::new(left, bottom),
-            thickness,
-            color,
-        );
-        self.line(
-            Vec2::new(right, top),
-            Vec2::new(right, bottom),
-            thickness,
-            color,
-        );
+        for quad in ring(rect, thickness) {
+            self.fill(quad, color);
+        }
     }
 
     /// Draw a filled triangle.
@@ -999,6 +998,43 @@ mod tests {
         assert_eq!(inst.p[0], [0.0, 0.0]);
         assert_eq!(inst.p[2], [10.0, 20.0]);
         assert_eq!(inst.tint, [1.0, 1.0, 1.0, 1.0]);
+    }
+
+    /// A ring covers every point of its outline once and the rest none.
+    ///
+    /// A double coat of one opaque color is invisible, and a double coat of a
+    /// translucent one darkens every corner of the ring. The grid's two-tone
+    /// ring relies on the tiling for the same reason: a band drawn twice would
+    /// pour one tone over the other at each corner.
+    #[test]
+    fn a_ring_covers_its_outline_once() {
+        /// The corners of an axis-aligned quad as `min_x, min_y, max_x, max_y`.
+        fn bounds(quad: &Quad) -> (f32, f32, f32, f32) {
+            (quad.p[0].x, quad.p[0].y, quad.p[2].x, quad.p[2].y)
+        }
+        fn covers(quad: &Quad, x: f32, y: f32) -> bool {
+            let (x0, y0, x1, y1) = bounds(quad);
+            x0 <= x && x <= x1 && y0 <= y && y <= y1
+        }
+        let rect = dim::rect(8.0, 8.0, 32.0, 32.0);
+        let bands = ring(rect, 8.0);
+        for x in 0..49 {
+            for y in 0..49 {
+                let (x, y) = (x as f32 + 0.5, y as f32 + 0.5);
+                let hits = bands.iter().filter(|band| covers(band, x, y)).count();
+                // The same closed bounds as `covers`, so a sample that landed
+                // on an edge would still agree with it.
+                let inside = (8.0..=40.0).contains(&x)
+                    && (8.0..=40.0).contains(&y)
+                    && !((16.0..=32.0).contains(&x) && (16.0..=32.0).contains(&y));
+                assert_eq!(hits, usize::from(inside), "the point at {x}, {y}");
+            }
+        }
+        // A ring thicker than the rect it outlines never draws past it.
+        for band in ring(rect, 64.0) {
+            let (x0, y0, x1, y1) = bounds(&band);
+            assert!(x0 >= 8.0 && y0 >= 8.0 && x1 <= 40.0 && y1 <= 40.0, "inside");
+        }
     }
 
     /// A solid instance covers the quad and keeps the tint as straight alpha.

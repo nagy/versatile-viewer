@@ -64,6 +64,7 @@ A resolution-independent source may answer a `scene::Primitive` list instead, an
 ### Render
 
 - The renderer is `wgpu`, the window is `winit`, and one instanced-quad pipeline draws everything. A picture, a veil band, a selection border and a solid fill are the same draw.
+  A selection ring over a picture cannot be one color: a coat vanishes on a picture of that color, and no formula of the pixels escapes it — the complement of a mid-grey page is that same mid-grey, a hue rotation leaves grey grey, and any continuous map of the color cube onto itself leaves some color where it was. `grid::draw_selection_ring` therefore draws two tones, black outside and white inside, so whichever band the page matches, the other one stands.
 - The backend is Vulkan only (`Backends::VULKAN`, features `vulkan` and `wgsl`), so no DX12, Metal or GL instance exists and no library opens for one. Keep that set fixed: it is the one startup knob that matters.
 - One color space and one alpha convention run from the decoder to the swapchain: a non-sRGB swapchain, every texture `Rgba8Unorm`, and straight alpha. Do not mix them.
 - `Gpu::new` registers a device-lost callback and the frame loop stops with the driver's reason. A recovery path is not written.

@@ -1,7 +1,10 @@
 //! Directory thumbnail grid.
 //! Square center-crop thumbnails fill the whole window, unlike the fixed
 //! thumbnail sizes of nsxiv.
-//! A white border marks the selection.
+//! A two-tone ring marks the selection.
+//! The ring's outer band is black and its inner band white, so one of them
+//! always stands out: a coat of one color vanishes on a picture of that color,
+//! and no formula of the pixels can avoid it (see `draw_selection_ring`).
 //!
 //! A cell is an [`EntrySource`]: a file on disk, opened lazily at decode
 //! time.
@@ -11,7 +14,7 @@
 //! `v` selects charwise, `V` linewise, and `Ctrl+v` blockwise.
 //! The same key toggles its mode off, `o` swaps the anchor and the cursor,
 //! and ESC clears the selection.
-//! Every selected cell draws the same white border as the cursor.
+//! Every selected cell draws the same two-tone ring as the cursor.
 //! While a visual selection is active, every cell outside it draws dimmed
 //! with the `DIM_TINT` grey, so the selected set stands out.
 //! The plain cursor marking dims nothing.
@@ -154,6 +157,9 @@ impl EntrySource {
 
 const MARGIN: f32 = 8.0;
 const GAP: f32 = 8.0;
+/// The width of the two-tone ring that marks a selected cell, in window pixels.
+/// Half of it is the black outer band and half the white inner one.
+const SELECTION_RING: f32 = 8.0;
 /// Grid zoom step for +/- (the same 25% steps as the image-view free zoom).
 const GRID_ZOOM_STEP: f32 = 1.25;
 /// Lower bound for the thumbnail side when the grid zooms out.
@@ -1551,10 +1557,34 @@ impl Grid {
                 r.fill_rect(thumb, Color::new(28, 28, 28, 255).tint(tint));
             }
             if in_selection {
-                r.stroke_rect(thumb, 4.0, Color::WHITE);
+                draw_selection_ring(r, thumb);
             }
         }
     }
+}
+
+/// Draw the ring that marks a selected cell: black outside, white inside.
+///
+/// A ring of one color — white, or the complement of the picture it covers —
+/// disappears on a picture of that color, and every thumbnail is something: a
+/// document's page is white, a photograph can be any shade, and the complement
+/// of a mid-grey page is the same mid-grey.
+/// No formula of the pixels can avoid that, because a continuous map of the
+/// color cube onto itself leaves some color where it was (the complement leaves
+/// the whole 50% diagonal), and a hue rotation leaves a grey page grey.
+/// Two tones answer it without reading the picture: whichever band the page
+/// matches, the other one stands against it.
+fn draw_selection_ring(r: &mut Renderer, thumb: Rect) {
+    let band = SELECTION_RING / 2.0;
+    r.stroke_rect(thumb, band, Color::BLACK);
+    // The inner band sits against the outer one, so the two tile the ring.
+    let inner = dim::rect(
+        thumb.min_x() + band,
+        thumb.min_y() + band,
+        (thumb.width() - SELECTION_RING).max(0.0),
+        (thumb.height() - SELECTION_RING).max(0.0),
+    );
+    r.stroke_rect(inner, band, Color::WHITE);
 }
 
 /// Draw the failure mark of a cell whose decode failed.
