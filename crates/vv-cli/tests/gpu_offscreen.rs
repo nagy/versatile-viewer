@@ -137,6 +137,16 @@ impl Canvas {
     /// A caller that painted the target itself (the viewer owns its own
     /// renderer) reads the result here, so one readback serves both.
     fn read(&self) -> Pixels {
+        self.read_texture(&self.target)
+    }
+
+    /// Read every pixel of `texture`, a texture of this canvas's size, back as
+    /// `[r, g, b, a]`.
+    ///
+    /// The budget test paints through the renderer's own encoder, whose target
+    /// is the test's and not the canvas's, so the readback names the texture it
+    /// reads.
+    fn read_texture(&self, texture: &wgpu::Texture) -> Pixels {
         let (width, height) = self.size;
         let unpadded = width * 4;
         let padded = unpadded.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
@@ -154,7 +164,7 @@ impl Canvas {
             });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &self.target,
+                texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -234,6 +244,14 @@ impl Pixels {
         let (x0, y0) = (rect.min_x() as usize, rect.min_y() as usize);
         let (x1, y1) = (rect.max_x() as usize, rect.max_y() as usize);
         (y0..y1).all(|y| (x0..x1).all(|x| self.at(x, y) == color))
+    }
+
+    /// How many pixels of this frame hold any alpha at all.
+    fn lit(&self) -> usize {
+        (0..self.height)
+            .flat_map(|y| (0..self.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| self.at(x, y)[3] > 0)
+            .count()
     }
 }
 
@@ -4198,6 +4216,192 @@ fn a_zoom_back_in_answers_the_list_again() {
         .is_some(),
         "a zoom back out paints the list it painted before"
     );
+}
+
+/// The frame the budget refuses is the frame `vello` itself paints nothing of.
+///
+/// `vello` abandons a frame whose flattened curves run past its `lines` buffer
+/// and paints no pixel of it, without an error and without a partial picture, so
+/// `vv_gpu::display` refuses that frame first. Where that frame starts is a
+/// measurement and not a guess, and this is the measurement: the renderer
+/// itself, with no budget in the way, tells where this page first blanks, and
+/// the pass then has to refuse that exact frame and still paint one at a
+/// sixty-fourth of its scale, where a band is worth a small share of the buffer
+/// the renderer holds.
+/// The page is stroked with dashes because that is the shape the encoder cannot
+/// clip: a dash is laid along the whole length of a path, so a piece the clip
+/// left out would move every dash after it, and the pass keeps the path whole
+/// past the budget instead (see `SceneView::clipped`). A filled page would be
+/// clipped to the band and paint, however deep the zoom.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_band_past_the_budget_is_the_frame_the_renderer_blanks_on() {
+    use vv_core::{
+        dim::{SurfaceSize, WindowSize, WindowVector},
+        region,
+    };
+
+    let red = [255, 0, 0, 255];
+    let list = dashed_page_with_a_square(red);
+    let plane = SurfaceSize::new(PAGE_HEIGHT as f32, PAGE_HEIGHT as f32);
+    let frame = |scale: f32| region::Frame {
+        img: plane,
+        win: WindowSize::new(256.0, 256.0),
+        pan: WindowVector::zero(),
+        scale: region::Scale::uniform(scale),
+        angle: 0.0,
+    };
+
+    let mut canvas = canvas!(256, 256);
+    let mut renderer = vello::Renderer::new(
+        &canvas.device,
+        vello::RendererOptions {
+            use_cpu: false,
+            antialiasing_support: vello::AaSupport::area_only(),
+            num_init_threads: None,
+            pipeline_cache: None,
+        },
+    )
+    .expect("a vello renderer beside the pass");
+
+    // Where the renderer itself runs out: the first zoom of the sweep whose
+    // whole frame holds no pixel at all.
+    let blank = (0..16)
+        .map(|step| 8.0 * 2f32.powi(step))
+        .find(|&scale| vello_shot(&mut renderer, &canvas, &list, &frame(scale)).lit() == 0)
+        .expect("a deep enough zoom of this page runs the renderer out");
+
+    let mut pass = canvas
+        .renderer
+        .display_pass(&canvas.device)
+        .expect("a display-list pass");
+    assert!(
+        show_list_frame(&mut canvas, &mut pass, &list, &frame(blank)).is_none(),
+        "the frame the renderer blanks on is a frame the pass refuses"
+    );
+
+    // And the budget is a bound a reader can live with: a sixty-fourth of that
+    // zoom is still a frame the pass paints, and it paints the square the list
+    // states in the middle of its page.
+    let pixels = show_list_frame(&mut canvas, &mut pass, &list, &frame(blank / 64.0))
+        .expect("a sixty-fourth of the blanking zoom fits the budget");
+    assert_eq!(
+        pixels.at(128, 128),
+        red,
+        "the square of the list is what the band paints"
+    );
+}
+
+/// `list` painted by the renderer's own encoder, with no budget in the way.
+///
+/// The oracle of the budget test: the same paths under the same transform,
+/// encoded at the frame's own scale, so a frame that runs past `vello`'s fixed
+/// allocators is the frame this one paints nothing of. Only the two primitives
+/// the heavy fixtures state are read, because a picture or a glyph run would
+/// measure the brushes and not the flattening the budget counts.
+fn vello_shot(
+    renderer: &mut vello::Renderer,
+    canvas: &Canvas,
+    list: &[vv_source::scene::Primitive],
+    frame: &vv_core::region::Frame,
+) -> Pixels {
+    use vv_core::scene::{FillRule, Paint, Primitive};
+
+    let placed = vv_gpu::display::to_window(frame);
+    let mut scene = vello::Scene::new();
+    for primitive in list {
+        match primitive {
+            Primitive::Rect { rect, paint } => {
+                let Paint::Solid(color) = paint else {
+                    panic!("the heavy fixtures paint one color");
+                };
+                scene.fill(
+                    vello::peniko::Fill::NonZero,
+                    placed,
+                    vello_color(*color),
+                    None,
+                    rect,
+                );
+            }
+            Primitive::Path {
+                path,
+                transform,
+                fill,
+                fill_rule,
+                stroke,
+            } => {
+                let at = placed * *transform;
+                let rule = match fill_rule {
+                    FillRule::NonZero => vello::peniko::Fill::NonZero,
+                    FillRule::EvenOdd => vello::peniko::Fill::EvenOdd,
+                };
+                if let Some(fill) = fill {
+                    let Paint::Solid(color) = fill else {
+                        panic!("the heavy fixtures paint one color");
+                    };
+                    scene.fill(rule, at, vello_color(*color), None, path);
+                }
+                if let Some(stroke) = stroke {
+                    let Paint::Solid(color) = &stroke.paint else {
+                        panic!("the heavy fixtures paint one color");
+                    };
+                    // The dashes are laid along the path exactly as the pass
+                    // lays them, so the two renders flatten the same outline.
+                    scene.stroke(&stroke.style, at, vello_color(*color), None, path);
+                }
+            }
+            Primitive::Image { .. }
+            | Primitive::Glyphs { .. }
+            | Primitive::PushClip { .. }
+            | Primitive::PopClip
+            | Primitive::PushLayer { .. }
+            | Primitive::PopLayer => {
+                panic!("the heavy fixtures paint no picture, run, clip or layer")
+            }
+        }
+    }
+
+    let (width, height) = canvas.size;
+    let target = canvas.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("vv budget target"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        // A renderer paints with compute work, so the target is a storage
+        // binding and not only a render attachment.
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    renderer
+        .render_to_texture(
+            &canvas.device,
+            &canvas.queue,
+            &scene,
+            &view,
+            &vello::RenderParams {
+                base_color: vello::peniko::Color::TRANSPARENT,
+                width,
+                height,
+                antialiasing_method: vello::AaConfig::Area,
+            },
+        )
+        .expect("the renderer paints");
+    canvas.queue.submit([]);
+    canvas.read_texture(&target)
+}
+
+/// The renderer's color for one color of a display list.
+fn vello_color(color: vv_core::draw::Color) -> vello::peniko::Color {
+    vello::peniko::Color::from_rgba8(color.r, color.g, color.b, color.a)
 }
 
 /// A page of [`heavy_plane`]'s curves, stroked with dashes, and a solid square in

@@ -3505,6 +3505,7 @@ dependencies = [
  "tempfile",
  "tracing",
  "tracing-subscriber",
+ "vello",
  "vv-core",
  "vv-gpu",
  "vv-mcp",

@@ -61,8 +61,13 @@
 //! # The frame that does not fit
 //!
 //! [`Work`] is the count of lines that frame would flatten, in the tolerance law
-//! `vello` itself sizes its buffers with, so a frame that will not fit is refused
-//! and shown as whatever the caller keeps behind the list: a caller with a raster
+//! `vello` itself sizes its buffers with, and it over-reports: Wang's formula
+//! bounds a curve the flattener approximates by an Euler spiral and then caps at
+//! a hundred lines a piece, by 1.2 times at the tightest and 4.5 at a deep zoom
+//! (measured against the allocator the shader writes, `47f32f0`). So the budget
+//! is a fraction of the real buffer that the smallest of those over-counts still
+//! holds, and a frame that will not fit is refused and shown as whatever the
+//! caller keeps behind the list: a caller with a raster
 //! of the plane draws that instead, which the source rasterizes at the window's
 //! own scale and which has no such limit, and a caller with nothing behind the
 //! list asks for [`Fallback::LastPaint`] and gets the paint on screen again,
@@ -79,7 +84,9 @@
 //! and a zoom out and back in would leave the list for the raster for good.
 //! Counting the box of the refused frame says whether the renderer can hold the
 //! picture that frame actually shows, and a frame it can hold re-encodes for that
-//! box and paints.
+//! box and paints. That count takes a primitive whole, which is what the clip of
+//! the encode takes back, so a box with a primitive past [`PRIMITIVE_BUDGET`] is
+//! re-encoded whatever the count says, and the clip says whether it fits.
 //!
 //! # Image leaves
 //!
@@ -603,6 +610,13 @@ impl SceneView {
     /// walk instead of paying it every frame. The counts that survive are the
     /// ones a refusal did ask for, and the next box of that band reads them (see
     /// [`Counts`]).
+    ///
+    /// A count is what a primitive asks for whole, and a primitive the encoder
+    /// clips asks for the corner the box shows instead (see [`Self::encode`]), so
+    /// a box the survey calls too heavy is still worth an encode when a
+    /// primitive over [`PRIMITIVE_BUDGET`] has a clip at all: the clip is what
+    /// takes that count back. A dashed stroke is the case without one, and a
+    /// document of those is refused without the walk.
     fn tighten(&mut self, list: &Arc<[Primitive]>, band: kurbo::Rect, scale: f64) -> bool {
         let Some(base) = self.encoded.as_ref() else {
             return false;
@@ -616,8 +630,11 @@ impl SceneView {
         if base.work.lines_at(scale) / (had / wants) > LINE_BUDGET {
             return false;
         }
-        let (_, work) = self.survey(list, band);
+        let (kept, work) = self.survey(list, band);
         !work.too_heavy(scale)
+            || kept.iter().any(|&(index, own)| {
+                own.lines_at(scale) > PRIMITIVE_BUDGET && clippable(&list[index])
+            })
     }
 
     /// Encode the primitives of `list` whose ink reaches `band`, in surface
@@ -757,6 +774,9 @@ impl SceneView {
         band: kurbo::Rect,
         tolerance: f64,
     ) -> Option<Work> {
+        if !clippable(primitive) {
+            return None;
+        }
         let Primitive::Path {
             path,
             transform,
@@ -767,17 +787,7 @@ impl SceneView {
         else {
             return None;
         };
-        if stroke
-            .as_ref()
-            .is_some_and(|outline| !outline.style.dash_pattern.is_empty())
-        {
-            return None;
-        }
-        let stretch = longest_axis(transform);
-        if !(stretch.is_finite() && stretch > 0.0) {
-            return None;
-        }
-        let local = tolerance / stretch;
+        let local = tolerance / longest_axis(transform);
         let mut work = Work::default();
         if let Some(paint) = fill {
             let edges = edges(path, local_box(band, transform, 0.0)?, local);
@@ -1116,25 +1126,55 @@ fn longest_axis(transform: &Affine) -> f64 {
     xx.hypot(yx).max(xy.hypot(yy))
 }
 
+/// Whether [`SceneView::clipped`] has an answer for `primitive`.
+///
+/// A fill always does, and so does a stroke whose outline is laid along the path
+/// alone. A dashed stroke is the one shape the clip cannot state, and a
+/// placement that maps no length at all has no box to flatten to.
+#[must_use]
+fn clippable(primitive: &Primitive) -> bool {
+    let Primitive::Path {
+        transform, stroke, ..
+    } = primitive
+    else {
+        return false;
+    };
+    let stretch = longest_axis(transform);
+    stretch.is_finite()
+        && stretch > 0.0
+        && stroke
+            .as_ref()
+            .is_none_or(|outline| outline.style.dash_pattern.is_empty())
+}
+
 /// The most flattened lines one frame may ask `vello` for.
 ///
 /// `vello_encoding::BufferSizes::new` fixes that buffer at `1 << 21` entries
 /// ("hand picked to accommodate the vello test scenes as well as paris-30k"),
 /// and a frame that runs past it is abandoned without an error, so this pass
 /// refuses one that would (see the module docstring).
-/// [`Work`] counts a shape the window clips as a whole, so it answers more than
-/// the renderer flattens: half of the real buffer is where a frame is handed to
-/// the raster path instead.
-const LINE_BUDGET: f64 = ((1u32 << 21) / 2) as f64;
+/// [`Work`] over-reports what the flattener writes, by a factor that grows with
+/// the zoom: a range of curve shapes measured against `BumpAllocators::lines`
+/// answers 1.16 at an eighth of the fit scale, 2.2 at one to one and 4.5 at a
+/// deep zoom, because Wang's formula bounds a curve that `vello` approximates by
+/// an Euler spiral and then caps at a hundred lines a piece. So the smallest
+/// over-count leaves an estimate of three quarters of the real buffer still
+/// under what the renderer holds, and the buffer itself too near it: this budget
+/// keeps a third of the buffer clear in the worst measured case (see
+/// [`Self::lines_at`] and `47f32f0`).
+const LINE_BUDGET: f64 = ((1u32 << 21) * 3 / 4) as f64;
 
 /// The most lines one primitive may ask `vello` to flatten before the encoder
 /// clips it to the band.
 ///
 /// A path is a document's own geometry, so nothing bounds what a producer wrote:
 /// one page-spanning path of twenty thousand curves asks for more than a whole
-/// band. A sixteenth of [`LINE_BUDGET`] is where a primitive is worth the walk of
-/// its own clipping, and sixteen of them still fit a band that is not refused.
-const PRIMITIVE_BUDGET: f64 = LINE_BUDGET / 16.0;
+/// band. A primitive past [`LINE_BUDGET`] alone is one no band holding it can
+/// paint, so clipping it is the only way that frame paints at all, while a
+/// primitive under the budget is handed over whole: the clip walks and flattens
+/// the path on the frame thread, which is 20 to 45 ms on the fixtures this tree
+/// tests, and a band that fits must not pay for one.
+const PRIMITIVE_BUDGET: f64 = LINE_BUDGET;
 
 /// The deviation, in device pixels, a clipped curve may show at the scale its
 /// band was encoded for.
@@ -1163,8 +1203,16 @@ const RSQRT_OF_TOLERANCE: f64 = 2.236_067_977_5;
 const QUAD_DEGREE: f64 = 0.5;
 const CUBIC_DEGREE: f64 = 0.866_025_403_78;
 
-/// The floor `vello_encoding` puts under one curve, in lines.
-const LINES_PER_CURVE: f64 = 5.0;
+/// The floor this pass puts under one curve, in lines.
+///
+/// `vello_encoding` floors its own count at five, and the sweep of `47f32f0`
+/// found that short: a wave of eight units at a quarter of the fit scale
+/// flattens to six lines a curve, so an estimate floored at five answered 0.84
+/// of the lines the renderer wrote, and a budget must never answer less. Eight
+/// is flat over the sweep's small scales, where the flattener's count stops
+/// falling because a curve is a few Euler-spiral pieces and each piece draws at
+/// least one line.
+const LINES_PER_CURVE: f64 = 8.0;
 
 /// How many curves a glyph's outline stands for.
 ///
@@ -1177,9 +1225,11 @@ const CURVES_PER_GLYPH: f64 = 40.0;
 ///
 /// `vello` flattens in device units, and the lines a curve becomes grow with the
 /// square root of the scale it lands at — Wang's formula, which `vello_encoding`
-/// itself sizes its buffers with, and which overestimates the integral `vello`
-/// actually subdivides by. So the counts are kept in surface units and the frame
-/// applies its own square root, and a zoom or a pan costs no walk of the paths.
+/// itself sizes its buffers with, and which bounds a curve the renderer
+/// approximates by an Euler spiral and then caps at a hundred lines a piece, so
+/// it answers more than the flattener writes (see [`LINE_BUDGET`]). So the
+/// counts are kept in surface units and the frame applies its own square root,
+/// and a zoom or a pan costs no walk of the paths.
 #[derive(Clone, Copy, Debug, Default)]
 struct Work {
     /// The segments that flatten to one line each, at any scale.
@@ -2146,9 +2196,13 @@ mod tests {
         );
     }
 
-    /// A frame whose geometry would run past vello's lines buffer is refused
-    /// before it paints, and one that fits is not: `vello` answers *nothing* on
-    /// the first and reports nothing at all, so the caller must be told.
+    /// A band whose estimate crosses the budget is refused before it paints, and
+    /// one that stays under it is not: `vello` answers *nothing* on a frame past
+    /// its lines buffer and reports nothing at all, so the caller must be told.
+    ///
+    /// What `LINE_BUDGET` is worth against the real buffer is a measurement, not
+    /// an assertion this test can make: `a_band_past_the_budget_is_the_frame_the_renderer_blanks_on`
+    /// pins it against the renderer's own blank.
     #[test]
     fn a_heavy_band_is_refused() {
         let mut light = Work::default();
@@ -2169,8 +2223,59 @@ mod tests {
             );
         }
         assert!(
-            heavy.too_heavy(64.0),
+            heavy.too_heavy(256.0),
             "a deep zoom of that path cannot fit the renderer"
+        );
+    }
+
+    /// A page of twenty thousand curves is handed over whole at the zoom where a
+    /// reader first looks at it, and clipped only past the budget.
+    ///
+    /// The clip walks and flattens the path on the frame thread, so it is paid
+    /// only where the primitive alone is more than a band can hold: eight times
+    /// the fit is a frame the renderer holds whole, and four hundred times is
+    /// past [`PRIMITIVE_BUDGET`] and is the frame the clip exists for.
+    #[test]
+    fn a_page_is_clipped_only_past_the_budget() {
+        let mut page = Work::default();
+        // The waves of the display pass's heavy page: a sixty-unit swing over a
+        // fifteen-unit step, twenty thousand of them across the plane.
+        count(&mut page, &wave(20_000, 60.0));
+
+        assert!(
+            page.lines_at(8.0) < PRIMITIVE_BUDGET,
+            "eight times the fit is handed over whole: {} lines",
+            page.lines_at(8.0)
+        );
+        assert!(
+            page.lines_at(400.0) > PRIMITIVE_BUDGET,
+            "four hundred times is past it: {} lines",
+            page.lines_at(400.0)
+        );
+    }
+
+    /// A curve shrunk small is counted at the floor and never below what the
+    /// flattener writes of it.
+    ///
+    /// A flat curve needs fewer lines as it shrinks, until the count stops at the
+    /// pieces `vello` fits it with: the sweep of `47f32f0` measured six lines a
+    /// curve for a wave of eight units at a quarter of the fit scale, and six
+    /// again at a sixteenth. `vello_encoding` floors its own count at five, which
+    /// answered less than the renderer wrote, so the floor here is eight.
+    #[test]
+    fn a_small_curve_is_counted_at_the_floor() {
+        let mut small = Work::default();
+        count(&mut small, &wave(20_000, 8.0));
+
+        assert!(
+            small.lines_at(0.25) >= 6.0 * 20_000.0,
+            "a quarter of the fit counts the six lines a curve the sweep measured: {}",
+            small.lines_at(0.25)
+        );
+        assert!(
+            small.lines_at(0.015_625) >= 6.0 * 20_000.0,
+            "and four more shrinks do not count less: {}",
+            small.lines_at(0.015_625)
         );
     }
 
