@@ -13,7 +13,7 @@ License: AGPL-3.0-or-later.
 ```
 crates/vv-core/    dim draw pixels scene theme region region_sel rotate tween keyrepeat push, the shared constants
 crates/vv-pixels/  resample_rgba, cap_texture_side, rgba_from_samples, error, placeholder
-crates/vv-cache/   Cache, CacheError, CachedThumb, WRITE_BUDGET (thumbnails and converted answers)
+crates/vv-cache/   Cache, CacheError, CachedThumb, Counts, WRITE_BUDGET (thumbnails and converted answers)
 crates/vv-gpu/     gpu render display texture
 crates/vv-source/  sign surface svg vector_scene pdf pdf_scene book convert treemap decode scene_file
 crates/vv-view/    input zoomkeys push pane screen blurbg loader grid view viewer

@@ -57,11 +57,19 @@
 //! entry whose source is gone stays unread.
 //! The cache directory is user-private and the source path is user-private, so
 //! the entries hold no data from another user.
+//!
+//! The cache also counts what it did: one counter per read it answered, read it
+//! could not answer, entry the source outran, and entry it wrote (see
+//! [`Counts`]).
+//! A decode worker counts on the shared `Cache` and the grid reads the answer
+//! when its directory settles, so a warm launch reports one line and not one
+//! per file.
+//! The counters only feed that report: nothing reads one to decide anything.
 
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -178,6 +186,47 @@ pub struct Cache {
     converted: Option<PathBuf>,
     /// The bytes this run wrote so far, against `WRITE_BUDGET`.
     written: AtomicU64,
+    /// Reads this cache answered since the last [`Self::take_counts`].
+    hits: AtomicU64,
+    /// Reads it could not answer, which is normal on a cold directory.
+    misses: AtomicU64,
+    /// Misses whose entry named another stamp, so the source was rewritten.
+    stale: AtomicU64,
+    /// Entries this run wrote.
+    stored: AtomicU64,
+    /// Set by the first write that fails, so a read-only cache home, a spent
+    /// budget or a full disk warns once and not once per file.
+    warned: AtomicBool,
+}
+
+/// The work a [`Cache`] did since the last [`Cache::take_counts`].
+///
+/// A decode worker counts on the shared cache and the grid reads the answer
+/// when its batch settles, so a directory of a thousand files reports as one
+/// event and not a thousand.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Counts {
+    /// Reads the cache answered from disk, so those cells painted before any
+    /// decode.
+    pub hits: u64,
+    /// Reads that found no entry, or an entry the source outran.
+    pub misses: u64,
+    /// Misses whose entry named another length or modification time.
+    pub stale: u64,
+    /// Entries written in that span.
+    pub stored: u64,
+}
+
+impl Counts {
+    /// The reads and the writes of every kind, which is zero when the cache
+    /// touched nothing.
+    ///
+    /// `stale` is not added: it names the subset of `misses` the source
+    /// outran, so counting it twice would inflate the total.
+    #[must_use]
+    pub const fn total(&self) -> u64 {
+        self.hits + self.misses + self.stored
+    }
 }
 
 impl Default for Cache {
@@ -202,6 +251,11 @@ impl Cache {
             dir,
             converted: home.map(|dir| dir.join(CONVERTED_DIR)),
             written: AtomicU64::new(0),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            stale: AtomicU64::new(0),
+            stored: AtomicU64::new(0),
+            warned: AtomicBool::new(false),
         }
     }
 
@@ -213,6 +267,11 @@ impl Cache {
             dir: None,
             converted: None,
             written: AtomicU64::new(0),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            stale: AtomicU64::new(0),
+            stored: AtomicU64::new(0),
+            warned: AtomicBool::new(false),
         }
     }
 
@@ -230,7 +289,55 @@ impl Cache {
             converted: Some(dir.join("converted")),
             dir: Some(dir),
             written: AtomicU64::new(0),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            stale: AtomicU64::new(0),
+            stored: AtomicU64::new(0),
+            warned: AtomicBool::new(false),
         }
+    }
+
+    /// The work this cache did since the last call, with every counter reset.
+    ///
+    /// The counters are the answer to the one question a warm grid asks: did
+    /// this directory paint from the disk, or decode every file again.
+    #[must_use]
+    pub fn take_counts(&self) -> Counts {
+        Counts {
+            hits: self.hits.swap(0, Ordering::Relaxed),
+            misses: self.misses.swap(0, Ordering::Relaxed),
+            stale: self.stale.swap(0, Ordering::Relaxed),
+            stored: self.stored.swap(0, Ordering::Relaxed),
+        }
+    }
+
+    /// Count one read, and the stale entries among the misses.
+    fn counted<T>(&self, answer: Result<T, CacheError>) -> Result<T, CacheError> {
+        if answer.is_ok() {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+            if matches!(&answer, Err(CacheError::Stale)) {
+                self.stale.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        answer
+    }
+
+    /// Count one write, and report the first failure the user reads about.
+    ///
+    /// A failure that repeats is the normal shape of a read-only cache home or
+    /// a spent budget, so it rides WARN once: the picture is already in hand
+    /// either way, and only the next launch pays for it.
+    fn counted_store(&self, answer: Result<(), CacheError>) -> Result<(), CacheError> {
+        if let Err(err) = &answer {
+            if reports(err) && !self.warned.swap(true, Ordering::Relaxed) {
+                tracing::warn!(err = %err, "cache write");
+            }
+        } else {
+            self.stored.fetch_add(1, Ordering::Relaxed);
+        }
+        answer
     }
 
     /// The cache directory, when the cache is on.
@@ -249,6 +356,11 @@ impl Cache {
     ///
     /// The function errors on a miss, a changed source, or a corrupt file.
     pub fn load(&self, path: &Path, long_side: LongSide) -> Result<CachedThumb, CacheError> {
+        self.counted(self.read_thumb(path, long_side))
+    }
+
+    /// The body of [`Self::load`], which the wrapper counts.
+    fn read_thumb(&self, path: &Path, long_side: LongSide) -> Result<CachedThumb, CacheError> {
         let canonical = Self::canonical_source(path)?;
         let file = self.entry_file(&canonical, long_side)?;
         let bytes = fs::read(&file).map_err(|e| {
@@ -277,6 +389,15 @@ impl Cache {
     /// The function errors on a miss, a changed source, a corrupt header, or
     /// an entry without a placeholder payload.
     pub fn load_placeholder(
+        &self,
+        path: &Path,
+        long_side: LongSide,
+    ) -> Result<(Placeholder, (ImgW, ImgH)), CacheError> {
+        self.counted(self.read_placeholder(path, long_side))
+    }
+
+    /// The body of [`Self::load_placeholder`], which the wrapper counts.
+    fn read_placeholder(
         &self,
         path: &Path,
         long_side: LongSide,
@@ -318,6 +439,17 @@ impl Cache {
     /// The function errors when the cache is off, the source cannot be
     /// stamped, the buffer does not match its dimensions, or the write fails.
     pub fn store(
+        &self,
+        path: &Path,
+        long_side: LongSide,
+        thumb: &DecodedImage,
+        image: (ImgW, ImgH),
+    ) -> Result<(), CacheError> {
+        self.counted_store(self.write_thumb(path, long_side, thumb, image))
+    }
+
+    /// The body of [`Self::store`], which the wrapper counts.
+    fn write_thumb(
         &self,
         path: &Path,
         long_side: LongSide,
@@ -371,6 +503,17 @@ impl Cache {
     /// Run this on a decode worker, never on the main thread.
     #[must_use]
     pub fn load_converted(&self, key: &str) -> Option<Vec<u8>> {
+        let answer = self.read_converted(key);
+        if answer.is_some() {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+        }
+        answer
+    }
+
+    /// The body of [`Self::load_converted`], which the wrapper counts.
+    fn read_converted(&self, key: &str) -> Option<Vec<u8>> {
         let file = self
             .converted
             .as_ref()?
@@ -393,6 +536,11 @@ impl Cache {
     /// The function errors when the cache is off, this run spent its budget, or
     /// the write fails.
     pub fn store_converted(&self, key: &str, bytes: &[u8]) -> Result<(), CacheError> {
+        self.counted_store(self.write_converted(key, bytes))
+    }
+
+    /// The body of [`Self::store_converted`], which the wrapper counts.
+    fn write_converted(&self, key: &str, bytes: &[u8]) -> Result<(), CacheError> {
         let dir = self.converted.as_ref().ok_or(CacheError::Off)?;
         let file = dir.join(format!("{key}.{CONVERTED_EXT}"));
         let len = bytes.len() as u64;
@@ -438,6 +586,18 @@ impl Cache {
     fn canonical_source(path: &Path) -> Result<PathBuf, CacheError> {
         Ok(fs::canonicalize(path)?)
     }
+}
+
+/// Whether a failed write is news to the user.
+///
+/// A spent budget and a cache home the process cannot write are the two a
+/// report answers: the first says why the next launch is cold, and the second
+/// says the cache never lands at all.
+/// `Off` is the documented `VV_CACHE=0` knob or a host with no cache home, and
+/// `Encode` is a thumbnail the codec refused while the grid already holds its
+/// pixels, so neither reaches WARN on a run the user configured on purpose.
+fn reports(err: &CacheError) -> bool {
+    matches!(err, CacheError::Full | CacheError::Io(_))
 }
 
 /// Remove the half-written temporary files of killed workers from `dir`.
@@ -1105,6 +1265,89 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn the_counts_name_a_cold_directory_and_a_warm_one() {
+        let (dir, cache) = temp_cache();
+        let src = dir.path().join("img.png");
+        fs::write(&src, b"one").expect("write");
+        let side = LongSide::new(512);
+        let size = (ImgW::new(2), ImgH::new(2));
+        // A cold read is a miss and nothing else.
+        assert!(cache.load(&src, side).is_err());
+        let cold = cache.take_counts();
+        assert_eq!(
+            (cold.hits, cold.misses, cold.stale, cold.stored),
+            (0, 1, 0, 0)
+        );
+        assert_eq!(cold.total(), 1);
+        // A read resets them, so the next span starts from zero.
+        assert_eq!(cache.take_counts().total(), 0);
+        cache
+            .store(&src, side, &thumb(2, 2, 1), size)
+            .expect("store");
+        assert_eq!(cache.take_counts().stored, 1);
+        // The same entry now answers, which is the warm launch.
+        assert!(cache.load(&src, side).is_ok());
+        let warm = cache.take_counts();
+        assert_eq!((warm.hits, warm.misses, warm.stored), (1, 0, 0));
+        // A source rewritten under the entry lands on `stale` as well as
+        // `misses`, so a report separates a cold directory from a moved one.
+        let mut f = fs::File::create(&src).expect("create");
+        f.write_all(b"much longer content").expect("write");
+        drop(f);
+        assert!(matches!(cache.load(&src, side), Err(CacheError::Stale)));
+        let moved = cache.take_counts();
+        assert_eq!((moved.hits, moved.misses, moved.stale), (0, 1, 1));
+    }
+
+    #[test]
+    fn only_a_spent_budget_or_a_broken_home_is_news() {
+        // The write warn rides WARN, which is the default filter, so the
+        // outcomes a run is configured to produce must stay silent there.
+        assert!(!reports(&CacheError::Off), "`VV_CACHE=0` is not a failure");
+        assert!(
+            reports(&CacheError::Full),
+            "a spent budget explains a cold launch"
+        );
+        assert!(reports(&CacheError::Io(std::io::Error::from(
+            std::io::ErrorKind::ReadOnlyFilesystem
+        ))));
+        // A miss is not a write, and an entry the codec refused still leaves
+        // the grid holding its pixels.
+        assert!(!reports(&CacheError::Stale));
+        assert!(!reports(&CacheError::Corrupt));
+    }
+
+    #[test]
+    fn the_counts_name_a_converted_answer() {
+        // A converted answer is an entry like a thumbnail and shares the same
+        // budget, so the same counters name it: a directory of diagrams would
+        // otherwise report a fraction of what the cache did.
+        let (_dir, cache) = temp_cache();
+        assert!(cache.load_converted("key").is_none());
+        assert_eq!(cache.take_counts().misses, 1);
+        cache.store_converted("key", b"answer").expect("store");
+        assert_eq!(cache.take_counts().stored, 1);
+        assert_eq!(cache.load_converted("key").as_deref(), Some(&b"answer"[..]));
+        let warm = cache.take_counts();
+        assert_eq!((warm.hits, warm.misses, warm.stored), (1, 0, 0));
+    }
+
+    #[test]
+    fn an_off_cache_reports_its_misses() {
+        // The startup line names the cache off, and the counts still read, so a
+        // report never has to special-case a run with no cache home.
+        let cache = Cache::off();
+        assert!(
+            cache
+                .load(Path::new("/nonexistent/img.png"), LongSide::new(512))
+                .is_err()
+        );
+        let counts = cache.take_counts();
+        assert_eq!((counts.hits, counts.misses), (0, 1));
+        assert!(cache.dir().is_none());
     }
 
     #[test]

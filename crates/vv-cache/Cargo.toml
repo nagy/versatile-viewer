@@ -24,6 +24,9 @@ jixel = { version = "0.5.10", default-features = false, features = [
 # The cache directory.
 # `get_cache_home` resolves $XDG_CACHE_HOME, and falls back to `~/.cache`.
 xdg = "3.0.0"
+# The facade only: a write that fails reports once per run, and the binary owns
+# the subscriber that decides where that line goes.
+tracing = "0.1.44"
 # The entry file name: SHA-256 of the canonical source path.
 sha2 = "0.11.1"
 # The fixed entry header as one packed value, so a header writes and reads in

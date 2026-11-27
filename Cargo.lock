@@ -3487,6 +3487,7 @@ dependencies = [
  "jxl-oxide",
  "sha2",
  "tempfile",
+ "tracing",
  "vv-core",
  "vv-pixels",
  "xdg",

@@ -187,6 +187,14 @@ fn max_inflight() -> usize {
 /// The thumbnail must cover the whole image, not only its center square.
 const THUMB_LONG_SIDE: LongSide = LongSide::new(512);
 
+/// Whether the startup report of the cache has been said.
+///
+/// Walking to another directory rebuilds the grid, and it wraps the same cache,
+/// so the one line a support report needs rides the first grid of the run.
+/// No owner can pass this down: the cache is built here, and the caller above
+/// this layer is a window loop that never names one.
+static CACHE_REPORTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
 /// A finished background decode, matched to an entry by its unique id.
 /// Indices shift when entries come and go.
 /// Ids never shift.
@@ -747,6 +755,14 @@ impl Grid {
     pub fn from_paths(paths: Vec<PathBuf>) -> Grid {
         let (res_tx, res_rx) = channel::<DecodeResult>();
         let cache = Arc::new(Cache::new());
+        // Where the cache lives, and whether it works at all, is the startup
+        // fact a support report asks for: an off cache and a read-only one both
+        // decode every file again, and nothing else tells them apart.
+        // A directory the user walks back to builds the grid again, so this
+        // `Once` says it once per run.
+        CACHE_REPORTED.get_or_init(|| {
+            tracing::info!(dir = ?cache.dir(), on = cache.dir().is_some(), "thumbnail cache");
+        });
         let entries: Vec<GridEntry> = paths
             .into_iter()
             .enumerate()
@@ -851,19 +867,47 @@ impl Grid {
             HashSet::new()
         };
 
-        self.drain_placeholders();
-        self.drain_results(&keep);
+        let placeholders = self.drain_placeholders();
+        let decodes = self.drain_results(&keep);
         self.dispatch(plan, priority, &keep);
+        // The directory, not the frame: a placeholder read and a decode both
+        // feed the cache counters and neither lands with the other, so the
+        // report waits for a frame that drained nothing and started nothing.
+        if !placeholders && !decodes && self.inflight == 0 {
+            self.report_cache();
+        }
+    }
+
+    /// Report what the cache did for this directory.
+    ///
+    /// One line per settled directory, because a line per file or per frame
+    /// would flood the very filter this is meant to be read under.
+    fn report_cache(&self) {
+        let counts = self.cache.take_counts();
+        if counts.total() > 0 {
+            tracing::debug!(
+                hits = counts.hits,
+                misses = counts.misses,
+                stale = counts.stale,
+                stored = counts.stored,
+                "grid cache"
+            );
+        }
     }
 
     /// Apply finished placeholder reads.
+    ///
+    /// The answer says whether anything landed, so the caller reports the cache
+    /// on a frame that drained nothing.
     /// The worker already uploaded its texture, so a whole directory of
     /// placeholders costs one channel drain and no pixel copy on this thread.
     /// An entry that already holds a thumb or a failure skips the texture, and
     /// the source dimensions still land, because the image view fits the
     /// picture before any decode.
-    fn drain_placeholders(&mut self) {
+    fn drain_placeholders(&mut self) -> bool {
+        let mut landed = false;
         while let Ok(res) = self.placeholder_rx.try_recv() {
+            landed = true;
             let Some(i) = self.index_of(res.id) else {
                 continue; // the entry left meanwhile, so the result is moot
             };
@@ -884,6 +928,7 @@ impl Grid {
                 placeholder: ready.into_texture(),
             };
         }
+        landed
     }
 
     /// Land the decode of entry `i`: its thumb, its dimensions, its blur copy
@@ -927,8 +972,12 @@ impl Grid {
     /// never lies.
     /// Textures arrive already uploaded, because the decode worker holds the
     /// device.
-    fn drain_results(&mut self, keep: &HashSet<u64>) {
+    /// The answer says whether anything landed, like
+    /// [`Self::drain_placeholders`].
+    fn drain_results(&mut self, keep: &HashSet<u64>) -> bool {
+        let mut landed = false;
         while let Ok(res) = self.result_rx.try_recv() {
+            landed = true;
             self.inflight -= 1;
             let Some(i) = self.entries.iter().position(|e| e.id == res.id) else {
                 continue; // entry was spliced out meanwhile; drop the result
@@ -1000,6 +1049,7 @@ impl Grid {
                 drop(e.full.take());
             }
         }
+        landed
     }
 
     /// Step 2 of [`Self::load_pending`]: dispatch new jobs.
