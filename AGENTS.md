@@ -128,7 +128,7 @@ A resolution-independent source may answer a `scene::Primitive` list instead, an
 
 ### Diagnostics
 
-- Every layer emits through `tracing`, and the binary owns the subscriber. `vv-source`, `vv-view` and `vv-gpu` name the facade only, so no library decides a level, a format or a destination.
+- Every layer emits through `tracing`, and the binary owns the subscriber. `vv-source`, `vv-view`, `vv-gpu`, `vv-cache` and `vv-mcp` name the facade only, so no library decides a level, a format or a destination, and no layer writes a diagnostic line by hand.
 - `RUST_LOG` is the whole filter, and a set `RUST_LOG` wins over the `VV_DEBUG` and `VV_TIMING` aliases.
 - The level says who reads the event. `error!` marks a failure the viewer absorbed, `warn!` one the user sees, `info!` the startup fact a support report needs, `debug!` the input geometry, the slow frames and the one gesture a report asks about, `trace!` the per-frame key press and the open route of every file a grid cell reads.
 - A report that would fire once per file or once per cell rides `info!` once at startup or `debug!` once per directory drain, never one event per entry.
@@ -166,7 +166,7 @@ A resolution-independent source may answer a `scene::Primitive` list instead, an
 - `examples/scene_client.rs` is the producer side of that tool: it spawns `vv --mcp`, writes one `tools/call` line and reads the answer. It links nothing of this tree and spells the document out as JSON, so it is the file to read before changing the wire shape — a producer that compiled against this tree would be a second copy of it in its own build.
 - `mcp::Sink` is the whole wall between the protocol layer and the picture, so `vv-mcp` names no texture, no device and no window, and a test drives every tool with a sink of its own.
 - `main.rs` implements that sink as `Bridge` over a channel that `App::accept_pushes` drains once per frame, so the frame loop stays the only owner of the view. The main thread never decodes and never uploads a pushed picture.
-- stdout carries protocol frames only. Every diagnostic goes to stderr, and no library writes to stdout beside the transport.
+- stdout carries protocol frames only. Every diagnostic rides `tracing`, which the binary sends to stderr, and no library writes to stdout beside the transport.
 - `MAX_PUSH_BYTES` (64 MiB) caps one payload, and the cap reads the encoded text before the decode allocates, so a flood stops first.
 
 ## Rules

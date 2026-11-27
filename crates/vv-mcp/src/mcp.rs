@@ -56,8 +56,8 @@
 //! - `vv_get_status()` reports the mode, the plane count, the source label,
 //!   the plane size, the two scale factors and the box the window shows.
 //!
-//! Every diagnostic goes to stderr, because stdout carries only protocol
-//! frames.
+//! Every diagnostic rides `tracing`, which the binary sends to stderr, because
+//! stdout carries only protocol frames.
 //!
 //! Client configuration (stdio transport):
 //!
@@ -70,9 +70,9 @@
 //!
 //! The server runs a tokio current-thread runtime.
 //! A failure to start or run the server never stops the viewer; the module
-//! writes the problem to stderr and returns.
+//! reports the problem and returns.
 
-use std::{borrow::Cow, io::Write as _, sync::Arc};
+use std::{borrow::Cow, sync::Arc};
 
 use base64::Engine as _;
 use derive_more::{Display, Error, From};
@@ -368,19 +368,39 @@ impl<S: Sink> ServerHandler for ViewerMcpServer<S> {
         _context: RequestContext<RoleServer>,
     ) -> Result<rmcp::model::CallToolResponse, McpError> {
         let arguments = request.arguments.unwrap_or_default();
-        let result = match request.name.as_ref() {
+        let tool = request.name.as_ref();
+        // The one fact a report asks of a call beyond its name: which file a
+        // client believed it opened, which no tool result a reader sees names.
+        let target = arguments.get("path").and_then(serde_json::Value::as_str);
+        let result = match tool {
             "vv_show_image_bytes" => show_bytes(&*self.sink, &arguments),
             "vv_show_image" => show_path(&*self.sink, &arguments),
             "vv_show_scene" => show_scene(&*self.sink, &arguments),
             "vv_clear" => Ok(shown_status(&self.sink.clear())),
             "vv_get_status" => Ok(shown_status(&self.sink.status())),
             other => {
+                // A name this server does not advertise is the caller's
+                // mistake and the socket answers it: one line names the tool a
+                // client believed in.
+                tracing::warn!(tool = other, "unknown tool");
                 return Err(McpError::invalid_params(
                     format!("unknown tool: {other}"),
                     None,
                 ));
             }
         };
+        // The one trace an agent session leaves: a tool answered, or a tool a
+        // reader has to look at. The answer itself carries the planes, so the
+        // event names the call and not the picture.
+        match &result {
+            Ok(_) => tracing::debug!(tool, target = ?target, "tool call"),
+            Err(reason) => tracing::warn!(
+                tool,
+                target = ?target,
+                reason = %reason,
+                "tool call failed"
+            ),
+        }
         Ok(match result {
             Ok(value) => rmcp::model::CallToolResult::structured(value).into(),
             Err(reason) => rmcp::model::CallToolResult::structured_error(serde_json::json!({
@@ -407,12 +427,20 @@ fn show_bytes(
     // The cap reads on the encoded text first, so a flood stops before the
     // decode allocates: base64 spends 4 bytes on every 3.
     if encoded.len() / 4 * 3 > MAX_PUSH_BYTES {
+        // A client that mistook the cap pushed megabytes a viewer never reads,
+        // and the tool result alone leaves no sign of what it sent.
+        tracing::warn!(
+            encoded_bytes = encoded.len(),
+            cap = MAX_PUSH_BYTES,
+            "payload refused"
+        );
         return Err(format!("the payload passes the {MAX_PUSH_BYTES} byte cap"));
     }
     let data = base64::engine::general_purpose::STANDARD
         .decode(encoded)
         .map_err(|err| format!("data_base64 holds no base64: {err}"))?;
     if data.len() > MAX_PUSH_BYTES {
+        tracing::warn!(bytes = data.len(), cap = MAX_PUSH_BYTES, "payload refused");
         return Err(format!("the payload passes the {MAX_PUSH_BYTES} byte cap"));
     }
     let shown = sink.show_bytes(data)?;
@@ -529,33 +557,24 @@ pub fn spawn<S: Sink>(sink: S) -> Result<(), SpawnError> {
             {
                 Ok(rt) => rt,
                 Err(e) => {
-                    write_stderr(&format!("vv: mcp: no tokio runtime: {e}"));
+                    tracing::error!(err = %e, "mcp runtime");
                     return;
                 }
             };
             rt.block_on(async move {
                 match server.serve(stdio()).await {
                     Ok(running) => {
-                        write_stderr("vv: mcp: serving 2026-07-28 on stdio");
+                        tracing::info!(revision = PROTOCOL.as_str(), "mcp serving");
                         if let Err(e) = running.waiting().await {
-                            write_stderr(&format!("vv: mcp: server stopped: {e}"));
+                            tracing::warn!(err = %e, "mcp stopped");
                         }
                     }
-                    Err(e) => write_stderr(&format!("vv: mcp: server failed to start: {e}")),
+                    Err(e) => tracing::error!(err = %e, "mcp start"),
                 }
             });
         })
         .map(|_| ())
         .map_err(SpawnError::from)
-}
-
-/// Write one diagnostic line to stderr.
-///
-/// Stdout carries protocol frames only, so the module never writes diagnostics
-/// there.
-fn write_stderr(line: &str) {
-    let mut err = std::io::stderr().lock();
-    let _ = writeln!(err, "{line}");
 }
 
 #[cfg(test)]

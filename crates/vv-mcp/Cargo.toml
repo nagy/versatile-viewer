@@ -34,6 +34,10 @@ derive_more = { version = "2.1.1", default-features = false, features = [
   "error",
   "from",
 ] }
+# The facade only: the server reports every tool it answers, and the binary owns
+# the subscriber that decides where those lines go.
+# A hand-written stderr line would carry no target, no fields and no timestamp.
+tracing = "0.1.44"
 
 [lints]
 workspace = true
