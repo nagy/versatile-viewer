@@ -350,7 +350,13 @@ fn load_sans_serif() -> Option<(Arc<[u8]>, u32)> {
         ..fontdb::Query::default()
     };
     let db = fontdb();
-    let id = db.query(&query)?;
+    // A host with no font draws a treemap's rectangles and no labels, which is
+    // the answer the raster path paints there too.
+    // The `OnceLock` above makes this one line per process.
+    let Some(id) = db.query(&query) else {
+        tracing::warn!("no sans-serif face, so no label draws");
+        return None;
+    };
     db.with_face_data(id, |data, index| (Arc::from(data.to_vec()), index))
 }
 

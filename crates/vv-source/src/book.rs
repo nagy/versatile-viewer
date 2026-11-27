@@ -161,6 +161,18 @@ impl BookSurface {
         let units_per_point = 1.0_f32
             .min(MAX_TEXTURE_SIDE as f32 / long)
             .min((MAX_RENDER_PIXELS / (canvas.w * canvas.h)).sqrt());
+        // A spread that stacks near the first page, or a book whose pages
+        // measure other than they declare, reads as one bad number here: the
+        // base scale a whole-book plane bakes, and the slot every page lands
+        // in.
+        tracing::debug!(
+            pages = planes,
+            spreads = rows,
+            slot_w = slot.w,
+            slot_h = slot.h,
+            units_per_point,
+            "book"
+        );
         Ok(BookSurface {
             inner,
             slot,

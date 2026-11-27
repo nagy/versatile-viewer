@@ -44,6 +44,7 @@ use crate::{
     grid::{DecodeFailure, EntrySource, Grid},
     input::Input,
     loader::Loader,
+    ms_since,
     region::{self, Crop},
     region_sel,
     render::Renderer,
@@ -827,8 +828,19 @@ impl ViewState {
         let (generation, tx) = (self.crop_gen, self.crop_tx.clone());
         let uploader = uploader.clone();
         rayon::spawn(move || {
+            let started = Instant::now();
             match source.render(View::region(plane, patch.rect, scale)) {
                 Ok(image) => {
+                    // The paint a spread step fires at the press edge is the one
+                    // a pan stutter is about, so it carries the same fields as
+                    // the settled patch.
+                    tracing::debug!(
+                        ms = ms_since(started),
+                        cw = image.width().raw(),
+                        ch = image.height().raw(),
+                        scale,
+                        "spread prefetch"
+                    );
                     // The patch uploads on this worker, so the glide never
                     // waits on a pixel copy.
                     let Ok(texture) = uploader.image(&image) else {
@@ -973,17 +985,31 @@ impl ViewState {
         let (generation, tx) = (self.crop_gen, self.crop_tx.clone());
         let plane = self.source_plane;
         let uploader = uploader.clone();
-        rayon::spawn(move || match source.render(View::whole(plane, 1.0)) {
-            Ok(image) => match uploader.image(&image) {
-                Ok(texture) => {
-                    let _ = tx.send(CropMsg::Base {
-                        generation,
-                        texture,
-                    });
+        rayon::spawn(move || {
+            let started = Instant::now();
+            match source.render(View::whole(plane, 1.0)) {
+                Ok(image) => {
+                    // A plane that follows the window paints again on every
+                    // resize, so this is the second number a resize report
+                    // needs, beside the display list's own.
+                    tracing::debug!(
+                        ms = ms_since(started),
+                        w = image.width().raw(),
+                        h = image.height().raw(),
+                        "plane paint"
+                    );
+                    match uploader.image(&image) {
+                        Ok(texture) => {
+                            let _ = tx.send(CropMsg::Base {
+                                generation,
+                                texture,
+                            });
+                        }
+                        Err(err) => tracing::warn!(err = %err, "plane paint"),
+                    }
                 }
                 Err(err) => tracing::warn!(err = %err, "plane paint"),
-            },
-            Err(err) => tracing::warn!(err = %err, "plane paint"),
+            }
         });
     }
 
@@ -1068,7 +1094,7 @@ impl ViewState {
             // A source that answers no list reports none, which is what its own
             // `debug` event beside this one names the reason for.
             tracing::debug!(
-                ms = started.elapsed().as_secs_f64() * 1000.0,
+                ms = ms_since(started),
                 listed = list.is_some(),
                 prims = list.as_ref().map_or(0, |list| list.len()),
                 "display list"
@@ -1259,25 +1285,51 @@ impl ViewState {
         let (generation, tx) = (self.crop_gen, self.crop_tx.clone());
         let plane = self.source_plane;
         let uploader = uploader.clone();
+        Self::spawn_patch(source, plane, paint, generation, tx, uploader);
+    }
+
+    /// Paint one patch on a worker, and upload the texture there too.
+    ///
+    /// The worker uploads its own texture (a queue is `Send + Sync`), so the
+    /// frame that drains the answer moves handles and nothing else.
+    fn spawn_patch(
+        source: Arc<dyn Surface>,
+        plane: usize,
+        paint: region::Patch,
+        generation: u64,
+        tx: Sender<CropMsg>,
+        uploader: Uploader,
+    ) {
         rayon::spawn(
             // A patch is painted at one scale, the one its pixels hold.
-            move || match source.render(View::region(plane, paint.rect, paint.scale)) {
-                Ok(image) => {
-                    // The paint is a window patch, so it uploads on this worker
-                    // and the main thread only draws it.
-                    let Ok(texture) = uploader.image(&image) else {
+            move || {
+                let started = Instant::now();
+                match source.render(View::region(plane, paint.rect, paint.scale)) {
+                    Ok(image) => {
+                        // A patch is the stutter a reader feels while a pan or a
+                        // zoom moves, and its scale and box are the two fields a
+                        // report needs to size the window against the plane.
+                        tracing::debug!(
+                            ms = ms_since(started),
+                            cw = image.width().raw(),
+                            ch = image.height().raw(),
+                            scale = paint.scale,
+                            "region paint"
+                        );
+                        let Ok(texture) = uploader.image(&image) else {
+                            let _ = tx.send(CropMsg::Failed { generation });
+                            return;
+                        };
+                        let _ = tx.send(CropMsg::Crop {
+                            generation,
+                            patch: paint,
+                            texture,
+                        });
+                    }
+                    Err(err) => {
+                        tracing::warn!(err = %err, "region paint");
                         let _ = tx.send(CropMsg::Failed { generation });
-                        return;
-                    };
-                    let _ = tx.send(CropMsg::Crop {
-                        generation,
-                        patch: paint,
-                        texture,
-                    });
-                }
-                Err(err) => {
-                    tracing::warn!(err = %err, "region paint");
-                    let _ = tx.send(CropMsg::Failed { generation });
+                    }
                 }
             },
         );
@@ -1837,10 +1889,7 @@ fn build_pass(
     let started = Instant::now();
     let built = crate::display::SceneView::new(device, uploader);
     match &built {
-        Ok(_) => tracing::debug!(
-            ms = started.elapsed().as_secs_f64() * 1000.0,
-            "display list build"
-        ),
+        Ok(_) => tracing::debug!(ms = ms_since(started), "display list build"),
         Err(err) => tracing::warn!(err = %err, "display list build"),
     }
     // A dropped receiver means the run ended while the build ran, and the pass

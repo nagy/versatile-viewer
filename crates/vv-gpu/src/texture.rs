@@ -169,6 +169,16 @@ impl Uploader {
         let side = width.max(height);
         let owned;
         let (rgba, width, height) = if side > self.shared.max_side {
+            // The picture that lands is not the picture that decoded, so the
+            // one place that shrinks a buffer for the adapter says so: a small
+            // `max_texture` in the GPU stack line is the other half of the
+            // report.
+            tracing::debug!(
+                wanted = side,
+                max = self.shared.max_side,
+                label,
+                "upload downscaled"
+            );
             owned = downscale_rgba(
                 DecodedImage::from_exact(
                     crate::dim::ImgW::new(width),
