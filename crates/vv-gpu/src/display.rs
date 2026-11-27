@@ -50,9 +50,13 @@
 //! same allocators at a deep zoom, and by the same silent path (see above).
 //! [`Work`] is the count of lines that frame would flatten, in the tolerance law
 //! `vello` itself sizes its buffers with, so a frame that will not fit is refused
-//! with `Ok(None)` and the caller draws the raster it keeps for that plane
-//! instead, which the source rasterizes at the window's own scale and which has
-//! no such limit.
+//! and shown as whatever the caller keeps behind the list: a caller with a raster
+//! of the plane draws that instead, which the source rasterizes at the window's
+//! own scale and which has no such limit, and a caller with nothing behind the
+//! list asks for [`Fallback::LastPaint`] and gets the paint on screen again,
+//! placed where the frame's transform puts the same surface units. The second one
+//! is stale in sharpness alone, which beats the window background a source-less
+//! list would otherwise show.
 //!
 //! A refusal gives up the band before it answers, when the box this frame shows
 //! is worth giving it up for ([`SceneView::tighten`]).
@@ -232,6 +236,43 @@ struct Drawn {
     size: (u32, u32),
 }
 
+/// What a frame the pass cannot hold answers instead of a paint.
+///
+/// A frame past the estimate is one vello paints *nothing* of, and it says so
+/// to nobody, so the pass refuses it here. What the refusal shows is the
+/// caller's to state, because only the caller knows what it keeps behind the
+/// list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fallback {
+    /// Nothing: the frame answers no paint, and a caller that holds a raster of
+    /// the plane draws that instead, at the window's own scale.
+    Nothing,
+    /// The paint the pass already made, placed where this frame's transform
+    /// puts it (see [`SceneView::place_stale`]).
+    ///
+    /// This is the answer for a list with no source behind it: the alternative
+    /// is the window background, and a paint that lags in sharpness beats no
+    /// picture at all.
+    LastPaint,
+}
+
+/// What one frame asks the pass for: where the list lands, at what size, and
+/// what a frame past the budget answers.
+///
+/// The three travel together because a pass is asked once per frame and every
+/// one of them is a fact about that frame alone: the placement moves with the
+/// zoom, the size with the window, and the fallback with what the caller keeps
+/// behind the list.
+#[derive(Clone, Copy)]
+pub struct Request<'a> {
+    /// The transform that maps surface units onto the window.
+    pub frame: &'a region::Frame,
+    /// The target size, in pixels.
+    pub size: (u32, u32),
+    /// What a frame past the budget answers (see [`Fallback`]).
+    pub fallback: Fallback,
+}
+
 /// What one display pass answers: the texture to composite, the part of it the
 /// picture fills, and where that part lands.
 ///
@@ -307,8 +348,10 @@ impl SceneView {
     /// and none of those frames changes a pixel of it.
     ///
     /// A frame whose geometry would run past vello's fixed allocators answers
-    /// `Ok(None)`: nothing was painted, and the caller draws the raster it keeps
-    /// for that plane instead (see the module docstring).
+    /// what [`Request::fallback`] names: [`Fallback::Nothing`] paints nothing, and the
+    /// caller draws the raster it keeps for that plane instead (see the module
+    /// docstring), while [`Fallback::LastPaint`] hands back the paint on screen,
+    /// placed where this frame puts the same surface units.
     ///
     /// # Errors
     ///
@@ -319,9 +362,13 @@ impl SceneView {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         list: &Arc<[Primitive]>,
-        frame: &region::Frame,
-        size: (u32, u32),
+        request: Request<'_>,
     ) -> Result<Option<Painted<'_>>, SceneError> {
+        let Request {
+            frame,
+            size,
+            fallback,
+        } = request;
         let to_window = to_window(frame);
         let moved = self.asked != Some(size);
         self.asked = Some(size);
@@ -385,8 +432,22 @@ impl SceneView {
             .as_ref()
             .is_some_and(|base| base.work.too_heavy(scale))
         {
+            // A caller that holds a raster of this plane asks for nothing: its
+            // patch is sharp, and a stretched paint under it would only delay
+            // it. A list with nothing behind it has no such raster, so the
+            // frame that would show the window background shows the last encode
+            // instead, placed by the transform between the two windows. That
+            // paint is stale in sharpness only, which is the trade this pass
+            // takes over a window that goes blank.
+            let kept = matches!(
+                (fallback, &self.drawn),
+                (Fallback::LastPaint, Some(drawn)) if Arc::ptr_eq(&drawn.list, list)
+            );
+            tracing::debug!(budget = LINE_BUDGET, kept, "display list too heavy");
+            if kept && let Some(drawn) = &self.drawn {
+                return Ok(Some(self.place_stale(drawn, to_window)));
+            }
             self.drawn = None;
-            tracing::debug!(budget = LINE_BUDGET, "display list too heavy");
             return Ok(None);
         }
         self.resize(device, size);
@@ -429,8 +490,9 @@ impl SceneView {
     ///
     /// The paint of `drawn` covers the window of that frame, so the picture
     /// lands where the mapping `to_window ∘ drawn.to_window⁻¹` puts it: a
-    /// window drag changes the fit scale, so that mapping is a scale, a turn and
-    /// a move, and the texture fills the rect it names.
+    /// window drag changes the fit scale and a frame refused past the budget may
+    /// have zoomed as well, so that mapping is a scale, a turn and a move, and
+    /// the texture fills the rect it names.
     fn place_stale(&self, drawn: &Drawn, to_window: Affine) -> Painted<'_> {
         let (src, quad) = stale_place(drawn.size, drawn.to_window, to_window);
         Painted {

@@ -39,6 +39,7 @@ use crate::{
     DIM_VEIL, DecodedImage,
     blurbg::BlurBg,
     dim::{self, PreviewPx, Rect, WinH, WinW},
+    display::Request,
     draw::{Color, Quad, Turn, Vec2},
     grid::{DecodeFailure, EntrySource, Grid},
     input::Input,
@@ -1759,13 +1760,12 @@ pub(crate) fn draw_list(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     list: &Arc<[Primitive]>,
-    frame: &region::Frame,
-    size: (u32, u32),
+    request: Request<'_>,
 ) -> bool {
     let Some(view) = pass.ready(device, r) else {
         return false;
     };
-    match view.draw(device, queue, list, frame, size) {
+    match view.draw(device, queue, list, request) {
         Ok(Some(painted)) => {
             // A frame the pass reused lands where the window it was painted for
             // puts the same surface units (see `SceneView::draw`), so the draw
@@ -1782,9 +1782,9 @@ pub(crate) fn draw_list(
         }
         // The frame asks vello for more than its fixed allocators hold, and a
         // frame it cannot hold paints nothing at all without saying so (see
-        // `vv_gpu::display`), so the list answers no draw: the caller shows the
-        // plane texture and the region patch instead, which the source
-        // rasterizes at the window's own scale.
+        // `vv_gpu::display`), so the list answers no draw: the caller shows what
+        // it keeps behind the list instead, which is the plane texture and the
+        // region patch when a source is there to paint them.
         Ok(None) => false,
         Err(err) => {
             tracing::warn!(err = %err, "display list");

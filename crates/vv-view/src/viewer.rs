@@ -63,6 +63,7 @@ use crate::{
     blurbg::{self, BlurBg},
     book::BookSurface,
     dim::{self, PreviewPx, WinH, WinW},
+    display::{Fallback, Request},
     draw::{Color, Vec2},
     grid::{DecodeFailure, Grid, GridAction, Plan},
     input::Input,
@@ -967,8 +968,9 @@ impl Viewer {
     /// of one frame. A picture the view held is dropped whole, which is what a
     /// pushed picture does to a list, so the two routes take the window over
     /// from each other instead of drawing beside one another.
-    /// A frame the display pass refuses shows the window background, because a
-    /// plane with no raster behind it has no fallback to paint.
+    /// A frame the display pass refuses keeps the paint the pass already made:
+    /// a plane with no raster behind it has no fallback to paint, and the
+    /// window background would be no picture at all (see `display::Fallback`).
     pub fn install_scene(&mut self, scene: Scene) -> Shown {
         self.show_scene(scene);
         // The label names the wire, the way a pushed picture does: a status
@@ -2620,6 +2622,16 @@ impl Viewer {
             // list is in surface units, so the frame's transform places it and
             // there is no patch to paint and no plane texture to draw beside
             // it. The list *is* the picture.
+            // A frame the list refuses shows what this view keeps behind it:
+            // a source paints the raster patch at the window's own scale, and a
+            // document that arrived as a list alone has no such raster, so it
+            // keeps the paint it already had instead of the window background
+            // (see `vv_gpu::display::Fallback`).
+            let fallback = if self.st.source.is_none() {
+                Fallback::LastPaint
+            } else {
+                Fallback::Nothing
+            };
             let listed = match (
                 self.st.scene.clone(),
                 self.st.frame(Vec2::new(win_w, win_h)),
@@ -2630,8 +2642,11 @@ impl Viewer {
                     &self.device,
                     &self.queue,
                     &list,
-                    &frame,
-                    size,
+                    Request {
+                        frame: &frame,
+                        size,
+                        fallback,
+                    },
                 ),
                 _ => false,
             };

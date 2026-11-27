@@ -43,7 +43,11 @@ use vv_core::{
     draw::{Color, Quad, Turn, Vec2},
     theme::THEME,
 };
-use vv_gpu::{render::Renderer, texture::Filter};
+use vv_gpu::{
+    display::{Fallback, Request},
+    render::Renderer,
+    texture::Filter,
+};
 use vv_source::surface::{View, open_surface};
 
 /// The window background, which the viewer clears to.
@@ -713,7 +717,16 @@ fn a_listed_pdf_page_lands_on_its_plane() {
         .display_pass(&canvas.device)
         .expect("a display-list pass");
     let painted = pass
-        .draw(&canvas.device, &canvas.queue, &list, &frame, canvas.size)
+        .draw(
+            &canvas.device,
+            &canvas.queue,
+            &list,
+            Request {
+                frame: &frame,
+                size: canvas.size,
+                fallback: Fallback::Nothing,
+            },
+        )
         .expect("the list draws")
         .expect("the list fits the frame");
     canvas.renderer.texture(
@@ -795,7 +808,16 @@ fn a_nested_document_lands_in_its_box() {
         .display_pass(&canvas.device)
         .expect("a display-list pass");
     let painted = pass
-        .draw(&canvas.device, &canvas.queue, &list, &frame, canvas.size)
+        .draw(
+            &canvas.device,
+            &canvas.queue,
+            &list,
+            Request {
+                frame: &frame,
+                size: canvas.size,
+                fallback: Fallback::Nothing,
+            },
+        )
         .expect("the list draws")
         .expect("the list fits the frame");
     canvas.renderer.texture(
@@ -857,7 +879,16 @@ fn a_display_list_paints_its_rects_and_its_pictures() {
         .display_pass(&canvas.device)
         .expect("a display-list pass");
     let painted = pass
-        .draw(&canvas.device, &canvas.queue, &list, &frame, canvas.size)
+        .draw(
+            &canvas.device,
+            &canvas.queue,
+            &list,
+            Request {
+                frame: &frame,
+                size: canvas.size,
+                fallback: Fallback::Nothing,
+            },
+        )
         .expect("the list draws")
         .expect("the list fits the frame");
     canvas.renderer.texture(
@@ -919,8 +950,11 @@ fn a_zoomed_list_follows_its_frame() {
             &canvas.device,
             &canvas.queue,
             &list,
-            &frame(1.0),
-            canvas.size,
+            Request {
+                frame: &frame(1.0),
+                size: canvas.size,
+                fallback: Fallback::Nothing,
+            },
         )
         .expect("the list draws")
         .expect("the list fits the frame");
@@ -942,8 +976,11 @@ fn a_zoomed_list_follows_its_frame() {
             &canvas.device,
             &canvas.queue,
             &list,
-            &frame(2.0),
-            canvas.size,
+            Request {
+                frame: &frame(2.0),
+                size: canvas.size,
+                fallback: Fallback::Nothing,
+            },
         )
         .expect("the list draws")
         .expect("the list fits the frame");
@@ -1008,8 +1045,11 @@ fn a_listed_opacity_layer_blends_its_content() {
             &canvas.device,
             &canvas.queue,
             &list,
-            &frame(2.0),
-            canvas.size,
+            Request {
+                frame: &frame(2.0),
+                size: canvas.size,
+                fallback: Fallback::Nothing,
+            },
         )
         .expect("the list draws")
         .expect("the list fits the frame");
@@ -1082,8 +1122,11 @@ fn a_resized_window_places_the_paint_it_has() {
             &canvas.device,
             &canvas.queue,
             &list,
-            &frame((200.0, 100.0)),
-            (200, 100),
+            Request {
+                frame: &frame((200.0, 100.0)),
+                size: (200, 100),
+                fallback: Fallback::Nothing,
+            },
         )
         .expect("the list draws")
         .expect("the list fits the frame");
@@ -1095,8 +1138,11 @@ fn a_resized_window_places_the_paint_it_has() {
             &canvas.device,
             &canvas.queue,
             &list,
-            &frame((400.0, 200.0)),
-            canvas.size,
+            Request {
+                frame: &frame((400.0, 200.0)),
+                size: canvas.size,
+                fallback: Fallback::Nothing,
+            },
         )
         .expect("the list draws")
         .expect("the list fits the frame");
@@ -1409,7 +1455,16 @@ fn a_listed_svg_lands_where_its_plane_does() {
         .display_pass(&canvas.device)
         .expect("a display-list pass");
     let painted = pass
-        .draw(&canvas.device, &canvas.queue, &list, &frame, canvas.size)
+        .draw(
+            &canvas.device,
+            &canvas.queue,
+            &list,
+            Request {
+                frame: &frame,
+                size: canvas.size,
+                fallback: Fallback::Nothing,
+            },
+        )
         .expect("the list draws")
         .expect("the list fits the frame");
     canvas.renderer.texture(
@@ -1811,7 +1866,16 @@ fn a_glyph_run_that_names_no_face_paints_nothing() {
         .display_pass(&canvas.device)
         .expect("a display-list pass");
     let painted = pass
-        .draw(&canvas.device, &canvas.queue, &list, &frame, canvas.size)
+        .draw(
+            &canvas.device,
+            &canvas.queue,
+            &list,
+            Request {
+                frame: &frame,
+                size: canvas.size,
+                fallback: Fallback::Nothing,
+            },
+        )
         .expect("the frame draws")
         .expect("the frame fits");
     canvas.renderer.texture(
@@ -2282,7 +2346,16 @@ fn a_listed_book_places_its_pages() {
         .display_pass(&canvas.device)
         .expect("a display-list pass");
     let painted = pass
-        .draw(&canvas.device, &canvas.queue, &list, &frame, canvas.size)
+        .draw(
+            &canvas.device,
+            &canvas.queue,
+            &list,
+            Request {
+                frame: &frame,
+                size: canvas.size,
+                fallback: Fallback::Nothing,
+            },
+        )
         .expect("the list draws")
         .expect("the list fits the frame");
     canvas.renderer.texture(
@@ -2364,7 +2437,16 @@ fn a_listed_book_places_its_pages_below_one_base_unit() {
         .display_pass(&canvas.device)
         .expect("a display-list pass");
     let painted = pass
-        .draw(&canvas.device, &canvas.queue, &list, &frame, canvas.size)
+        .draw(
+            &canvas.device,
+            &canvas.queue,
+            &list,
+            Request {
+                frame: &frame,
+                size: canvas.size,
+                fallback: Fallback::Nothing,
+            },
+        )
         .expect("the list draws")
         .expect("the list fits the frame");
     canvas.renderer.texture(
@@ -2505,7 +2587,16 @@ fn paint_list_at(
         .display_pass(&canvas.device)
         .expect("a display-list pass");
     let painted = pass
-        .draw(&canvas.device, &canvas.queue, list, &frame, canvas.size)
+        .draw(
+            &canvas.device,
+            &canvas.queue,
+            list,
+            Request {
+                frame: &frame,
+                size: canvas.size,
+                fallback: Fallback::Nothing,
+            },
+        )
         .expect("the list draws")
         .expect("the list fits the frame");
     canvas.renderer.texture(
@@ -2904,8 +2995,11 @@ fn a_frame_past_the_flatten_limit_is_refused() {
             &canvas.device,
             &canvas.queue,
             &list,
-            &frame(400.0),
-            canvas.size,
+            Request {
+                frame: &frame(400.0),
+                size: canvas.size,
+                fallback: Fallback::Nothing,
+            },
         )
         .expect("the pass answers")
         .is_none(),
@@ -2918,8 +3012,11 @@ fn a_frame_past_the_flatten_limit_is_refused() {
             &canvas.device,
             &canvas.queue,
             &list,
-            &frame(1.0),
-            canvas.size,
+            Request {
+                frame: &frame(1.0),
+                size: canvas.size,
+                fallback: Fallback::Nothing,
+            },
         )
         .expect("the pass answers")
         .expect("the near frame fits the renderer");
@@ -3883,9 +3980,18 @@ fn a_zoom_back_in_answers_the_list_again() {
     // Every page of the plane at once fits the renderer as the window leaves it,
     // so this frame paints the list and keeps a band of the whole plane.
     assert!(
-        pass.draw(&canvas.device, &canvas.queue, &list, &whole, canvas.size)
-            .expect("the pass answers")
-            .is_some(),
+        pass.draw(
+            &canvas.device,
+            &canvas.queue,
+            &list,
+            Request {
+                frame: &whole,
+                size: canvas.size,
+                fallback: Fallback::Nothing,
+            },
+        )
+        .expect("the pass answers")
+        .is_some(),
         "the whole plane at the fit scale paints the list"
     );
 
@@ -3893,9 +3999,18 @@ fn a_zoom_back_in_answers_the_list_again() {
     // a zoom back in draws: the band of the whole plane must not be what decides
     // it.
     assert!(
-        pass.draw(&canvas.device, &canvas.queue, &list, &one, canvas.size)
-            .expect("the pass answers")
-            .is_some(),
+        pass.draw(
+            &canvas.device,
+            &canvas.queue,
+            &list,
+            Request {
+                frame: &one,
+                size: canvas.size,
+                fallback: Fallback::Nothing,
+            },
+        )
+        .expect("the pass answers")
+        .is_some(),
         "a page of the plane the window zoomed into paints the list"
     );
 
@@ -3903,10 +4018,140 @@ fn a_zoom_back_in_answers_the_list_again() {
     // band a frame gives up is the band of the frame before it and never one the
     // picture needs.
     assert!(
-        pass.draw(&canvas.device, &canvas.queue, &list, &whole, canvas.size)
-            .expect("the pass answers")
-            .is_some(),
+        pass.draw(
+            &canvas.device,
+            &canvas.queue,
+            &list,
+            Request {
+                frame: &whole,
+                size: canvas.size,
+                fallback: Fallback::Nothing,
+            },
+        )
+        .expect("the pass answers")
+        .is_some(),
         "a zoom back out paints the list it painted before"
+    );
+}
+
+/// A page of [`heavy_plane`]'s curves with a solid square in its middle, so a
+/// paint of the list has one window pixel that names it.
+fn heavy_page_with_a_square(red: [u8; 4]) -> std::sync::Arc<[vv_source::scene::Primitive]> {
+    use vv_core::{
+        region,
+        scene::{self, Paint, Primitive},
+    };
+
+    let mut primitives: Vec<Primitive> = heavy_plane(1, 15_000).to_vec();
+    primitives.push(Primitive::Rect {
+        rect: scene::rect_of(region::crop(75.0, 75.0, 50.0, 50.0)),
+        paint: Paint::Solid(Color::new(red[0], red[1], red[2], red[3])),
+    });
+    primitives.into()
+}
+
+/// A frame past the budget shows the paint the pass has, so a list with no
+/// source behind it never falls back to the window background.
+///
+/// A frame whose flattening runs past `LINE_BUDGET` is one `vello` paints
+/// nothing of, and it reports nothing, so the pass refuses it (see
+/// `vv_gpu::display`). What the refusal shows belongs to the caller: one that
+/// holds a raster of the plane asks [`Fallback::Nothing`] and paints that raster
+/// at the window's own scale, and one whose picture arrived as a list alone asks
+/// [`Fallback::LastPaint`] and gets the encode on screen, placed by the transform
+/// between the two frames: stale in sharpness and still the picture.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_refused_frame_keeps_the_paint_it_has() {
+    use vv_core::{
+        dim::{SurfaceSize, WindowSize, WindowVector},
+        region,
+    };
+
+    let red = [255, 0, 0, 255];
+    let list = heavy_page_with_a_square(red);
+    let plane = SurfaceSize::new(PAGE_HEIGHT as f32, PAGE_HEIGHT as f32);
+    let frame = |scale: f32| region::Frame {
+        img: plane,
+        win: WindowSize::new(256.0, 256.0),
+        pan: WindowVector::zero(),
+        scale: vv_core::region::Scale::uniform(scale),
+        angle: 0.0,
+    };
+    let fit = frame(256.0 / PAGE_HEIGHT as f32);
+    let deep = frame(400.0);
+
+    let mut canvas = canvas!(256, 256);
+    let mut pass = canvas
+        .renderer
+        .display_pass(&canvas.device)
+        .expect("a display-list pass");
+    let paint = |canvas: &mut Canvas, painted: vv_gpu::display::Painted<'_>| {
+        canvas.renderer.texture(
+            painted.texture,
+            painted.src,
+            painted.quad,
+            Color::WHITE,
+            Filter::Linear,
+        );
+    };
+    // One frame of the pass, painted into the window it names.
+    let mut show = |canvas: &mut Canvas, frame: &region::Frame, fallback: Fallback| {
+        canvas.begin(CLEAR);
+        let painted = pass
+            .draw(
+                &canvas.device,
+                &canvas.queue,
+                &list,
+                Request {
+                    frame,
+                    size: canvas.size,
+                    fallback,
+                },
+            )
+            .expect("the pass answers");
+        if let Some(painted) = painted {
+            paint(canvas, painted);
+        }
+        painted.is_some()
+    };
+
+    // The page at the fit scale is a frame the pass paints, and its middle is
+    // the square.
+    assert!(show(&mut canvas, &fit, Fallback::Nothing), "the page fits");
+    assert_eq!(
+        canvas.print().at(128, 128),
+        red,
+        "the page paints its middle"
+    );
+
+    // The same page at 400x asks for more curves than the flattening holds, so
+    // the frame is refused, and a caller that holds a raster is told to paint
+    // it.
+    assert!(
+        !show(&mut canvas, &deep, Fallback::Nothing),
+        "a caller that holds a raster is told to paint it"
+    );
+
+    // A caller with nowhere else to look keeps the paint it has: the same page
+    // at the fit scale, then the refusal.
+    assert!(
+        show(&mut canvas, &fit, Fallback::LastPaint),
+        "the page fits"
+    );
+    assert_eq!(
+        canvas.read().at(128, 128),
+        red,
+        "the page paints its middle"
+    );
+    assert!(
+        show(&mut canvas, &deep, Fallback::LastPaint),
+        "a refusal keeps the paint it has"
+    );
+    assert_eq!(
+        canvas.print().at(128, 128),
+        red,
+        "the refused frame shows the paint it has, and not the window background"
     );
 }
 
