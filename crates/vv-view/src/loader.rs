@@ -43,7 +43,7 @@ use crate::{
     dim::{ImgH, ImgW, LongSide, PreviewPx},
     downscale_rgba,
     error::DecodeError,
-    fb_to_rgba, region,
+    fb_to_rgba, ms_since, region,
     surface::{ChunkSource, Surface, SurfaceError, View},
     texture::{Ready, Uploader},
 };
@@ -138,6 +138,15 @@ pub enum DecodeMsg {
     Done {
         frame: Ready,
         blur: Option<DecodedImage>,
+        /// The milliseconds this worker spent on the plane, from its first
+        /// byte to this answer.
+        ///
+        /// The worker measures it, so the number is the decode and not the
+        /// wait of a channel the frame drained on a later frame.
+        ms: f64,
+        /// The progressive previews this worker sent for the plane, so a
+        /// report names whether the streaming path ran at all.
+        previews: u32,
     },
 }
 
@@ -203,6 +212,14 @@ impl Loader {
         let blur = blurbg::Config::from_env_if_enabled();
         let uploader = uploader.clone();
         std::thread::spawn(move || {
+            // One span for the worker body, so every event a stream emits
+            // names the decode it belongs to and not the frame that drained
+            // it.
+            // The level is ERROR because the one event of a stream that a
+            // default run shows is the upload failure, and a span below the
+            // filter is disabled with its fields unrecorded.
+            let span = tracing::error_span!("decode", plane, preview_px = preview_px.raw());
+            let _e = span.enter();
             match stream(
                 surface.as_ref(),
                 plane,
@@ -254,6 +271,7 @@ fn stream(
     preview_px: PreviewPx,
     uploader: Option<&Uploader>,
 ) -> Result<Option<DecodeMsg>, LoadError> {
+    let start = Instant::now();
     if plane == 0
         && surface.plane_count() == 1
         && let Some(mut source) = surface.progressive()?
@@ -281,6 +299,7 @@ fn stream(
 
     // A slow rasterizer sends a cheap low-res render first.
     // The code skips it when it would not be smaller than the window.
+    let mut previews = 0;
     if surface.previews() {
         let long = info.w.max(info.h).max(1.0);
         let scale = (preview_px.raw() as f32 / long).min(1.0);
@@ -293,6 +312,7 @@ fn stream(
                 blur,
                 patch: None,
             }));
+            previews += 1;
         }
     }
 
@@ -301,6 +321,8 @@ fn stream(
     Ok(Some(DecodeMsg::Done {
         frame: ready(image, uploader),
         blur,
+        ms: ms_since(start),
+        previews,
     }))
 }
 
@@ -324,6 +346,8 @@ fn stream_book(
     preview_px: PreviewPx,
     uploader: Option<&Uploader>,
 ) -> Result<Option<DecodeMsg>, LoadError> {
+    let start = Instant::now();
+    let mut previews = 0;
     if let Some(spread) = surface.spread_box(0) {
         // The preview limit measures the window, and the spread is what the
         // fit shows of it, so its long side takes that limit.
@@ -342,6 +366,7 @@ fn stream_book(
                     blur: None,
                     patch: Some(region::Patch::new(spread, used)),
                 }));
+                previews += 1;
             }
         }
     }
@@ -353,6 +378,8 @@ fn stream_book(
     Ok(Some(DecodeMsg::Done {
         frame: ready(image, uploader),
         blur,
+        ms: ms_since(start),
+        previews,
     }))
 }
 
@@ -369,6 +396,7 @@ fn stream_jxl(
     preview_px: PreviewPx,
     uploader: Option<&Uploader>,
 ) -> Result<Option<DecodeMsg>, LoadError> {
+    let start = Instant::now();
     let slow = std::env::var_os("VV_SLOW_STREAM").is_some();
     // `try_init` consumes the uninit image.
     // The code keeps it in an Option so the NeedMoreData branch can put it
@@ -376,6 +404,7 @@ fn stream_jxl(
     let mut uninit = Some(JxlImage::builder().build_uninit());
     let mut image: Option<JxlImage> = None;
     let mut last_preview: Option<Instant> = None;
+    let mut previews = 0u32;
     let mut dribbled = 0usize;
     let mut buf = vec![0u8; CHUNK];
 
@@ -442,6 +471,13 @@ fn stream_jxl(
                         blur,
                         patch: None,
                     }));
+                    if previews == 0 {
+                        // The picture first appears here, blurry: the moment a
+                        // reader waits for, and the one no answer carries,
+                        // because every preview after it only sharpens it.
+                        tracing::debug!(ms = ms_since(start), "first preview");
+                    }
+                    previews += 1;
                     last_preview = Some(Instant::now());
                 }
             }
@@ -470,6 +506,8 @@ fn stream_jxl(
     Ok(Some(DecodeMsg::Done {
         frame: ready(image, uploader),
         blur,
+        ms: ms_since(start),
+        previews,
     }))
 }
 
@@ -555,14 +593,21 @@ mod tests {
         let surface = crate::surface::open_surface(&path).unwrap();
         let loader = Loader::start(surface, PreviewPx::new(512), &None);
         let mut header = None;
-        let done;
+        let (done, previews, ms);
         loop {
             match wait(&loader, Duration::from_secs(10))
                 .expect("loader timed out")
                 .expect("decode failed")
             {
-                DecodeMsg::Done { frame, .. } => {
+                DecodeMsg::Done {
+                    frame,
+                    previews: sent,
+                    ms: spent,
+                    ..
+                } => {
                     done = frame;
+                    previews = sent;
+                    ms = spent;
                     break;
                 }
                 DecodeMsg::Header { width, height } => header = Some((width, height)),
@@ -577,6 +622,10 @@ mod tests {
         // A test passes no uploader, so the frame stays pixels and its buffer
         // is checked here.
         assert_eq!(done.pixels().unwrap().as_rgba().len(), 4 * 3 * 4);
+        // The answer carries what the decode cost, so the frame that adopts it
+        // reports a worker's time and not a queue's.
+        assert_eq!(previews, 0, "an image sends no preview");
+        assert!((0.0..10_000.0).contains(&ms), "a 4x3 png is not slow: {ms}");
     }
 
     #[test]
@@ -673,14 +722,19 @@ mod tests {
         let loader = Loader::start(surface, PreviewPx::new(512), &None);
         let mut header = None;
         let mut patch = None;
-        let done;
+        let (done, previews);
         loop {
             match wait(&loader, Duration::from_secs(30))
                 .expect("loader timed out")
                 .expect("decode failed")
             {
-                DecodeMsg::Done { frame, .. } => {
+                DecodeMsg::Done {
+                    frame,
+                    previews: sent,
+                    ..
+                } => {
                     done = frame;
+                    previews = sent;
                     break;
                 }
                 DecodeMsg::Header { width, height } => header = Some((width, height)),
@@ -706,6 +760,9 @@ mod tests {
             ))
         );
         assert!(patch.is_some(), "the opening spread paints first");
+        // The book sent exactly that one spread before the fallback, which is
+        // what the answer's own count says.
+        assert_eq!(previews, 1, "one spread, then the whole book");
         // The fallback carries the whole plane at the preview scale.
         let (width, height) = done.dims();
         assert!(width.max(height) <= 512, "the fallback stays coarse");

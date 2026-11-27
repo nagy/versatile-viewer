@@ -58,3 +58,14 @@ pub use vv_pixels::{
 pub use vv_source::{
     book, convert, fb_to_rgba, measure_vector, pdf, scene_file, sign, surface, svg,
 };
+
+/// The milliseconds between `start` and now, the value every timing event of
+/// this crate carries under the field `ms`.
+///
+/// One spelling, so a filter reads one unit and a report adds no conversion.
+/// The workers of this crate measure their own work, which is the number a slow
+/// frame report cannot answer: a decode that took 40 ms names the worker and
+/// not the frame that drained it late.
+pub(crate) fn ms_since(start: std::time::Instant) -> f64 {
+    start.elapsed().as_secs_f64() * 1000.0
+}

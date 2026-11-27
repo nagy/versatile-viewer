@@ -61,7 +61,6 @@ use winit::{
 use crate::{
     DecodedImage, TAP_SLACK,
     blurbg::{self, BlurBg},
-    book::BookSurface,
     dim::{self, PreviewPx, WinH, WinW},
     display::{Fallback, Request},
     draw::{Color, Vec2},
@@ -69,12 +68,13 @@ use crate::{
     input::Input,
     keyrepeat::{self, RepeatState},
     loader::{DecodeMsg, Loader},
+    ms_since,
     push::{self, Push, Shown},
     region_sel,
     render::Renderer,
     rotate,
     scene_file::Scene,
-    surface::{Crop, Size, Surface, View, open_book_surface, open_bytes, open_surface},
+    surface::{Crop, Size, Surface, View, open_book_surface, open_bytes},
     texture::Texture,
     theme,
     view::{
@@ -285,13 +285,12 @@ impl Launch {
         let (grid, single_surface) = if path.is_dir() {
             (Some(Grid::from_dir(path)?), None)
         } else if path.is_file() {
-            let plain = open_surface(path)?;
-            book = plain.plane_count() > 1;
-            let surface: Arc<dyn Surface> = if book {
-                Arc::new(BookSurface::new(plain.into())?)
-            } else {
-                plain.into()
-            };
+            // One entry opens a file, here and over MCP alike (`Push::Path`), so
+            // a launch reports the same route a tool does.
+            // A wrapped book answers its spreads and a plain surface answers
+            // none, which is the whole test the launch makes.
+            let surface: Arc<dyn Surface> = open_book_surface(path)?.into();
+            book = surface.spread_count() > 0;
             let grid = book.then(|| Grid::from_paths(vec![path.to_path_buf()]));
             (grid, Some(surface))
         } else {
@@ -1473,7 +1472,12 @@ impl Viewer {
                             self.st.open_id,
                         );
                     }
-                    Ok(DecodeMsg::Done { frame, blur }) => {
+                    Ok(DecodeMsg::Done {
+                        frame,
+                        blur,
+                        ms,
+                        previews,
+                    }) => {
                         // Non-JXL formats only learn dimensions here.
                         if self.st.img.w == 0.0 {
                             let (width, height) = frame.dims();
@@ -1501,6 +1505,17 @@ impl Viewer {
                             &r.uploader(),
                             blur.as_ref(),
                             self.st.open_id,
+                        );
+                        // The one number an open costs: the worker measured
+                        // it, so a report separates a slow decode from a slow
+                        // frame that drained it late.
+                        tracing::debug!(
+                            ms,
+                            w = self.st.img.w,
+                            h = self.st.img.h,
+                            plane = self.st.source_plane,
+                            previews,
+                            "decoded"
                         );
                         self.st.view_loading = false;
                     }
@@ -2757,7 +2772,7 @@ impl Viewer {
             }
         }
         if let Some(started) = frame_started {
-            let ms = started.elapsed().as_secs_f64() * 1000.0;
+            let ms = ms_since(started);
             if ms > 50.0 {
                 tracing::debug!(ms = ms, "slow frame");
             }

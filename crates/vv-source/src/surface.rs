@@ -404,17 +404,40 @@ pub enum SurfaceError {
 /// The function errors when the file cannot be read, or when the content is
 /// not a decodable image, PDF or vector file.
 pub fn open_surface(path: &Path) -> Result<Box<dyn Surface>, SurfaceError> {
+    let (surface, route) = routed_open(path)?;
+    // The grid opens a cell through this call, so the route rides TRACE: a
+    // directory of a thousand files would otherwise log a thousand routes the
+    // moment a filter asks for DEBUG, and the gesture that matters has its own
+    // event at that level (see [`open_book_surface`]).
+    tracing::trace!(
+        path = %path.display(),
+        backend = route.backend,
+        format = ?route.format,
+        planes = surface.plane_count(),
+        "open route"
+    );
+    Ok(surface)
+}
+
+/// The surface of `path` and the route that answered it.
+///
+/// [`open_surface`] logs the route at TRACE and [`open_book_surface`] at DEBUG,
+/// so the dispatch answers both the surface and the name a report reads.
+fn routed_open(path: &Path) -> Result<(Box<dyn Surface>, Route), SurfaceError> {
     // A treemap is a generator and not a format: the bytes of the file say
     // nothing, so the extension is the one honest signal, exactly as it is for
     // a converter rule (see `src/convert.rs`).
     // The route reads no content, so it lands before every sniff.
     if crate::treemap::claims(path) {
-        return Ok(Box::new(crate::treemap::TreemapSurface::open(path)?));
+        return Ok(route(
+            Box::new(crate::treemap::TreemapSurface::open(path)?),
+            "treemap",
+        ));
     }
     // A PDF is a multi-plane surface (one plane per page).
     // The backend holds the hayro dependency in `pdf.rs`.
     if crate::pdf::is_pdf(path) {
-        return Ok(Box::new(crate::pdf::PdfSurface::open(path)?));
+        return Ok(route(Box::new(crate::pdf::PdfSurface::open(path)?), "pdf"));
     }
     // A converter claims the extensions its rules name, so a format this
     // viewer does not parse itself reaches a backend through an external
@@ -425,13 +448,49 @@ pub fn open_surface(path: &Path) -> Result<Box<dyn Surface>, SurfaceError> {
     // its rule.
     let kind = match sign::detect(path) {
         Ok(kind) => kind,
-        Err(_) if crate::convert::claims(path) => return crate::convert::open(path),
+        Err(_) if crate::convert::claims(path) => {
+            return Ok(route(crate::convert::open(path)?, "converter"));
+        }
         Err(err) => return Err(err.into()),
     };
-    match kind {
-        sign::Kind::Vector => Ok(Box::new(VectorSurface::open(path)?)),
-        sign::Kind::Raster(format) => Ok(Box::new(ImageSurface::new(path, format))),
-    }
+    Ok(match kind {
+        sign::Kind::Vector => route(Box::new(VectorSurface::open(path)?), "svg"),
+        sign::Kind::Raster(format) => {
+            raster_route(Box::new(ImageSurface::new(path, format)), format)
+        }
+    })
+}
+
+/// The backend an open took.
+///
+/// The name is a constant of this module rather than a type name, because a
+/// report greps it, and the format is the raster one the sniff named, which no
+/// other backend carries.
+struct Route {
+    backend: &'static str,
+    format: Option<sign::Format>,
+}
+
+/// One open route of a backend whose surface names its own format.
+fn route(surface: Box<dyn Surface>, backend: &'static str) -> (Box<dyn Surface>, Route) {
+    (
+        surface,
+        Route {
+            backend,
+            format: None,
+        },
+    )
+}
+
+/// One open route of the raster backend, which the sniff narrowed to a decoder.
+fn raster_route(surface: Box<dyn Surface>, format: sign::Format) -> (Box<dyn Surface>, Route) {
+    (
+        surface,
+        Route {
+            backend: "raster",
+            format: Some(format),
+        },
+    )
 }
 
 /// Open a picture that lives in memory instead of on disk.
@@ -449,18 +508,47 @@ pub fn open_surface(path: &Path) -> Result<Box<dyn Surface>, SurfaceError> {
 /// The function errors when the content matches no backend, or when the
 /// decoder rejects it.
 pub fn open_bytes(data: &[u8]) -> Result<Box<dyn Surface>, SurfaceError> {
-    if data.starts_with(crate::pdf::MAGIC) {
-        return Ok(Box::new(crate::pdf::PdfSurface::from_bytes(data.to_vec())?));
-    }
-    match sign::detect_bytes(data)? {
-        sign::Kind::Vector => Ok(Box::new(VectorSurface::from_vector(
-            crate::svg::from_bytes(data)?,
-        ))),
-        sign::Kind::Raster(format) => {
-            let image = crate::decode_raster_bytes(data, format)?;
-            Ok(Box::new(MemorySurface::new(image)))
+    // One shape for both readers: a push names the same route a file does, so a
+    // pushed JPEG reports the format the sniff found and not a bare `raster`.
+    let (surface, route): (Box<dyn Surface>, Route) = if data.starts_with(crate::pdf::MAGIC) {
+        (
+            Box::new(crate::pdf::PdfSurface::from_bytes(data.to_vec())?),
+            Route {
+                backend: "pdf",
+                format: None,
+            },
+        )
+    } else {
+        match sign::detect_bytes(data)? {
+            sign::Kind::Vector => (
+                Box::new(VectorSurface::from_vector(crate::svg::from_bytes(data)?)),
+                Route {
+                    backend: "svg",
+                    format: None,
+                },
+            ),
+            sign::Kind::Raster(format) => {
+                let image = crate::decode_raster_bytes(data, format)?;
+                (
+                    Box::new(MemorySurface::new(image)),
+                    Route {
+                        backend: "raster",
+                        format: Some(format),
+                    },
+                )
+            }
         }
-    }
+    };
+    // A push is one gesture, so the route rides DEBUG here where a file open
+    // keeps it at TRACE: a tool answers a caller that has no file to inspect.
+    tracing::debug!(
+        bytes = data.len(),
+        backend = route.backend,
+        format = ?route.format,
+        planes = surface.plane_count(),
+        "open route"
+    );
+    Ok(surface)
 }
 
 /// Open a file and, when its source holds more than one plane, show it as a
@@ -476,12 +564,30 @@ pub fn open_bytes(data: &[u8]) -> Result<Box<dyn Surface>, SurfaceError> {
 /// The function errors when the file cannot be read or the content is not a
 /// decodable image, PDF or vector file.
 pub fn open_book_surface(path: &Path) -> Result<Box<dyn Surface>, SurfaceError> {
-    let surface = open_surface(path)?;
-    if surface.plane_count() <= 1 {
-        return Ok(surface);
-    }
-    let inner: Arc<dyn Surface> = surface.into();
-    Ok(Box::new(crate::book::BookSurface::new(inner)?))
+    let (surface, route) = routed_open(path)?;
+    // The book wraps every page into one plane, so the count a report wants is
+    // the file's, read before the wrap: `BookSurface::plane_count` is always
+    // one, and the wrapped surface would answer `1` for every document.
+    let pages = surface.plane_count();
+    let book = pages > 1;
+    let surface: Box<dyn Surface> = if book {
+        let inner: Arc<dyn Surface> = surface.into();
+        Box::new(crate::book::BookSurface::new(inner)?)
+    } else {
+        surface
+    };
+    // The image view opens through this call and the grid does not, so the
+    // route lands at DEBUG: one line per gesture, naming the backend a file
+    // really took, which is the answer a picture that looks wrong asks for.
+    tracing::debug!(
+        path = %path.display(),
+        backend = route.backend,
+        format = ?route.format,
+        planes = pages,
+        book,
+        "open route"
+    );
+    Ok(surface)
 }
 
 /// A raster picture that lives only in memory, which always holds one plane.
@@ -893,6 +999,32 @@ mod tests {
         let path = dir.join(name);
         std::fs::write(&path, body).unwrap();
         path
+    }
+
+    #[test]
+    fn every_route_names_its_backend() {
+        // A backend name is what a report greps, so a typo in one is a bug no
+        // other test sees: the dispatch answers the route as data, and this
+        // pins every name a file can take.
+        let dir = temp_dir();
+        let png = write_png(dir.path(), "img.png", 4, 4);
+        let (_, route) = routed_open(&png).expect("a png opens");
+        assert_eq!(
+            (route.backend, route.format),
+            ("raster", Some(sign::Format::Common))
+        );
+        let svg = write_svg(dir.path(), "drawing.svg", SQUARE);
+        let (_, route) = routed_open(&svg).expect("a document opens");
+        assert_eq!((route.backend, route.format), ("svg", None));
+        // The bytes of a map say nothing, so the extension is its whole route.
+        let map = dir.path().join("map.treemap");
+        std::fs::write(&map, "not a picture, not a document\n").unwrap();
+        let (_, route) = routed_open(&map).expect("a map opens");
+        assert_eq!((route.backend, route.format), ("treemap", None));
+        let pdf = dir.path().join("doc.pdf");
+        std::fs::write(&pdf, crate::pdf::MINIMAL_PDF).unwrap();
+        let (_, route) = routed_open(&pdf).expect("a pdf opens");
+        assert_eq!((route.backend, route.format), ("pdf", None));
     }
 
     #[test]
