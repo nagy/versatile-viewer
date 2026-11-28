@@ -340,6 +340,7 @@ container, pane).
 |`f`                  |open cell under cursor      |fill-zoom at cursor / zoom out / back to grid (hold: pan)|
 |`Shift+f` (hold)     |—                           |free zoom by mouse travel: up zooms in, down zooms out (continuous)|
 |`f` then `Shift`     |—                           |while `f` is held, Shift switches the pan drag over to the free zoom, anchored at the view center|
+|right-drag (hold)    |—                           |free zoom by mouse travel, the same gesture as `Shift+f`; with the left button also down the picture pans while it scales|
 |`r` (hold)           |—                           |rotate by mouse travel: down turns clockwise, up turns counter-clockwise; the release snaps a near quarter turn|
 |`Shift+r` (hold)     |—                           |rotate around the mouse point instead of the image center|
 |`v` / `V` / `Ctrl+v` |visual selection: charwise / linewise / blockwise (dims the other cells)|region selection (hold `v` and drag; hold inside it to move it)|
@@ -358,6 +359,13 @@ A motion starts only at a key press this window saw go down. A window manager
 that binds `l` for a workspace switch still holds that key when `vv` arrives,
 and X replays it as a synthetic press. `vv` ignores that replay and the
 auto-repeat after it, so a pan never starts from a key another window owns.
+
+A right-drag zooms by vertical mouse travel, and a left-drag pans. Hold both
+and the two run in one gesture: the picture follows the pointer and scales
+with it as the drag travels. A zoom hold anchors the picture point under the
+pointer, and that anchor drifts toward the window center as the scale runs, so
+a long zoom recenters. Releasing one button leaves the other's motion going,
+and the pointer comes back where the gesture grabbed it only once both let go.
 
 `v` in the image view selects a region. Hold `v`, drag the rectangle, and
 release. The rest of the picture dims by the same amount as the grid cells

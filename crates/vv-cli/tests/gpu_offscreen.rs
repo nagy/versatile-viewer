@@ -49,6 +49,7 @@ use vv_gpu::{
     texture::Filter,
 };
 use vv_source::surface::{View, open_surface};
+use winit::event::MouseButton;
 
 /// The window background, which the viewer clears to.
 const CLEAR: Color = Color::new(0x06, 0x23, 0x29, 0xff);
@@ -4101,6 +4102,250 @@ fn shift_t_recolors_the_picture_and_turns_it_back() {
         "the theme is off again: {:?}",
         back.at(16, 16)
     );
+}
+
+/// The right button zooms the way a `Shift+F` hold does, and the left button
+/// pans beside it instead of ending the zoom.
+///
+/// The hold reads the raw travel of a captured pointer, so the test feeds the
+/// delta a device reports and reads the box the window shows: a vertical drag
+/// scales the picture, a horizontal one moves it, and neither ends the other.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_right_drag_zooms_and_a_left_drag_pans_beside_it() {
+    let Some(canvas) = Canvas::new(64, 64) else {
+        skip_without_adapter();
+        return;
+    };
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("white.svg");
+    std::fs::write(&path, WHITE_64).expect("write the svg");
+    let launch = vv_view::viewer::Launch::open(&path, true).expect("the launch opens");
+    let mut viewer = vv_view::viewer::Viewer::new(
+        canvas.device.clone(),
+        canvas.queue.clone(),
+        FORMAT,
+        canvas.device.limits().max_texture_dimension_2d,
+        launch,
+        canvas.size,
+    );
+    let mut host = NullHost;
+
+    // Wait out the decode, so the fit shows the whole plane from its corner.
+    let mut painted = false;
+    for _ in 0..240 {
+        shot_frame(&canvas, &mut viewer, &mut host, 0.016, false);
+        if close(canvas.read().at(32, 32), [255, 255, 255, 255], 2) {
+            painted = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
+    assert!(painted, "the white picture lands");
+    let fit = viewer.visible().expect("the window shows the plane");
+    assert!(
+        fit.origin.x.abs() < 0.5 && fit.origin.y.abs() < 0.5,
+        "the fit shows the whole plane from its corner: {fit:?}"
+    );
+
+    // The right button alone: one e-fold of scale per `ZOOM_DRAG_SPAN` of the
+    // window's long side, times the drag rate, and the ease carries it in.
+    pointer_button(
+        &mut viewer,
+        MouseButton::Right,
+        winit::event::ElementState::Pressed,
+    );
+    pointer_travel(&mut viewer, Vec2::new(0.0, -8.0));
+    let zoomed = shown_box(&canvas, &mut viewer, &mut host, 30);
+    assert!(
+        zoomed.size.width < fit.size.width * 0.75,
+        "a vertical right drag zooms in: {zoomed:?} from {fit:?}"
+    );
+
+    // The left button joins the same capture: a horizontal travel moves the
+    // picture and leaves the scale alone.
+    // One window pixel covers this many surface units of the box on screen.
+    let per_pixel = zoomed.size.width / f32::from(u16::try_from(canvas.size.0).expect("a side"));
+    pointer_button(
+        &mut viewer,
+        MouseButton::Left,
+        winit::event::ElementState::Pressed,
+    );
+    pointer_travel(&mut viewer, Vec2::new(-12.0, 0.0));
+    let panned = shown_box(&canvas, &mut viewer, &mut host, 6);
+    assert!(
+        (panned.size.width - zoomed.size.width).abs() < 0.5,
+        "a horizontal drag keeps the scale: {panned:?} from {zoomed:?}"
+    );
+    assert!(
+        panned.origin.x - zoomed.origin.x > 12.0 * per_pixel * 0.75,
+        "the pan follows the travel: {panned:?} from {zoomed:?}"
+    );
+
+    // The right button lets go: the left drag keeps the capture, so the pan
+    // runs on where a released gesture would have given the pointer back.
+    pointer_button(
+        &mut viewer,
+        MouseButton::Right,
+        winit::event::ElementState::Released,
+    );
+    pointer_travel(&mut viewer, Vec2::new(-12.0, 0.0));
+    let more = shown_box(&canvas, &mut viewer, &mut host, 6);
+    assert!(
+        more.origin.x - panned.origin.x > 12.0 * per_pixel * 0.75,
+        "the pan outlives the zoom: {more:?} from {panned:?}"
+    );
+
+    // The last hold lets go, and the pointer is the window's again: a travel
+    // after it moves nothing.
+    pointer_button(
+        &mut viewer,
+        MouseButton::Left,
+        winit::event::ElementState::Released,
+    );
+    pointer_travel(&mut viewer, Vec2::new(-12.0, 0.0));
+    let rest = shown_box(&canvas, &mut viewer, &mut host, 6);
+    assert!(
+        (rest.origin.x - more.origin.x).abs() < 0.5
+            && (rest.size.width - more.size.width).abs() < 0.5,
+        "a released capture reads no travel: {rest:?} from {more:?}"
+    );
+}
+
+/// A left press that lands while `f` owns the pointer moves nothing once the
+/// key lets go.
+///
+/// The press edge refuses the grab there, so the pan latch stays off: the
+/// button being down is not the same as the button owning the pan, and a
+/// release of `f` must not hand the capture to a press that never took it.
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_left_press_an_f_hold_refused_never_starts_a_pan() {
+    let Some(canvas) = Canvas::new(64, 64) else {
+        skip_without_adapter();
+        return;
+    };
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("white.svg");
+    std::fs::write(&path, WHITE_64).expect("write the svg");
+    let launch = vv_view::viewer::Launch::open(&path, true).expect("the launch opens");
+    let mut viewer = vv_view::viewer::Viewer::new(
+        canvas.device.clone(),
+        canvas.queue.clone(),
+        FORMAT,
+        canvas.device.limits().max_texture_dimension_2d,
+        launch,
+        canvas.size,
+    );
+    let mut host = NullHost;
+
+    // Wait out the decode, so the fit shows the whole plane.
+    let mut painted = false;
+    for _ in 0..240 {
+        shot_frame(&canvas, &mut viewer, &mut host, 0.016, false);
+        if close(canvas.read().at(32, 32), [255, 255, 255, 255], 2) {
+            painted = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
+    assert!(painted, "the white picture lands");
+
+    // Shift+F is a zoom hold, whose release runs no tap action, so the grab
+    // stays until both keys are up.
+    key_state(
+        &mut viewer,
+        winit::keyboard::KeyCode::ShiftLeft,
+        winit::event::ElementState::Pressed,
+    );
+    key_state(
+        &mut viewer,
+        winit::keyboard::KeyCode::KeyF,
+        winit::event::ElementState::Pressed,
+    );
+    shown_box(&canvas, &mut viewer, &mut host, 2);
+    // The left press lands on a capture `f` owns, so it starts nothing. The
+    // frame consumes the edge, which is where the refusal happens.
+    pointer_button(
+        &mut viewer,
+        MouseButton::Left,
+        winit::event::ElementState::Pressed,
+    );
+    shot_frame(&canvas, &mut viewer, &mut host, 0.016, false);
+    // The key lets go: the capture ends, and the held button inherits nothing.
+    for key in [
+        winit::keyboard::KeyCode::KeyF,
+        winit::keyboard::KeyCode::ShiftLeft,
+    ] {
+        key_state(&mut viewer, key, winit::event::ElementState::Released);
+    }
+    let before = shown_box(&canvas, &mut viewer, &mut host, 2);
+
+    // The travel a captured pointer would report moves nothing now.
+    pointer_travel(&mut viewer, Vec2::new(-20.0, 0.0));
+    let after = shown_box(&canvas, &mut viewer, &mut host, 6);
+    assert!(
+        (after.origin.x - before.origin.x).abs() < 0.5
+            && (after.size.width - before.size.width).abs() < 0.5,
+        "a refused left press never starts a pan: {after:?} from {before:?}"
+    );
+    pointer_button(
+        &mut viewer,
+        MouseButton::Left,
+        winit::event::ElementState::Released,
+    );
+}
+
+/// A 64 px white square, so a test reads the shown box off the plane and never
+/// compares pixels.
+const WHITE_64: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" fill="#ffffff"/></svg>"##;
+
+/// Send one key edge through the viewer's own input path.
+fn key_state(
+    viewer: &mut vv_view::viewer::Viewer,
+    key: winit::keyboard::KeyCode,
+    state: winit::event::ElementState,
+) {
+    viewer.handle_event(
+        vv_view::viewer::Event::Key {
+            key,
+            state,
+            repeat: false,
+            synthetic: false,
+            text: None,
+        },
+        &mut NullHost,
+    );
+}
+
+/// The box the window shows once `n` frames have carried the ease.
+fn shown_box(
+    canvas: &Canvas,
+    viewer: &mut vv_view::viewer::Viewer,
+    host: &mut NullHost,
+    n: usize,
+) -> vv_core::region::Crop {
+    for _ in 0..n {
+        shot_frame(canvas, viewer, host, 0.016, false);
+    }
+    viewer.visible().expect("the window shows the plane")
+}
+
+/// Put one mouse button down or up through the viewer's own input path.
+fn pointer_button(
+    viewer: &mut vv_view::viewer::Viewer,
+    button: MouseButton,
+    state: winit::event::ElementState,
+) {
+    viewer.handle_event(
+        vv_view::viewer::Event::Button { button, state },
+        &mut NullHost,
+    );
+}
+
+/// Feed the raw travel a captured pointer reports.
+fn pointer_travel(viewer: &mut vv_view::viewer::Viewer, delta: Vec2) {
+    viewer.handle_event(vv_view::viewer::Event::Travel(delta), &mut NullHost);
 }
 
 /// A picture that arrives from outside the process paints in a blank viewer.

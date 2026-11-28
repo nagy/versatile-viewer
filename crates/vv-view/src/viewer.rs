@@ -507,6 +507,124 @@ impl Opening {
     }
 }
 
+/// Every gesture that holds the captured pointer.
+///
+/// One grab serves all of them, so the latches live together and end through
+/// [`Capture::drop_capture`]: the left button pans, `f` pans or zooms by the
+/// Shift state of its press, the right button zooms, and `r` turns the image.
+/// A gesture may join a running capture (the left button joins a right-button
+/// zoom), and then the grab outlives it until the last hold lets go.
+///
+/// The field names end with `capture` because each one names the gesture that
+/// holds the pointer, and the bools are latches rather than states a two-variant
+/// enum could name: a gesture joins a running capture, so more than one is on at
+/// a time.
+#[allow(clippy::struct_excessive_bools, clippy::struct_field_names)]
+#[derive(Clone, Copy, Debug, Default)]
+struct Capture {
+    /// True while an image-view drag holds the pointer.
+    ///
+    /// This is the view's latch; [`Input::capture`] carries the same fact to
+    /// the input layer, so the raw travel moves the pointer. The two move
+    /// together, and only through [`grab_pointer`], [`release_pointer`] or the
+    /// lost-focus arm.
+    pointer_captured: bool,
+    /// The window point where the current drag grabbed the pointer.
+    grab_pos: Vec2,
+    /// The pointer position while captured: the grab point plus the raw travel.
+    drag_virtual: Vec2,
+    /// A post-drag pointer restore that waits for the warp to land.
+    pending_restore: Option<Vec2>,
+    /// How many warps the restore tried.
+    restore_tries: u32,
+    /// `f` held captures the pointer (a pan, or a free zoom with Shift).
+    f_capture: bool,
+    /// The running `f` hold zooms instead of panning.
+    f_zoom_capture: bool,
+    /// The running `f` hold ever zoomed, so its release runs no tap action.
+    f_zoom_tapped: bool,
+    /// The right button held captures the pointer and zooms, the way a
+    /// `Shift+F` hold does.
+    ///
+    /// It is the second source of one zoom hold ([`Capture::zoom_hold`]), so
+    /// the rate, the anchor and the drift toward the window center are the same
+    /// code for both.
+    /// A left drag that is still down pans beside it: the two buttons are one
+    /// gesture that moves and scales the picture at once.
+    zoom_btn_capture: bool,
+    /// The running zoom hold's on-screen anchor, from the `Shift+F` hold or
+    /// from the right button.
+    hold_anchor: Option<Vec2>,
+    /// `r` held captures the pointer and turns the image.
+    r_capture: bool,
+    /// The left button drives the pan.
+    ///
+    /// A press latches it, whether that press grabbed the pointer or joined a
+    /// right-button zoom, and the release drops it. A latch and not the button
+    /// state, because those press edges refuse a hold that `f` or `r` owns: a
+    /// button that went down with nothing to move must not start moving the
+    /// moment that key lets go.
+    left_drag: bool,
+}
+
+impl Capture {
+    /// Does the running hold scale the picture instead of moving or turning it?
+    ///
+    /// Shift at the `f` press edge makes that hold a zoom, and the right button
+    /// is always one, so the two sources of the zoom read alike everywhere the
+    /// frame asks.
+    const fn zoom_hold(&self) -> bool {
+        (self.f_capture && self.f_zoom_capture) || self.zoom_btn_capture
+    }
+
+    /// Does the left button drive a pan right now?
+    ///
+    /// It joins whichever capture holds the pointer, which is what lets it pan
+    /// during a right-button zoom, but never a hold that `f` or `r` owns: those
+    /// press edges refuse the grab, so the button is down with nothing to move.
+    const fn left_pan(&self) -> bool {
+        self.left_drag
+    }
+
+    /// Does any gesture still hold the captured pointer?
+    ///
+    /// The capture outlives a single hold, because the gestures compose: a left
+    /// drag that is still on keeps the grab a right-button zoom ends.
+    const fn holds_capture(&self) -> bool {
+        self.f_capture || self.r_capture || self.zoom_btn_capture || self.left_pan()
+    }
+
+    /// Let go of every gesture, and give the pointer back.
+    ///
+    /// A mode that reads no press and no release edge calls this, because a
+    /// latch left on outlives the gesture that set it.
+    fn release_all(&mut self, input: &mut Input, host: &mut dyn Host) {
+        self.f_capture = false;
+        self.f_zoom_capture = false;
+        self.f_zoom_tapped = false;
+        self.zoom_btn_capture = false;
+        self.left_drag = false;
+        self.hold_anchor = None;
+        self.r_capture = false;
+        self.drop_capture(input, host);
+    }
+
+    /// Give the pointer back and put it where the gesture grabbed it.
+    ///
+    /// Every end of a capture runs through here, so the restore happens once,
+    /// on the frame the last hold lets go.
+    fn drop_capture(&mut self, input: &mut Input, host: &mut dyn Host) {
+        if !self.pointer_captured {
+            return;
+        }
+        release_pointer(input, host);
+        place_pointer(input, host, self.grab_pos);
+        self.pending_restore = Some(self.grab_pos);
+        self.restore_tries = 0;
+        self.pointer_captured = false;
+    }
+}
+
 /// The viewer: the pipeline, the two views and the latches of the frame loop.
 ///
 /// Everything here needs a device, and nothing here needs a window: the host
@@ -560,35 +678,16 @@ pub struct Viewer {
     spread_armed: bool,
     /// The previous frame's window size, for the resize detection.
     last_win: Option<(f32, f32)>,
-    /// True while an image-view drag holds the pointer.
-    ///
-    /// This is the view's latch; [`Input::capture`] carries the same fact to
-    /// the input layer, so the raw travel moves the pointer. The two move
-    /// together, and only through [`Viewer::grab_pointer`],
-    /// [`Viewer::release_pointer`] or the lost-focus arm.
-    pointer_captured: bool,
     /// How far one unit of raw device travel moves the picture in a drag.
     ///
     /// `VV_PAN_DRAG_SPEED` sets it once at launch (see [`pan_drag_speed`]).
     pan_drag_speed: f32,
-    /// The window point where the current drag grabbed the pointer.
-    grab_pos: Vec2,
-    /// The pointer position while captured: the grab point plus the raw travel.
-    drag_virtual: Vec2,
-    /// A post-drag pointer restore that waits for the warp to land.
-    pending_restore: Option<Vec2>,
-    /// How many warps the restore tried.
-    restore_tries: u32,
-    /// `f` held captures the pointer (a pan, or a free zoom with Shift).
-    f_capture: bool,
-    /// The running `f` hold zooms instead of panning.
-    f_zoom_capture: bool,
-    /// The running `f` hold ever zoomed, so its release runs no tap action.
-    f_zoom_tapped: bool,
-    /// The free-zoom drag's on-screen anchor.
-    f_zoom_anchor: Option<Vec2>,
-    /// `r` held captures the pointer and turns the image.
-    r_capture: bool,
+    /// Every gesture that holds the captured pointer.
+    ///
+    /// The group is one field so a method on it borrows the drag state alone:
+    /// the frame holds the renderer for its whole length, and a method on the
+    /// viewer may not reach past that borrow.
+    capture: Capture,
     /// The `v` region drag in progress.
     region_drag: Option<region_sel::Drag>,
     /// The held state of the zoom keys on layouts where `+`/`-` sit elsewhere.
@@ -700,17 +799,8 @@ impl Viewer {
             quit: false,
             spread_armed: true,
             last_win: None,
-            pointer_captured: false,
             pan_drag_speed: pan_drag_speed(),
-            grab_pos: Vec2::ZERO,
-            drag_virtual: Vec2::ZERO,
-            pending_restore: None,
-            restore_tries: 0,
-            f_capture: false,
-            f_zoom_capture: false,
-            f_zoom_tapped: false,
-            f_zoom_anchor: None,
-            r_capture: false,
+            capture: Capture::default(),
             region_drag: None,
             zoom_keys: TypedKeys::default(),
             rep_nav_fwd: RepeatState::default(),
@@ -873,13 +963,12 @@ impl Viewer {
     ///
     /// A lost focus never delivers the releases, so a hold would otherwise stay
     /// on after the window came back, and a capture would outlive its drag.
+    /// A pointer restore in flight is dropped with the rest: the warp would
+    /// move the pointer over the window that took the focus.
     fn forget_focus(&mut self, host: &mut dyn Host) {
         self.input.forget_held();
         self.input.capture(false);
-        self.pointer_captured = false;
-        self.f_capture = false;
-        self.f_zoom_capture = false;
-        self.r_capture = false;
+        self.capture = Capture::default();
         self.region_drag = None;
         host.release_pointer();
     }
@@ -1234,12 +1323,12 @@ impl Viewer {
         // again.
         // The code gives up after a few tries so a user moving the mouse is
         // never pinned.
-        if let Some(target) = self.pending_restore {
+        if let Some(target) = self.capture.pending_restore {
             let cur = self.input.cursor_position();
             let settled = (cur.x - target.x).abs() < 1.0 && (cur.y - target.y).abs() < 1.0;
             if debug && !settled {
                 tracing::debug!(
-                    tries = self.restore_tries,
+                    tries = self.capture.restore_tries,
                     cur_x = cur.x,
                     cur_y = cur.y,
                     target_x = target.x,
@@ -1247,11 +1336,11 @@ impl Viewer {
                     "pointer restore pending"
                 );
             }
-            if settled || self.restore_tries >= 3 {
-                self.pending_restore = None;
+            if settled || self.capture.restore_tries >= 3 {
+                self.capture.pending_restore = None;
             } else {
                 place_pointer(&mut self.input, host, target);
-                self.restore_tries += 1;
+                self.capture.restore_tries += 1;
             }
         }
         // The code does the resize detection itself.
@@ -1718,49 +1807,55 @@ impl Viewer {
             // still, so the image point under it drifts toward the center on
             // screen.
             // Auto-repeat re-fires the press edge while held, hence the
-            // `!self.pointer_captured && !self.f_capture` guard.
+            // `!self.capture.pointer_captured && !self.capture.f_capture` guard.
             // The same guard covers the `r` rotation hold, which grabs the
-            // pointer the same way.
+            // pointer the same way, and it keeps an `f` press from cutting a
+            // running right-button zoom short.
             let mut f_click: Option<Vec2> = None;
-            if (f_key || r_key) && !self.pointer_captured && !self.f_capture && !self.r_capture {
-                self.grab_pos = self.input.cursor_position();
-                self.drag_virtual = self.grab_pos;
+            if (f_key || r_key)
+                && !self.capture.pointer_captured
+                && !self.capture.f_capture
+                && !self.capture.r_capture
+            {
+                self.capture.grab_pos = self.input.cursor_position();
+                self.capture.drag_virtual = self.capture.grab_pos;
                 grab_pointer(&mut self.input, host);
-                self.pointer_captured = true;
+                self.capture.pointer_captured = true;
                 if r_key {
                     // `r` turns the image. The hold adds to the angle the image
                     // shows now, so the press never resets the turn.
                     // A plain `r` turns around the image center, and Shift+R
                     // turns around the grabbed point, which stays on its window
                     // spot while the pointer stays captured.
-                    self.r_capture = true;
-                    self.st.pivot = r_pivot_edge.then_some(self.grab_pos);
+                    self.capture.r_capture = true;
+                    self.st.pivot = r_pivot_edge.then_some(self.capture.grab_pos);
                     tracing::debug!(
-                        grab_x = self.grab_pos.x,
-                        grab_y = self.grab_pos.y,
+                        grab_x = self.capture.grab_pos.x,
+                        grab_y = self.capture.grab_pos.y,
                         angle = self.st.angle,
                         pivot = ?self.st.pivot,
                         "r hold grab"
                     );
                 } else {
-                    self.f_capture = true;
-                    self.f_zoom_capture = shift;
-                    self.f_zoom_anchor = self.f_zoom_capture.then_some(self.grab_pos);
+                    self.capture.f_capture = true;
+                    self.capture.f_zoom_capture = shift;
+                    self.capture.hold_anchor =
+                        self.capture.f_zoom_capture.then_some(self.capture.grab_pos);
                     tracing::debug!(
-                        grab_x = self.grab_pos.x,
-                        grab_y = self.grab_pos.y,
-                        zoom = self.f_zoom_capture,
+                        grab_x = self.capture.grab_pos.x,
+                        grab_y = self.capture.grab_pos.y,
+                        zoom = self.capture.f_zoom_capture,
                         "f hold grab"
                     );
                 }
             }
             // A Shift change mid-hold switches the pan and the zoom.
             // The capture stays, so the travel stays unbounded.
-            if self.f_capture && shift != self.f_zoom_capture {
-                self.f_zoom_capture = shift;
+            if self.capture.f_capture && shift != self.capture.f_zoom_capture {
+                self.capture.f_zoom_capture = shift;
                 // Forget the distance the tap test and the pan measured.
-                self.grab_pos = self.input.cursor_position();
-                self.drag_virtual = self.grab_pos;
+                self.capture.grab_pos = self.input.cursor_position();
+                self.capture.drag_virtual = self.capture.grab_pos;
                 // A zoom from here on anchors on the view center: the image
                 // point the window shows at its middle.
                 // The pointer is hidden, so its last screen spot says nothing
@@ -1768,66 +1863,67 @@ impl Viewer {
                 // spot away from the middle.
                 // The anchor is the middle of the window, so the ease needs no
                 // drift toward it.
-                self.f_zoom_anchor = self.f_zoom_capture.then_some(Vec2 {
+                self.capture.hold_anchor = self.capture.f_zoom_capture.then_some(Vec2 {
                     x: win_w / 2.0,
                     y: win_h / 2.0,
                 });
                 // A zoom hold never counts as a tap.
-                self.f_zoom_tapped = true;
-                tracing::debug!(zoom = self.f_zoom_capture, "f hold switch");
+                self.capture.f_zoom_tapped = true;
+                tracing::debug!(zoom = self.capture.f_zoom_capture, "f hold switch");
             }
             // `!key_down` also covers a press+release landing inside one
             // frame (the pressed queue records the press, but there is no
             // release edge to observe).
             // Without this the capture sticks.
             // The `r` release keeps the angle, so the image stays turned.
-            if (self.f_capture || self.r_capture)
+            if (self.capture.f_capture || self.capture.r_capture)
                 && !self.input.is_key_down(KeyCode::KeyF)
                 && !self.input.is_key_down(KeyCode::KeyR)
             {
                 // Fold in this frame's motion before the lock is released
                 // (the drag block below no longer runs once capture ends).
+                // No other latch can be on here: a left press and a right press
+                // are both refused while `f` or `r` owns the pointer, so this
+                // arm always ends the capture, and the fold happens once.
                 let delta = self.input.pointer_travel();
-                self.drag_virtual.x += delta.x;
-                self.drag_virtual.y += delta.y;
-                let f_dragged = (self.drag_virtual - self.grab_pos).length() > TAP_SLACK;
-                if self.pointer_captured {
-                    release_pointer(&mut self.input, host);
-                    place_pointer(&mut self.input, host, self.grab_pos);
-                    self.pending_restore = Some(self.grab_pos);
-                    self.restore_tries = 0;
-                    self.pointer_captured = false;
-                }
+                self.capture.drag_virtual.x += delta.x;
+                self.capture.drag_virtual.y += delta.y;
+                let f_dragged =
+                    (self.capture.drag_virtual - self.capture.grab_pos).length() > TAP_SLACK;
                 // A zoom hold has no tap action: it would otherwise run the
                 // `f` fill aim on release.
-                if self.f_capture && !f_dragged && !self.f_zoom_capture && !self.f_zoom_tapped {
-                    f_click = Some(self.grab_pos);
+                if self.capture.f_capture
+                    && !f_dragged
+                    && !self.capture.f_zoom_capture
+                    && !self.capture.f_zoom_tapped
+                {
+                    f_click = Some(self.capture.grab_pos);
                 }
-                if self.f_capture {
-                    self.f_capture = false;
-                    self.f_zoom_capture = false;
-                    self.f_zoom_tapped = false;
-                    self.f_zoom_anchor = None;
+                if self.capture.f_capture {
+                    self.capture.f_capture = false;
+                    self.capture.f_zoom_capture = false;
+                    self.capture.f_zoom_tapped = false;
+                    self.capture.hold_anchor = None;
                 }
-                if self.r_capture {
+                if self.capture.r_capture {
                     // The release snaps a near quarter turn exactly, and it is
                     // the only place that snaps: the drag itself turns freely.
                     // A pivot turn keeps its point on screen through the snap.
                     let before = self.st.angle;
                     self.st.angle = rotate::snap_deg(self.st.angle);
                     keep_pivot(&mut self.st, before, win_w, win_h);
-                    self.r_capture = false;
+                    self.capture.r_capture = false;
                 }
                 {
                     // The accumulated travel is the number a feel report needs:
                     // a 100 px drag that reads 200 says the input source counts
                     // twice, whatever the factor is.
-                    let travel = self.drag_virtual - self.grab_pos;
+                    let travel = self.capture.drag_virtual - self.capture.grab_pos;
                     tracing::debug!(
-                        grab_x = self.grab_pos.x,
-                        grab_y = self.grab_pos.y,
-                        virtual_x = self.drag_virtual.x,
-                        virtual_y = self.drag_virtual.y,
+                        grab_x = self.capture.grab_pos.x,
+                        grab_y = self.capture.grab_pos.y,
+                        virtual_x = self.capture.drag_virtual.x,
+                        virtual_y = self.capture.drag_virtual.y,
                         speed = self.pan_drag_speed,
                         dragged = f_dragged,
                         angle = self.st.angle,
@@ -1836,6 +1932,97 @@ impl Viewer {
                         "hold release"
                     );
                 }
+            }
+            // The right button is the second way into the zoom hold: it
+            // captures the pointer the way `f` does, and the vertical travel
+            // scales the picture at the same rate, around the same anchor.
+            // A left drag that is still down keeps panning beside it, so the
+            // two buttons scale and move the picture in one gesture.
+            // A press joins a running left drag instead of grabbing again: the
+            // grab point stays where the drag began, so the release still puts
+            // the pointer back there.
+            let zoom_pressed = self.input.is_button_pressed(MouseButton::Right);
+            let zoom_released = self.input.is_button_released(MouseButton::Right);
+            if zoom_pressed
+                && !self.capture.f_capture
+                && !self.capture.r_capture
+                && !self.capture.zoom_btn_capture
+            {
+                if !self.capture.pointer_captured {
+                    self.capture.grab_pos = self.input.cursor_position();
+                    self.capture.drag_virtual = self.capture.grab_pos;
+                    grab_pointer(&mut self.input, host);
+                    self.capture.pointer_captured = true;
+                }
+                self.capture.zoom_btn_capture = true;
+                // The anchor is the spot the pointer shows, which a running pan
+                // has already carried away from the grab point.
+                self.capture.hold_anchor = Some(self.capture.drag_virtual);
+                tracing::debug!(
+                    grab_x = self.capture.grab_pos.x,
+                    grab_y = self.capture.grab_pos.y,
+                    anchor_x = self.capture.drag_virtual.x,
+                    anchor_y = self.capture.drag_virtual.y,
+                    "zoom button grab"
+                );
+            }
+            if zoom_released && self.capture.zoom_btn_capture {
+                self.capture.zoom_btn_capture = false;
+                // The anchor belongs to the zoom, and the pan beside it anchors
+                // nowhere.
+                self.capture.hold_anchor = None;
+                tracing::debug!("zoom button release");
+            }
+            // Left-drag pans: the image follows the cursor (grab-style), with
+            // no easing while the pointer drives the pan.
+            // The press grabs the pointer, so the travel is unbounded: the
+            // pointer neither disappears at the screen edge nor blocks there,
+            // and the mouse-up puts it back where the drag began.
+            // A press that lands during a right-button zoom joins that capture
+            // instead of grabbing again, which is what makes the two buttons
+            // one gesture.
+            // The latch is the press, not the button state: a press refused
+            // because `f` or `r` owns the pointer moves nothing, even after
+            // that key lets go.
+            let drag_pressed = self.input.is_button_pressed(MouseButton::Left);
+            let drag_released = self.input.is_button_released(MouseButton::Left);
+            if drag_pressed && !self.capture.f_capture && !self.capture.r_capture {
+                if !self.capture.pointer_captured {
+                    self.capture.grab_pos = self.input.cursor_position();
+                    self.capture.drag_virtual = self.capture.grab_pos;
+                    grab_pointer(&mut self.input, host);
+                    self.capture.pointer_captured = true;
+                    tracing::debug!(
+                        grab_x = self.capture.grab_pos.x,
+                        grab_y = self.capture.grab_pos.y,
+                        "drag grab"
+                    );
+                }
+                self.capture.left_drag = true;
+            }
+            if drag_released {
+                self.capture.left_drag = false;
+                if debug && self.capture.pointer_captured {
+                    let travel = self.capture.drag_virtual - self.capture.grab_pos;
+                    tracing::debug!(
+                        grab_x = self.capture.grab_pos.x,
+                        grab_y = self.capture.grab_pos.y,
+                        virtual_x = self.capture.drag_virtual.x,
+                        virtual_y = self.capture.drag_virtual.y,
+                        speed = self.pan_drag_speed,
+                        pointer_x = self.input.cursor_position().x,
+                        pointer_y = self.input.cursor_position().y,
+                        travel_x = travel.x,
+                        travel_y = travel.y,
+                        "drag release"
+                    );
+                }
+            }
+            // One capture serves every gesture, so it ends on the frame the
+            // last hold lets go: a right-button zoom that ends while the left
+            // button is still down keeps the grab, and the pan runs on.
+            if !self.capture.holds_capture() {
+                self.capture.drop_capture(&mut self.input, host);
             }
             // Auto-repeat: the initial press fires at once (edge from the
             // queue above), and the hold fires at the X server repeat rate
@@ -1995,15 +2182,10 @@ impl Viewer {
             if return_to_grid {
                 // Leaving image view mid-drag: give the pointer back before
                 // the the grid click handling needs a visible cursor.
-                if self.pointer_captured {
-                    release_pointer(&mut self.input, host);
-                    place_pointer(&mut self.input, host, self.grab_pos);
-                    self.pending_restore = Some(self.grab_pos);
-                    self.restore_tries = 0;
-                    self.pointer_captured = false;
-                }
-                self.f_capture = false;
-                self.r_capture = false;
+                // The grid reads no press and no release edge, so every latch
+                // drops here rather than waiting for a release this mode never
+                // sees.
+                self.capture.release_all(&mut self.input, host);
                 // The region belongs to the image view.
                 self.region_drag = None;
                 self.st.selection = None;
@@ -2193,9 +2375,9 @@ impl Viewer {
                 // no leftover distance.
                 self.st.pan += motion.pan;
                 self.st.target_pan += motion.pan;
-                // A held `f` with Shift turns the vertical mouse travel into
-                // the free zoom, so the pointer replaces the wheel with one
-                // continuous rate.
+                // A held `f` with Shift, or the right button, turns the vertical
+                // mouse travel into the free zoom, so the pointer replaces the
+                // wheel with one continuous rate.
                 // Up zooms in and down zooms out.
                 // The capture above keeps the pointer recentering, so the travel
                 // never stops at a screen edge, like the pan drag.
@@ -2206,11 +2388,16 @@ impl Viewer {
                 // holds the scale.
                 // The wheel below still zooms with no Shift.
                 let delta = self.input.pointer_travel();
-                let zoom_drag = self.f_capture && self.f_zoom_capture;
+                let zoom_drag = self.capture.zoom_hold();
                 if zoom_drag {
                     // The grab edge seeds the anchor, and the drift carries it
                     // from frame to frame.
-                    self.st.zoom_anchor = Some(*self.f_zoom_anchor.get_or_insert(self.grab_pos));
+                    self.st.zoom_anchor = Some(
+                        *self
+                            .capture
+                            .hold_anchor
+                            .get_or_insert(self.capture.grab_pos),
+                    );
                     if delta.y != 0.0 {
                         // One e-fold of scale per ZOOM_DRAG_SPAN of travel,
                         // where the span scales with the window.
@@ -2232,7 +2419,7 @@ impl Viewer {
                 // Each frame adds this frame's travel to the current angle, so
                 // a new hold continues from the angle the image shows and a
                 // release keeps it.
-                if self.r_capture {
+                if self.capture.r_capture {
                     // One full turn per ROTATE_DRAG_SPAN of travel, where the
                     // span scales with the window.
                     let span = win_w.max(win_h) * ROTATE_DRAG_SPAN;
@@ -2261,9 +2448,9 @@ impl Viewer {
                     // None falls back to the window center anchor.
                     self.st.zoom_anchor = None;
                 }
-                // The Shift+F drag rides the pointer, so its target moves
-                // every frame: the ease must stay out of its way, like the
-                // wheel step.
+                // A Shift+F or right-button drag rides the pointer, so its
+                // target moves every frame: the ease must stay out of its way,
+                // like the wheel step.
                 let target_scale = self.st.zoom.free_or(fit_scale);
 
                 // The exponential ease only carries a discrete jump (a fit
@@ -2293,75 +2480,38 @@ impl Viewer {
                     );
                     self.st.zoom_anchor = Some(self.input.cursor_position());
                 }
-                // Left-drag pans: the image follows the cursor (grab-style).
-                // No easing while the cursor drives the pan.
+                // A pan rides the captured pointer (the left drag, or a held
+                // `f`), and a zoom hold leaves it alone.
                 // The drag delta is already per-frame, and piling the 50 ms
                 // pan ease on top of the vsync display latency reads as lag
                 // (same-frame input, no interpolation: chart-action 9a5394b
                 // lesson).
-                // The keyboard panning below keeps its glide.
-                // It only makes sense once the dimensions are known.
-                //
-                // Infinite drag: while the button is held the pointer is
-                // captured, so it neither disappears at the screen edge nor
-                // blocks there.
-                // Panning continues with virtual deltas no matter how far
-                // the physical mouse travels.
-                // Mouse-up shows the pointer again at the position where the
-                // drag began.
-                let drag_pressed = self.input.is_button_pressed(MouseButton::Left);
-                let drag_released = self.input.is_button_released(MouseButton::Left);
-                if drag_pressed && !self.pointer_captured && !self.r_capture {
-                    self.grab_pos = self.input.cursor_position();
-                    self.drag_virtual = self.grab_pos;
-                    grab_pointer(&mut self.input, host);
-                    self.pointer_captured = true;
-                    tracing::debug!(
-                        grab_x = self.grab_pos.x,
-                        grab_y = self.grab_pos.y,
-                        "drag grab"
-                    );
-                } else if drag_released
-                    && self.pointer_captured
-                    && !self.f_capture
-                    && !self.r_capture
-                {
-                    if debug {
-                        let travel = self.drag_virtual - self.grab_pos;
-                        tracing::debug!(
-                            grab_x = self.grab_pos.x,
-                            grab_y = self.grab_pos.y,
-                            virtual_x = self.drag_virtual.x,
-                            virtual_y = self.drag_virtual.y,
-                            speed = self.pan_drag_speed,
-                            pointer_x = self.input.cursor_position().x,
-                            pointer_y = self.input.cursor_position().y,
-                            travel_x = travel.x,
-                            travel_y = travel.y,
-                            "drag release"
-                        );
-                    }
-                    release_pointer(&mut self.input, host);
-                    place_pointer(&mut self.input, host, self.grab_pos);
-                    self.pending_restore = Some(self.grab_pos);
-                    self.restore_tries = 0;
-                    self.pointer_captured = false;
-                }
-                // Any captured pointer (left-drag or a held `f`) pans or zooms.
+                // The grab and the release live with the other press edges
+                // above, so a right-button zoom and a left drag share one
+                // capture.
+                // A pan beside a zoom is the one that moves the picture while
+                // it scales: both read this frame's travel.
+                let pan_hold = self.capture.left_pan()
+                    || (self.capture.f_capture && !self.capture.f_zoom_capture);
+                // Any captured pointer (left-drag, a held `f`, or the right
+                // button) pans or zooms.
                 // The virtual cursor tracks the raw travel the same way.
-                // A Shift+F capture zooms instead: it tracks the travel and
-                // leaves the pan alone.
+                // A `Shift+F` hold and the right button zoom instead: they
+                // track the travel and leave the pan alone.
                 // An `r` capture turns the image instead: the travel it needs
                 // is vertical, so the pan stays put.
-                let dragging = self.pointer_captured;
+                let dragging = self.capture.pointer_captured;
                 if dragging {
                     let delta = self.input.pointer_travel();
                     // The virtual cursor follows physical travel 1:1 (debug
                     // crosshair).
-                    self.drag_virtual.x += delta.x;
-                    self.drag_virtual.y += delta.y;
-                    // The pan follows the travel at the run's own factor.
-                    if !self.f_zoom_capture && !self.r_capture {
+                    self.capture.drag_virtual.x += delta.x;
+                    self.capture.drag_virtual.y += delta.y;
+                    // The pan follows the travel at the run's own factor, and a
+                    // zoom hold beside it does not take the vertical axis away:
+                    // a left drag during a right-button zoom both scales and
+                    // moves the picture.
+                    if pan_hold {
                         self.st.target_pan.x += delta.x * self.pan_drag_speed;
                         self.st.target_pan.y += delta.y * self.pan_drag_speed;
                     }
@@ -2375,9 +2525,9 @@ impl Viewer {
                 // put gives
                 //   offset' = anchor - (anchor - offset) * (scale'/scale).
                 //
-                // A continuous zoom (the Shift+F hold) replaces its target
-                // every frame, so there is no ease to follow: the pan is
-                // solved exactly.
+                // A continuous zoom (the `Shift+F` or right-button hold)
+                // replaces its target every frame, so there is no ease to
+                // follow: the pan is solved exactly.
                 // It drifts like the wheel: after each frame anchor step, the
                 // anchor slides a little toward the window center, so the
                 // image point being zoomed into gently recenters.
@@ -2387,7 +2537,7 @@ impl Viewer {
                 // drift.
                 // A zoom hold that starts at the window center needs no drift
                 // either: its anchor already sits there.
-                let continuous_zoom = self.f_capture && self.f_zoom_capture;
+                let continuous_zoom = self.capture.zoom_hold();
                 let scale = self.st.view_scale.unwrap();
                 if matches!(self.st.zoom, ZoomMode::Free(_))
                     && let Some(s_old) = prev_scale
@@ -2439,7 +2589,7 @@ impl Viewer {
                         if continuous_zoom {
                             // The drag anchor carries the drift into the next
                             // frame.
-                            self.f_zoom_anchor = self.st.zoom_anchor;
+                            self.capture.hold_anchor = self.st.zoom_anchor;
                         }
                     }
                     // Ride the pointer along with the drifted image point
@@ -2447,7 +2597,7 @@ impl Viewer {
                     // leaves the cursor wherever it is).
                     // A continuous zoom keeps the pointer captured instead,
                     // so this never runs for it.
-                    if d != Vec2::ZERO && !keyboard_zoom && !self.pointer_captured {
+                    if d != Vec2::ZERO && !keyboard_zoom && !self.capture.pointer_captured {
                         tracing::debug!(anchor_x = ax, anchor_y = ay, "zoom drift anchor");
                         place_pointer(&mut self.input, host, self.st.zoom_anchor.unwrap());
                     }
@@ -2531,7 +2681,7 @@ impl Viewer {
                 let frame = self.st.frame(Vec2::new(win_w, win_h));
                 if v_key
                     && self.region_drag.is_none()
-                    && !self.pointer_captured
+                    && !self.capture.pointer_captured
                     && let Some(frame) = frame
                 {
                     let mouse = dim::window_point(self.input.cursor_position());
@@ -2751,11 +2901,11 @@ impl Viewer {
             // is.
             // The code also draws a ring at the grab point, so a wrong
             // restore is visible.
-            if debug && self.pointer_captured {
-                let vx = self.drag_virtual.x.clamp(0.0, win_w);
-                let vy = self.drag_virtual.y.clamp(0.0, win_h);
+            if debug && self.capture.pointer_captured {
+                let vx = self.capture.drag_virtual.x.clamp(0.0, win_w);
+                let vy = self.capture.drag_virtual.y.clamp(0.0, win_h);
                 r.circle(
-                    Vec2::new(self.grab_pos.x, self.grab_pos.y),
+                    Vec2::new(self.capture.grab_pos.x, self.capture.grab_pos.y),
                     6.0,
                     Color::SKYBLUE,
                 );
@@ -2783,7 +2933,86 @@ impl Viewer {
 
 #[cfg(test)]
 mod tests {
-    use super::{Launch, open_initial};
+    use super::{Capture, Launch, open_initial};
+    use crate::draw::Vec2;
+
+    /// One capture serves every gesture, so a left drag outlives the zoom it
+    /// joined, and the grab ends on the frame the last latch drops.
+    ///
+    /// The release is decided by [`Capture::holds_capture`], which is the one
+    /// place the frame asks whether a gesture still holds the pointer.
+    #[test]
+    fn a_left_drag_outlives_the_zoom_it_joined() {
+        let right = Capture {
+            pointer_captured: true,
+            zoom_btn_capture: true,
+            hold_anchor: Some(Vec2::new(4.0, 9.0)),
+            ..Capture::default()
+        };
+        // The zoom alone holds the capture, and the left drag is not on.
+        assert!(right.holds_capture());
+        assert!(!right.left_pan());
+
+        // The left press joins the capture, so the zoom's release leaves it to
+        // the drag.
+        let joined = Capture {
+            left_drag: true,
+            ..right
+        };
+        assert!(joined.left_pan());
+        let zoom_over = Capture {
+            zoom_btn_capture: false,
+            ..joined
+        };
+        assert!(
+            zoom_over.holds_capture(),
+            "a left drag keeps the grab a right-button zoom ended"
+        );
+
+        // Both latches drop, and giving the capture back is the frame's call.
+        let let_go = Capture {
+            left_drag: false,
+            ..zoom_over
+        };
+        assert!(!let_go.holds_capture());
+    }
+
+    /// The zoom hold has two sources, and the pan latch is not one of them.
+    ///
+    /// A hold that `f` or `r` owns keeps the capture on its own: a left press
+    /// that lands then is refused, so no pan latch exists to outlive the key.
+    #[test]
+    fn the_zoom_hold_reads_the_key_and_the_button() {
+        let f_pan = Capture {
+            pointer_captured: true,
+            f_capture: true,
+            ..Capture::default()
+        };
+        assert!(!f_pan.zoom_hold(), "a plain `f` hold pans");
+        assert!(f_pan.holds_capture());
+        assert!(!f_pan.left_pan(), "`f` keeps the pan latch out of it");
+
+        let f_zoom = Capture {
+            f_zoom_capture: true,
+            ..f_pan
+        };
+        assert!(f_zoom.zoom_hold());
+        let right = Capture {
+            zoom_btn_capture: true,
+            ..Capture::default()
+        };
+        assert!(right.zoom_hold(), "the button zooms with no key behind it");
+        assert!(!Capture::default().zoom_hold(), "no hold, no zoom");
+
+        // `r` turns the image, so it holds the capture without a pan.
+        let r_hold = Capture {
+            pointer_captured: true,
+            r_capture: true,
+            ..Capture::default()
+        };
+        assert!(r_hold.holds_capture());
+        assert!(!r_hold.left_pan());
+    }
 
     /// A pane that draws no grid opens the first entry of a directory.
     #[test]

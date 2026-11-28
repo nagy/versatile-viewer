@@ -117,14 +117,17 @@ pub const PAN_RATE: f32 = 0.9;
 /// The ramp scales the rate down near the press and the release.
 pub const ZOOM_RATE: f32 = 1.65;
 
-/// The vertical travel that a held Shift+F needs to zoom by one natural-log
-/// e-fold, in window long sides.
+/// The vertical travel that a zoom hold needs for one natural-log e-fold, in
+/// window long sides.
+///
+/// The hold is `Shift+F` or the right button, and both read this span.
 /// Up (a negative y delta) zooms in, and down zooms out.
 /// 1.5 suits fine aiming: a screen height of travel zooms one e-fold (2.7x),
 /// so a small drag is a small change.
 pub const ZOOM_DRAG_SPAN: f32 = 1.5;
 
-/// A multiplier on the Shift+F zoom rate alone.
+/// A multiplier on the zoom hold's rate alone, `Shift+F` and the right button
+/// alike.
 /// 8.0 makes a hold eight times as fast as the raw travel suggests.
 pub const ZOOM_DRAG_SPEED: f32 = 8.0;
 
